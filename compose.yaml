@@ -6,9 +6,12 @@ name: yamaha-observatory-trial
 #   testbed  with prod: simulated devices (snmpsim SNMPv3 + syslog sender) to try the prod path without hardware
 #            (docker compose --env-file testbed/testbed.env up -d)
 #   capture  reserved for P3 (packet capture); no services yet
-# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy) run in every profile.
+# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay) run in
+# every profile.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
-# Tools: docker compose run --rm tools <init|check|targets|backup|restore|test-syslog|help>
+# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|help>
+# Notifications: alerting/receivers.yaml (destinations, routes per severity) + secrets in .env -> the setup step writes the
+# Alertmanager config and the notify-relay config (0600) into the `generated` volume. Demo: only the local demo sink.
 #
 # Images are pinned by tag + digest (multi-arch index: linux/amd64 and linux/arm64 both present).
 # Resource limits default to a Raspberry Pi 4 (4 GB); override in .env.
@@ -43,6 +46,24 @@ x-tools-env: &tools-env
   OBS_GRAFANA_ANON_ON_LAN: ${OBS_GRAFANA_ANON_ON_LAN:-0}
   TZ: ${TZ:-Asia/Tokyo}
 
+# Notification destinations' settings and secrets: only for the steps that generate the relay config (prod-setup, tools),
+# not for the long-running tools services.
+x-notify-env: &notify-env
+  OBS_RECEIVERS: ${OBS_RECEIVERS:-alerting/receivers.yaml}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_TLS: ${SMTP_TLS:-starttls}
+  SMTP_TLS_VERIFY: ${SMTP_TLS_VERIFY:-1}
+  SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+  DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+  LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+  LINE_API_URL: ${LINE_API_URL:-}
+  WEBHOOK_URL: ${WEBHOOK_URL:-}
+  WEBHOOK_BEARER_TOKEN: ${WEBHOOK_BEARER_TOKEN:-}
+
 # One image for every tools-based service. Only setup-check (in every profile) and tools (`docker compose run`) build
 # it: several services building the same tag in one `up --build` race ("image already exists"); the others use the
 # image setup-check has just built and never try to pull it.
@@ -72,6 +93,8 @@ services:
     <<: *tools
     profiles: [prod]
     command: [targets]
+    environment:
+      <<: [*tools-env, *notify-env]
     restart: "no"
 
   # every profile: fails `up` with a clear message when no profile (so no setup) was chosen
@@ -121,12 +144,15 @@ services:
     build: ./tools
     pull_policy: build
     profiles: [tools]
+    environment:
+      <<: [*tools-env, *notify-env]
     volumes:
       - ./:/work
       - generated:/generated
       - prometheus-data:/vol/prometheus
       - loki-data:/vol/loki
       - grafana-data:/vol/grafana
+      - alertmanager-data:/vol/alertmanager
     restart: "no"
 
   # ---- demo ---------------------------------------------------------------------------------------
@@ -217,6 +243,22 @@ services:
     healthcheck: *testbed-health
     mem_limit: 160m
     cpus: 0.5
+
+  # mock notification receivers (fake SMTP / Slack / Discord / LINE / webhook): nothing leaves the compose network.
+  # testbed/receivers.yaml + the dummy secrets in testbed/testbed.env point every receiver here.
+  notifymock:
+    <<: *ops
+    profiles: [testbed]
+    build:
+      context: ./testbed
+    command: [python, -u, notifymock.py]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 96m
+    cpus: 0.25
 
   # ---- shared -------------------------------------------------------------------------------------
   prometheus:
@@ -347,6 +389,12 @@ services:
     build:
       context: ./mask-api
       additional_contexts: *python-base
+    environment:
+      # silence / ACK writes (the only writes, /am/...) are allowed while the screens are on 127.0.0.1 only
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      # 1 = also allow them for X-Obs-Role operator / admin, set by an authentication layer in the proxy (caddy/Caddyfile)
+      OBS_OPS_TRUST_ROLE: ${OBS_OPS_TRUST_ROLE:-0}
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}  # its host is one of the origins allowed to write
     depends_on: [prometheus, loki]
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
@@ -355,6 +403,49 @@ services:
       retries: 3
     mem_limit: ${MASK_API_MEM:-128m}
     cpus: ${MASK_API_CPUS:-0.5}
+
+  # Alertmanager: every Prometheus alert goes through it (routes per severity, repeats, silences / ACK). Not published:
+  # reachable only on the internal network; the screens read it masked and write silences through mask-api (/am/).
+  alertmanager:
+    <<: *ops
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    command:
+      - --config.file=/etc/obs-generated/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=${ALERTMANAGER_RETENTION:-168h}  # silences and the notification log (an ACK lasts at most 7 d)
+      - --cluster.listen-address=  # single instance: no HA gossip port
+      - --web.external-url=${OBS_PUBLIC_URL:-http://127.0.0.1:8080}
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - alertmanager-data:/alertmanager
+    depends_on: *setup-done
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: ${ALERTMANAGER_MEM:-64m}
+    cpus: ${ALERTMANAGER_CPUS:-0.25}
+
+  # Alertmanager's webhook -> e-mail / Slack / Discord / LINE / webhook (or the demo sink); records every attempt in
+  # Loki {job="notify"}. Internal network only. Secrets: the generated relay.json (0600) only.
+  notify-relay:
+    <<: *ops
+    build:
+      context: ./notify-relay
+      additional_contexts: *python-base
+    volumes:
+      - generated:/etc/obs-generated:ro
+    depends_on:
+      <<: *setup-done
+      loki: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9095/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: ${NOTIFY_RELAY_MEM:-64m}
+    cpus: ${NOTIFY_RELAY_CPUS:-0.25}
 
   command-center:
     <<: *ops
@@ -376,6 +467,7 @@ services:
     image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
     environment:
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -383,6 +475,11 @@ services:
           127.*|localhost) ;;
           *) echo "WARNING: OBS_BIND=$$OBS_BIND - command-center and Grafana are exposed on the LAN WITHOUT authentication (認証なしで LAN 公開中)" >&2 ;;
         esac
+        # Host allowlist of the screens (DNS rebinding, caddy/Caddyfile): loopback names, OBS_PUBLIC_URL's host, the bind address
+        hosts="127.0.0.1 localhost [::1] $$(printf '%s' "$$OBS_PUBLIC_URL" | sed -E 's#^[a-zA-Z]+://##; s#^(\[[^]/]*\]).*#\1#; s#^([^[][^:/]*)[:/].*#\1#')"
+        case "$$OBS_BIND" in 0.0.0.0|127.*|localhost|'') ;; *) hosts="$$hosts $$OBS_BIND" ;; esac
+        export OBS_SITES="$$(for h in $$hosts; do echo "$$h"; done | awk 'NF && !seen[tolower($$0)]++ { printf "%shttp://%s:80", (n++ ? ", " : ""), $$0 }')"
+        echo "screens answer for: $$OBS_SITES" >&2
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -392,7 +489,7 @@ services:
       - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:80"
       - "127.0.0.1:${PROM_LOCAL_PORT:-9090}:9090"
       - "127.0.0.1:${GRAFANA_LOCAL_PORT:-3000}:3000"
-    depends_on: [command-center, grafana]
+    depends_on: [command-center, grafana, mask-api]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 30s
@@ -405,5 +502,6 @@ volumes:
   prometheus-data:
   loki-data:
   grafana-data:
+  alertmanager-data:
   caddy-data:
   generated:

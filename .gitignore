@@ -5,3 +5,6 @@
 inventory/*
 !inventory/devices.example.yaml
 backups/
+# real notification destinations (only the example is tracked)
+alerting/receivers.yaml
+alerting/receivers.yaml.bak-*

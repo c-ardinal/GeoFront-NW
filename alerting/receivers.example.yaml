@@ -1,0 +1,46 @@
+# 通知先の設定例。alerting/receivers.yaml にコピーして編集する (実ファイルは git 管理外)。
+#   cp alerting/receivers.example.yaml alerting/receivers.yaml
+#   docker compose run --rm tools targets       (設定を生成し Alertmanager に読み込ませる)
+#   docker compose run --rm tools notify-test   (各通知先にテスト送信して応答を表で確認)
+#
+# 秘密値 (Webhook URL・トークン・SMTP パスワード) はここに書かず .env に置く (.env.example の「通知」の節)。
+# 秘密値は種類ごとに 1 組: メール受信者を複数作る場合は同じ SMTP サーバーを使い、宛先 (to) だけ変える。
+# 通知文は日本語。機器名・対象・値・開始時刻 (JST)・画面へのリンク (OBS_PUBLIC_URL) を含み、IP / MAC は伏せ字。
+# 復旧 (resolved) も通知する。demo profile ではこのファイルは使わず、外部へ送らないデモ用受信先に記録するだけ。
+
+receivers:
+  # メール (SMTP)。.env: SMTP_HOST / SMTP_PORT / SMTP_FROM / SMTP_USER / SMTP_PASSWORD / SMTP_TLS (starttls | tls | none)
+  - name: mail
+    type: email
+    to: [admin@example.com]
+
+  # Slack (Incoming Webhook)。.env: SLACK_WEBHOOK_URL
+  - name: slack
+    type: slack
+
+  # Discord (チャンネルの Webhook)。.env: DISCORD_WEBHOOK_URL
+  - name: discord
+    type: discord
+
+  # LINE (Messaging API の push メッセージ。LINE Notify は 2025 年に終了済み)。
+  # .env: LINE_CHANNEL_ACCESS_TOKEN (チャネルアクセストークン・長期)。to: 送り先のユーザー ID / グループ ID
+  # (公式アカウントを友だち追加 / グループに招待してから。ID は LINE Developers コンソールか webhook で確認)
+  - name: line
+    type: line
+    to: U00000000000000000000000000000000
+
+  # 汎用 Webhook (JSON を POST。status / title / text / alerts)。.env: WEBHOOK_URL、任意で WEBHOOK_BEARER_TOKEN
+  - name: hook
+    type: webhook
+
+# 重大度ごとの送り先と再通知の間隔 (解消するまで、この間隔で同じ通知を繰り返す)。
+# 書かない重大度は既定: critical / warning はすべての通知先、info は通知しない。
+routes:
+  critical: {receivers: [mail, line], repeat: 1h}
+  warning: {receivers: [slack, discord], repeat: 4h}
+  info: {receivers: [], repeat: 24h}
+
+# まとめ方 (任意): 最初の通知まで待つ時間 / 同じまとまりに新しいアラートが加わったときの間隔
+timing:
+  group_wait: 30s
+  group_interval: 5m

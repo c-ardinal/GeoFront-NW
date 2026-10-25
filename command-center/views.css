@@ -150,8 +150,27 @@
 :is(#modal, #drawer) .vw-stale .tile { background: transparent; border-left-color: var(--text-2); border-style: dashed; }
 :is(#modal, #drawer) .v-h .view-stale[hidden] { display: none; }
 
+/* ---- alert notification: ACK / silence controls (drawer) and the silence list (alerts modal) ---- */
+:is(#modal, #drawer) .ops { margin: var(--s2) 0; }
+:is(#modal, #drawer) .ops-btn { min-height: 32px; padding: 2px var(--s3); font-size: var(--fs); }
+:is(#modal, #drawer) .ops-btn:disabled { border-style: dashed; }
+:is(#modal, #drawer) .ops input[type="text"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); min-width: 180px; }
+:is(#modal, #drawer) .ops :is(select, input):disabled { color: var(--text-2); border-style: dashed; }
+:is(#modal, #drawer) .ops-note { color: var(--text-2); font-size: var(--fs-s); margin: var(--s1) 0; overflow-wrap: anywhere; }
+:is(#modal, #drawer) .ops-note[hidden], :is(#modal, #drawer) .ops-status:empty { display: none; }
+:is(#modal, #drawer) .sil-list { display: flex; flex-direction: column; margin-top: var(--s2); }
+:is(#modal, #drawer) .sil-row { display: grid; grid-template-columns: var(--st) minmax(0, 1fr) auto; column-gap: var(--s2); row-gap: var(--s1); align-items: center;
+  padding: var(--s1) 0; border-bottom: 1px solid var(--track); }
+:is(#modal, #drawer) .sil-m { font-family: var(--mono); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .sil-sub { color: var(--text-2); font-size: var(--fs-s); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .sil-btns { display: flex; flex-wrap: wrap; gap: var(--s1); justify-content: end; }
+:is(#modal, #drawer) .nt-msg-wrap[hidden] { display: none; }
+:is(#modal, #drawer) .nt-msg { font: var(--fs-s)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+  background: var(--bg); border: 1px solid var(--frame); padding: var(--s2) var(--s3); margin: 0 0 var(--s2); }
+
 /* ---- touch widths (tablet / phone, below the wallboard tier): every control in a view is a >= 44 x 44 px target ---- */
 @media (max-width: 1279px) {
+  :is(#modal, #drawer) :is(.ops-btn, .ops select, .ops input[type="text"]) { min-height: 44px; min-width: 44px; }
   :is(#modal, #drawer) :is(.seg-btn, .link-btn, .th-btn, .cell-btn, .fld-inline select, .filters select, .filters input[type="search"]) {
     min-height: 44px; min-width: 44px;
   }
@@ -165,6 +184,9 @@
 
 /* ---- narrow widths (drawer as bottom sheet / full-screen modal) ---- */
 @media (max-width: 767px) {
+  :is(#modal, #drawer) .sil-row { grid-template-columns: var(--st) minmax(0, 1fr); }
+  :is(#modal, #drawer) .sil-btns { grid-column: 1 / -1; justify-content: start; }
+  :is(#modal, #drawer) .ops input[type="text"] { min-width: 0; width: 100%; }
   :is(#modal, #drawer) .tiles, #drawer .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   :is(#modal, #drawer) .tile-v { font-size: 18px; }
   :is(#modal, #drawer) .rank, #drawer .rank { --rank-l: minmax(80px, 38%); }

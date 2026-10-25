@@ -7,6 +7,7 @@ import {
   section, kv, linkList, chartBlock, drawRange, fetchRange, mbps, lv, putIn, tiles, vsAvg, rankBars, keyLegend, timeline, alertLanes, alertKey,
   ALERT_KEYS, stackCols, SEV_KEYS, SEV_BAD, sevBuckets, multiples, seriesBy, maxOf, ipTokens, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
 } from './views-common.js';
+import { alertOpsSection } from './alerting.js';
 
 const HOUR = 3600;
 const nsOf = (ms) => BigInt(Math.round(ms)) * 1000000n;
@@ -237,15 +238,16 @@ export function alertView(alert0) {
   return {
     title: `Alert ${alert0.labels.alertname}`, src: 'both',
     mount(body) {
-      s = { sum: el('div'), tl: section('Timeline', 'firing / pending spans of this alert'), labels: section('Labels'), ann: section('Annotations'), rule: section('Rule', 'from /api/v1/rules'),
-        rel: section('Related'), logs: section('Syslog around activation', '±5 min') };
+      s = { sum: el('div'), ops: alertOpsSection(), tl: section('Timeline', 'firing / pending spans of this alert'), labels: section('Labels'), ann: section('Annotations'),
+        rule: section('Rule', 'from /api/v1/rules'), rel: section('Related'), logs: section('Syslog around activation', '±5 min') };
       s.tlBox = el('div');
       s.tl.body.append(s.tlBox, keyLegend(ALERT_KEYS));
-      body.append(s.sum, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
+      body.append(s.sum, s.ops.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
     },
     async update(ctx) {
       const cur = ctx.snap.alerts.find((a) => alertKey(a.labels) === id);
       const a = cur || alert0;
+      s.ops.update(a, cur?.state === 'firing');
       const active = Date.parse(a.activeAt);
       const [kind, sevText] = sevKind(a.labels.severity);
       putIn(s.sum, tiles([

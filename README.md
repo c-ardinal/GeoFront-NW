@@ -24,7 +24,9 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 |---|---|---|---|
 | proxy | caddy:2.11.7-alpine | 前段のリバースプロキシ。command-center を `/`、Grafana を `/grafana/` で配信。認証の差し込み口 | `OBS_BIND:OBS_PORT` (既定 127.0.0.1:8080)、127.0.0.1:9090 (Prometheus 読み取り専用)、127.0.0.1:3000 (旧 Grafana URL の転送) |
 | command-center | nginx:1.29.2-alpine | 自作の司令室画面 (静的) と mask-api への中継 | なし (proxy 経由) |
-| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki の応答中の IP/MAC をサーバ側で伏せる | なし |
+| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki/Alertmanager の応答中の IP/MAC をサーバ側で伏せる。書き込みは抑止 (silence) の作成・延長・解除だけ (許可リスト) | なし |
+| alertmanager | prom/alertmanager:v0.34.1 | Prometheus の全アラートの通知: 重大度ごとの送り先と再通知、復旧通知、抑止 (silence) / 確認 (ACK) | なし |
+| notify-relay | python:3.12-slim (自作, 標準ライブラリのみ) | Alertmanager から受けて、日本語・伏せ字の通知文をメール / Slack / Discord / LINE / Webhook に送り、結果を Loki に記録。ACK の自動解除 | なし |
 | prometheus | prom/prometheus:v3.6.0 | SNMP/フロー/自己監視のスクレイプ (15s)、アラートルール | なし (proxy の :9090 経由で読み取りのみ) |
 | loki | grafana/loki:3.5.5 | syslog 保存 (single binary, filesystem, tsdb v13) | なし |
 | alloy | grafana/alloy:v1.21.2 | syslog UDP/TCP 514 (raw 受信 + 解析) → Loki | `SYSLOG_BIND:SYSLOG_PORT` (既定 127.0.0.1:514、UDP/TCP) |
@@ -32,6 +34,7 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 | demo-gen (`demo`) | python:3.12-slim (自作) | snmp_exporter 互換 `/snmp`、フロー `/flows`、RFC3164 syslog 送信、異常注入 | 127.0.0.1:9116 |
 | snmp-exporter (`prod`) | prom/snmp-exporter:v0.30.1 | 実機への SNMP (IF-MIB ifTable/ifXTable、SNMPv2-MIB system)。SNMPv3 authPriv 既定 | なし |
 | testbed-rtx / testbed-wlx (`testbed`) | python:3.12-slim + snmpsim (自作) | 疑似実機。SNMPv3 応答と YAMAHA 形式 syslog の送信を同じアドレスから | なし |
+| notifymock (`testbed`) | testbed イメージ | 通知先のモック (SMTP + STARTTLS/TLS、Slack / Discord / LINE / Webhook の HTTP)。受けた内容を記録するだけ | なし |
 | demo-setup / prod-setup | tools (自作) | 起動時に 1 回だけ動き、profile に合った scrape 対象を生成して終了 | なし |
 | tools | python:3.12-slim + PyYAML (自作) | `docker compose run --rm tools <コマンド>` の初期設定・確認・バックアップ | なし |
 
@@ -199,6 +202,7 @@ Alloy は syslog を raw で受け (PRI から重要度・facility だけを取�
 - Grafana が作る絶対 URL (共有リンク・`/grafana/goto/...` など) は `.env` の `OBS_PUBLIC_URL` (既定 `http://127.0.0.1:8080`) を元にします。LAN 公開するときは LAN から開く URL にしてください (`tools init` は `--bind` と `--port` から作り、`0.0.0.0` のときは尋ねます。非対話は `--public-url`)。
 - 台帳の機器名 `unknown` は使えません (台帳に無い syslog 送信元の host に使う予約語)。`SYSLOG_DROP_UNKNOWN=1` で捨てるのは「台帳との対応付けが無かった行」で、ラベルの値では判断しません。
 - 既定は 127.0.0.1 のみ。`.env` の `OBS_BIND` を LAN 側の IP (または `0.0.0.0`) にすると、proxy が command-center と Grafana を LAN に公開します。このとき **認証はありません**。proxy の起動ログに `WARNING: ... WITHOUT authentication (認証なしで LAN 公開中)` を出し、command-center の上部バーに `認証なしで LAN 公開中` (幅が足りないときは `無認証 LAN`) を常に表示します。判定は proxy が返す `/obs/exposure.json` によります (127.x / localhost 以外なら表示)。答えが無いときは `/obs/config.json` に入っている OBS_BIND を使い、どちらも答えないときは前回の値でも 127.x なら信用せず `LAN 公開: 不明` と表示します (前回が LAN なら LAN と表示)。どちらも 60 秒ごとに取り直すので、後から答えが戻ったり OBS_BIND を変えたりしても表示が追従します。
+- 画面が答えるホスト名は決まっています (DNS リバインディング対策): `127.0.0.1` / `localhost` / `[::1]`、`OBS_PUBLIC_URL` のホスト、LAN 公開時の `OBS_BIND` のアドレスだけです (proxy の起動ログに一覧)。それ以外の Host で来た要求 (例: 攻撃者の名前を 127.0.0.1 に向けたページ) は、画面・伏せ字済みのデータ・操作のどれも返さず 421 になります。127.0.0.1:9090 (Prometheus) / :3000 も 127.0.0.1 / localhost / [::1] だけです。LAN からは `OBS_PUBLIC_URL` の URL で開いてください (`OBS_BIND=0.0.0.0` のときは特に)。
 - Grafana は生の値 (IP / MAC を伏せない) を表示するため、LAN 公開時 (`OBS_BIND` が 127.x 以外) は匿名 Viewer を切り、ログインを必須にします (起動ログに `Grafana anonymous access disabled`)。管理者パスワードは `.env` の `GF_ADMIN_PASSWORD` で、`tools init` は既定値 (空 / admin / change-me) を受け付けず、`tools check` も LAN 公開で既定値なら NG にします (Grafana がこの値を使うのは初回起動時だけ。以降は Grafana の画面で変更)。どうしても LAN でログインなしにしたい場合だけ `OBS_GRAFANA_ANON_ON_LAN=1` (起動ログと check に警告)。command-center (伏せ字あり) はログインなしのままです。
 - Grafana の管理者パスワードの確認: `GF_ADMIN_PASSWORD` は Grafana が最初にデータベースを作るときにしか使われないため、デモで作られた `grafana-data` ボリュームは admin/admin (または change-me) のままになります。そこで常駐の `grafana-guard` (tools イメージ) が `OBS_GRAFANA_GUARD_INTERVAL` 秒 (既定 60) ごとに `grafana.db` の一貫したコピー (SQLite の backup API、元は読み取り専用) を取り、すべてのサーバー管理者 (`is_admin`。名前が admin でなくてもよい) と admin という名前のユーザーについて、保存されたパスワードのハッシュ (Grafana 12.2 の方式: PBKDF2-HMAC-SHA256・10000 回・50 バイト・ユーザーごとの salt) を既定値 (admin / change-me / 空) と比べます。ログインは試さないので、ログイン失敗の記録も Grafana のアカウントロックも起きません。LAN 公開時の `/grafana/` は、proxy が毎回 grafana-guard (内部ネットワークのみ、ホストには出さない) に問い合わせ (Caddy の forward_auth)、「直近の確認が成功で、しかも 2 間隔以内」のときだけ通します。確認の成功 = 「データベースを読めて、サーバー管理者が 1 人以上いて、形式が想定どおりで、どの管理者も既定値ではない」です。それ以外 (既定値の管理者がいる、読めない、壊れている、形式が違う) は 403 で閉じ、開いた後でも次の確認 (最長 1 間隔) で閉じます。grafana-guard が止まった・固まった・応答しない場合も、proxy は 2 秒で諦めて通しません (502 / 504)。確認が 2 間隔より古くなった場合も 403 です。理由は `docker compose logs grafana-guard` と check に出し、LAN 公開を閉じている間は grafana-guard が unhealthy になります (127.0.0.1 公開のときは閉じず、check で注意)。ローカルのパスワードを持たない管理者 (OAuth / LDAP / 認証プロキシで作られ、password も salt も空) は、パスワードでログインできないので既定値には数えません。Grafana の画面で変えたパスワードは `.env` の値と違っても問題ありません (既定値でなければ開きます)。既定値のときは `docker compose run --rm tools grafana-reset-admin` (明示的に実行したときだけ、既定値と分かった管理者ごとに、その既定値で 1 回だけログインし、Grafana の API で `.env` の値に変えます。受け付けられなかった管理者には手での変更方法を表示します)。admin は `docker compose exec grafana grafana cli admin reset-admin-password '<値>'` でも変えられます。`tools init` は既定値の管理者がいれば名前を挙げて変更を提案し (非対話は `--reset-grafana-admin`)、`tools check` と `tools targets` も同じハッシュ確認を使います。
 - 内部ネットワークについて (SEC-03 で扱う): Prometheus の admin API・`/-/reload` は compose の内部ネットワーク上のどのコンテナからも認証なしで呼べます (ホストや LAN には出していません)。Grafana は command-center と同じオリジン (`/grafana/`) で配信されます (以前は別ポート)。command-center は静的な画面で CSP も厳しくしていますが、分離の度合いは下がっています。
@@ -211,12 +215,12 @@ docker compose run --rm tools backup                 # backups/obs-backup-<日�
 docker compose run --rm tools backup --include-env   # .env (秘密値) も含める。取り扱い注意
 ```
 
-1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、機器台帳、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
+1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
 
 ```sh
-docker compose stop prometheus loki grafana
+docker compose stop prometheus loki grafana alertmanager
 docker compose run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz        # 確認あり (--yes で省略)
-docker compose run --rm tools restore backups/... --with-config                         # 機器台帳 (と含まれていれば .env) も戻す
+docker compose run --rm tools restore backups/... --with-config                         # 機器台帳・通知先 (と含まれていれば .env) も戻す
 docker compose up -d
 ```
 
@@ -238,6 +242,44 @@ docker compose run --rm tools check
 
 イメージを上げるときは、`compose.yaml` のタグと digest を一緒に変え、linux/amd64 と linux/arm64 の両方があることを確かめます:
 `docker buildx imagetools inspect <image>:<tag>` (Digest と、Manifests の Platform に linux/amd64・linux/arm64 があること)。
+
+## アラート通知 (P2)
+
+Prometheus のアラートはすべて Alertmanager に送られ、Alertmanager が重大度 (critical / warning / info) ごとの送り先・再通知・復旧通知・抑止を受け持ちます。実際の送信は notify-relay が行い、通知文は日本語で、機器名・対象 (ifName)・値・開始時刻 (JST)・画面へのリンク (`OBS_PUBLIC_URL/?open=alerts`、開くと警報一覧) を含み、IP / MAC は mask-api と同じ規則で伏せます (例 `192.168.100.x`、`00:a0:de:xx:xx:xx`)。復旧 (resolved) も通知します。
+
+- **既定はどこにも送りません。** 通知先は `alerting/receivers.yaml` (git 管理外。書式は `alerting/receivers.example.yaml`) に書き、秘密値 (Webhook URL・トークン・SMTP パスワード) は `.env` だけに置きます。setup (prod-setup / `tools targets`) がこの 2 つから Alertmanager の設定 (秘密値なし) と notify-relay の設定 (秘密値あり、`generated` ボリュームに権限 600) を作ります。ログに秘密値は出しません。
+- 通知先の種類: メール (SMTP。`SMTP_TLS=starttls` / `tls` / `none`)、Slack (Incoming Webhook)、Discord (Webhook)、LINE (Messaging API の push。LINE Notify は 2025 年に終了済みのため使いません。チャネルアクセストークンを `.env`、送り先のユーザー ID / グループ ID を receivers.yaml に)、汎用 Webhook (JSON を POST。任意で Bearer トークン)。秘密値は種類ごとに 1 組です (メールの宛先は 1 件に複数書けます)。
+- 重大度ごとの送り先と再通知の間隔は `routes:` に書きます。書かない重大度は既定で critical / warning がすべての通知先、info は通知しません。間隔は解消するまで繰り返す間隔です (例 critical 1h)。
+- demo profile では receivers.yaml を使わず、外部へ送らない「デモ用受信先」(`demo-sink`) に記録するだけです。DEMO_AUTO_FAULTS の障害で、記録 (Loki `{job="notify"}`) と画面の「通知済」が見えます。 警報の詳細には、送られたはずの通知文 (伏せ字済み) も表示します。
+
+```sh
+cp alerting/receivers.example.yaml alerting/receivers.yaml   # 編集し、秘密値は .env へ (または tools init の対話で作る)
+docker compose run --rm tools targets       # 設定を生成し Alertmanager に読み込ませる (docker compose up -d でも生成)
+docker compose run --rm tools notify-test   # 各通知先にテスト送信 (Alertmanager 経由)。結果と応答 (HTTP / SMTP) を表で出す
+docker compose run --rm tools notify-test --receiver mail   # 1 つだけ
+docker compose run --rm tools check         # 通知先の設定の検証、Alertmanager が生成した設定で動いているか、Prometheus からの送信
+```
+
+画面 (command-center):
+
+- 警報パネルの各行に通知状態の欄 (幅固定): `通知済` (今回の発報について、今の経路の送り先すべてに届いた) / `一部未確認` (まだ記録の無い送り先がある。詳細にその名前) / `通知失敗` (1 つでも失敗、またはメールの一部の宛先が拒否。詳細に「mail OK / slack HTTP 403」のように送り先ごとの結果) / `未通知` (まとめ待ち) / `通知なし` (その重大度は通知しない設定) / `抑止中` / `確認済` / `不明` (Alertmanager か通知の記録に接続できない) / `履歴上限` (記録が上限 5000 件を超え、古い記録を読んでいない)。同じ警報が一度解消して再発した場合は、再発後の通知だけを数えます。大きい画面では詳細行に次回の再通知時刻 (今の経路の送り先について、最後に届いた時刻 + 再通知間隔) も出ます。送り先が無くなった警報は履歴だけを表示し、次回時刻は出しません。
+- メールは宛先ごとに結果を見ます。一部の宛先が拒否された場合は残りの宛先に送り、拒否された宛先を記録します (再送はしない: 届いた宛先に二重に届くため)。
+- 警報の詳細 (ドロワー) の「Notification & actions」: 通知状態・最後に送った時刻と通知先・次回の再通知・抑止 / 確認の期限と、操作 `確認 (ACK)` (その警報の再通知を解消まで止める) / `抑止する` (この警報・この機器のすべて・この警報名のすべて × 1h / 4h / 24h / 7d) / `抑止を解除`。
+- 警報一覧 (モーダル) に通知状態の列と「Silences & ACK」: 一覧・延長 (+1 h / +24 h)・解除、新しい抑止の作成 (機器か警報名のどちらかは必須)。
+- ACK は Alertmanager の silence です。作成者は `command-center (<操作者>)`、コメントは `ACK by <操作者>` で始まります (操作者は認証層の利用者名 `X-Obs-User`。`OBS_OPS_TRUST_ROLE=1` のときだけ信用し、それ以外は `local`)。期限は 24 時間 (上限 7 日。延長しても開始から 7 日まで)。警報が解消すると notify-relay が自動で解除するので「解消まで」になり、解除後に復旧通知が送られます。自動解除は、Alertmanager の起動から 150 秒 (Prometheus の再送 1 分 × 2 + 最長の `for:` 30 秒。`RELAY_REAP_MIN_UPTIME_S`) 経ってから、しかも 1 分ごとの確認で 3 回続けて一致する警報が無かったときだけです (Alertmanager の再起動直後に ACK が消えないように)。確認済は検出 (firing) とは別に表示し、警報自体は発報中のまま残ります。
+
+抑止・確認の書き込み (これだけが書き込み):
+
+- **127.0.0.1 公開のときだけ有効**です。LAN 公開 (`OBS_BIND` が 127.x 以外) では proxy と mask-api の両方が拒否し、画面のボタンは理由付きで無効になります (認証が無いため)。将来の認証層が `X-Obs-Role` に operator / admin を入れる構成では、`OBS_OPS_TRUST_ROLE=1` と Caddyfile の `@amLanWrite` の置き換えで開けられます。
+- 許可リスト: silence の作成・延長・解除だけ (`POST /am/api/v2/silences`、`DELETE /am/api/v2/silence/<id>`)。一致条件は alertname / instance / ifName / severity の等号だけ (正規表現・否定は不可、alertname か instance は必須)、期間は 7 日まで、コメントは 200 文字まで、作成者は常に `command-center`。延長・解除は command-center が作ったものだけです。
+- CSRF 対策: 同一オリジン (Origin が上の許可ホストで、転送元ホストと一致。`Sec-Fetch-Site`) と独自ヘッダ `X-Obs-Csrf: 1`、`Content-Type: application/json` が必須。書き込みは 1 分 30 件まで。
+- 読み取り (`GET /am/api/v2/alerts`、`/am/api/v2/silences`、`/am/ops`) は他と同じく伏せ字付きです。Alertmanager 自体はホストにも LAN にも公開しません。
+
+送信の再試行: 宛先が 429 / 5xx / 応答なし (タイムアウト・接続できない) のときは Alertmanager に失敗を返し、Alertmanager が再送します (`Retry-After` が 10 秒以内なら notify-relay がその場で 1 回だけ待って再送)。3xx (転送は追わない: 認証ヘッダを他へ送らない)・その他の 4xx・SMTP の 5xx は再送しません。LINE には `X-Line-Retry-Key` を付け、同じ通知の再送が二重に届かないようにします。notify-relay は専用の uid (10095) で動き、秘密値の入った relay.json はその uid だけが読めます (同じボリュームを読む Prometheus / Alertmanager からは読めません)。画面の「通知済」は notify-relay の記録 (Loki、最大 7 日 + 1 時間・新しい 5000 件まで、1 分ごとに読み直し) によります。記録が読めないときは「通知済」や次回時刻を出さず `不明` にします (抑止・確認の状態は Alertmanager から分かるので表示します)。
+
+testbed (`docker compose --env-file testbed/testbed.env up -d --build`) では `testbed/receivers.yaml` の 5 種類の通知先がすべて `notifymock` に向いています (ダミーの秘密値)。`tools notify-test` で全部 OK になり、notifymock の記録 (`docker compose --env-file testbed/testbed.env exec notifymock python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8080/captures').read().decode())"`) で本文・宛先・伏せ字・復旧通知を確かめられます。
+
+Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (デモは rtx1300 lan2) から setup が生成する記録ルール `obs_wan:ifHCInOctets:rate1m` / `obs_wan:ifHCOutOctets:rate1m` を表示します (WAN 未設定ならデータなし)。
 
 ## 既知の制限 (P1 時点)
 

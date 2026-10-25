@@ -284,17 +284,24 @@ export function renderWlan(snap, seen, nav) {
 
 export const sevKind = (s) => ({ critical: ['crit', 'CRIT'], warning: ['warn', 'WARN'] }[s] || ['info', (s || 'INFO').toUpperCase().slice(0, 4)]);
 
-export function renderAlerts(alerts, nav) {
+// notify(alert) -> its notification state (alerting.js notifyState): a fixed-width slot per row (通知済 / 抑止中 /
+// 確認済 / 未通知 / ...), the next repeat time in the large-screen detail line
+export function renderAlerts(alerts, nav, notify) {
   const firing = alerts.filter((a) => a.state === 'firing');
   const rows = firing.map((a) => {
     const [kind, text] = sevKind(a.labels.severity);
     const where = [a.labels.instance, a.labels.ifName].filter(Boolean).join(' ');
+    const nt = notify(a);
+    const slot = badge(`${nt.kindClass} nt nt-${nt.kind}`, nt.label);
+    slot.title = nt.text;
     // detail line (since / value / summary) is shown on large screens only (style.css), where the panel has room
     const since = Date.parse(a.activeAt);
     const detail = [Number.isFinite(since) && `since ${jstHm.format(new Date(since))} (${fmtDur((Date.now() - since) / 1000)})`,
-      a.value !== undefined && `value ${Number(a.value).toPrecision(3)}`, a.annotations.summary].filter(Boolean).join(' · ');
-    return row([badge(kind, text), cell(a.labels.alertname, 'name', a.annotations.summary), cell(where, 'n sub'), cell(detail, 'al-detail sub')],
-      '', () => nav.alert(a), `details for ${a.labels.alertname} ${where}`);
+      a.value !== undefined && `value ${Number(a.value).toPrecision(3)}`, nt.nextText, a.annotations.summary].filter(Boolean).join(' · ');
+    const r = row([badge(kind, text), cell(a.labels.alertname, 'name', a.annotations.summary), cell(where, 'n sub'), slot, cell(detail, 'al-detail sub')],
+      '', () => nav.alert(a), `details for ${a.labels.alertname} ${where}`); // label = focus key: stays the same when the state changes
+    r.setAttribute('aria-label', `details for ${a.labels.alertname} ${where}, notification: ${nt.label}`);
+    return r;
   });
   if (!firing.length) rows.push(row([badge('none', ''), cell('no firing alerts', 'sub')]));
   put('alerts', rows);

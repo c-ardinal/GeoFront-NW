@@ -50,6 +50,27 @@ export function flattenStreams(streams) {
   for (const s of streams) for (const [ts, line] of s.values) out.push({ ts, line, host: s.stream.host || '?', sev: s.stream.severity || '?' });
   return out.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
+// ---- Alertmanager through mask-api (/am/): masked reads; silences are the only writes ----------------------------
+// Writes carry X-Obs-Csrf (and the browser's Origin): mask-api refuses any write without both.
+async function amJson(url, opts = {}) {
+  const r = await fetch(url, { cache: 'no-store', ...opts });
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.error || `${url} HTTP ${r.status}`);
+  return body;
+}
+export const amAlerts = () => amJson('/am/api/v2/alerts');
+export const amSilences = () => amJson('/am/api/v2/silences');
+export const amOps = () => amJson('/am/ops');
+const amWrite = (method, url, body) => amJson(url, { method, headers: { 'Content-Type': 'application/json', 'X-Obs-Csrf': '1' },
+  ...(body ? { body: JSON.stringify(body) } : {}) });
+export const createSilence = (body) => amWrite('POST', '/am/api/v2/silences', body);
+export const expireSilence = (id) => amWrite('DELETE', `/am/api/v2/silence/${encodeURIComponent(id)}`);
+// notify-relay's records of sent notifications (one JSON line per alert and receiver)
+export function notifyLog(hours, limit) {
+  const end = BigInt(Date.now()) * 1000000n;
+  return lokiLogs('{job="notify"}', { startNs: String(end - BigInt(hours * 3600) * 1000000000n), endNs: String(end), limit });
+}
+
 // LogQL string literal (backtick raw string cannot contain a backtick, so fall back to escaped quotes).
 export function logqlString(s) {
   return s.includes('`') ? JSON.stringify(s) : `\`${s}\``;

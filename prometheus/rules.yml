@@ -1,12 +1,15 @@
 groups:
   - name: yamaha-demo
     rules:
+      # summary: shown on the screens; summary_ja / value: used in the notifications (notify-relay, Japanese)
       - alert: DeviceDown
         expr: up{job="snmp"} == 0
         for: 30s
         labels: {severity: critical}
         annotations:
           summary: "{{ $labels.instance }} SNMP scrape failing"
+          summary_ja: "{{ $labels.instance }} から SNMP の応答がありません (収集に失敗)"
+          value: "up = {{ $value }}"
 
       # WanHighUtilization is generated per profile from the WAN interface (demo: rtx1300 lan2; prod: the inventory's
       # wan_interface): /etc/obs-generated/prometheus/wan-rules.yml, written by `tools targets`.
@@ -17,9 +20,13 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "{{ $labels.instance }} {{ $labels.ifName }} interface errors increasing"
+          summary_ja: "{{ $labels.instance }} {{ $labels.ifName }} のエラーが増えています (2 分で {{ $value | printf \"%.0f\" }} 件)"
+          value: "{{ $value | printf \"%.0f\" }} 件 / 2 分"
 
       - alert: DeviceRebooted
         expr: sysUpTime{job="snmp"} / 100 < 300
         labels: {severity: info}
         annotations:
           summary: "{{ $labels.instance }} restarted (sysUpTime reset, counters discontinuous)"
+          summary_ja: "{{ $labels.instance }} が再起動しました (稼働時間がリセット。カウンタは不連続)"
+          value: "稼働 {{ $value | printf \"%.0f\" }} 秒"

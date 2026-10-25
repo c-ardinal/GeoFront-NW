@@ -97,7 +97,7 @@ export function fmtUptime(s) {
 }
 export function fmtDur(s) {
   if (s < 60) return `${Math.round(s)} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${Math.floor(s % 60)} s`; // floor: never "4 min 60 s"
   return fmtUptime(s);
 }
 export const has = (v) => v !== undefined && v !== null && Number.isFinite(v);

@@ -37,6 +37,7 @@
   --pad-x: var(--s3);
   --pad-y: 6px;
   --st: 76px;
+  --nt: 76px; /* notification state slot of the alert rows (fixed: a state change never moves the row) */
   --fs: 14px;
   --fs-s: 13px;
   --banner-need: 420px; /* room kept for the alert banner (counts + part of the names), firing or not */
@@ -229,7 +230,9 @@ ul { list-style: none; }
 #devices { --cols: var(--st) 1fr 52px 52px 48px 32px 60px; }
 #ifaces { --cols: var(--st) 1fr 56px 56px 52px 48px; }
 #wlan { --cols: 64px 1fr 56px 56px 56px; }
-#alerts { --cols: var(--st) 1fr auto; }
+#alerts { --cols: var(--st) 1fr auto var(--nt); }
+.st.nt { width: var(--nt); letter-spacing: 0; }
+.st.nt-pending, .st.nt-none { color: var(--text-2); border-style: dashed; }
 /* firing alerts are must-see: long names wrap onto a second line instead of an ellipsis */
 #alerts .row { height: auto; min-height: var(--row); }
 #alerts .row .c { white-space: normal; overflow-wrap: anywhere; }

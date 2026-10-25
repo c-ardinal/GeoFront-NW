@@ -15,6 +15,9 @@ Queries cannot test hidden digits:
   full or partial address (tokens are resolved here); regex matchers and the functions that read or
   copy label text are rejected.
 
+Alertmanager (/am/, from the proxy): the alert and silence lists are read the same way (masked); the one write path
+is the silence allowlist (create / extend / expire, for ACK and 抑止), see the "Alertmanager" section.
+
 Run: python mask_api.py            (listens on :8000)
      python mask_api.py --selftest
 """
@@ -30,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
 
@@ -576,26 +580,292 @@ def request_role(headers):
     return claimed if claimed in ROLES else "viewer"
 
 
+# ---- Alertmanager (/am/): masked reads, and the only writes: silences (ACK) --------------------------------------------
+# Reads: the alert and silence lists, masked like every other response (exact IPv4 values become tokens, so the screens
+# can match them to Prometheus' alerts). Writes: create / extend / expire a silence, nothing else. A write must come from
+# the command-center itself (same origin + the X-Obs-Csrf header, which a cross-site form cannot send and a cross-site
+# script cannot send without a CORS preflight that is never granted), while the screens are on 127.0.0.1 only (or, with
+# OBS_OPS_TRUST_ROLE=1, for X-Obs-Role operator / admin from a future authentication layer). Matchers: equality on
+# alertname / instance / ifName / severity only (no regex: a silence must name what it mutes), addresses only as tokens
+# the screen was given; duration at most 7 days (also counted from an extended silence's start); comment bounded;
+# createdBy is always "command-center (<operator>)" and an ACK comment always "ACK by <operator>[: note]". The operator
+# is the authentication layer's user (X-Obs-User, only with OBS_OPS_TRUST_ROLE=1), else "local".
+# Origins: only the names the proxy answers for (loopback, OBS_PUBLIC_URL's host, the bind address): with the proxy's
+# Host allowlist this keeps a DNS-rebinding page (evil.example -> 127.0.0.1) out, even if the proxy rule were removed.
+
+ALERTMANAGER = os.environ.get("ALERTMANAGER_URL", "http://alertmanager:9093")
+AM_READ = {"/am/api/v2/alerts": "/api/v2/alerts?active=true&silenced=true&inhibited=true&unprocessed=true",
+           "/am/api/v2/silences": "/api/v2/silences"}
+AM_OPS = "/am/ops"
+AM_SILENCES = "/am/api/v2/silences"
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+AM_SILENCE_ID = re.compile(r"/am/api/v2/silence/(" + UUID_RE.pattern + ")")
+SILENCE_LABELS = ("alertname", "instance", "ifName", "severity")
+SILENCE_MAX_S = 7 * 86400
+CLOCK_SLACK_S = 300  # browser vs server clock
+COMMENT_MAX = 200
+WRITE_MAX_BODY = 8192
+CREATED_BY = "command-center"
+OPERATOR_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+USER_HEADER = "X-Obs-User"
+OPS_ROLES = ("operator", "admin")
+CSRF_HEADER = "X-Obs-Csrf"
+WRITES_PER_MIN = 30
+_writes = []  # monotonic times of recent writes (rate limit)
+
+
+def bind_is_local():
+    b = os.environ.get("OBS_BIND", "127.0.0.1")
+    return b == "localhost" or b.startswith("127.")
+
+
+def ops_role(headers):
+    """operator / admin from the authentication layer, only when the deployment says it has one (never by default)."""
+    if os.environ.get("OBS_OPS_TRUST_ROLE") != "1":
+        return None
+    r = (headers.get(ROLE_HEADER) or "").strip().lower()
+    return r if r in OPS_ROLES else None
+
+
+def operator(headers):
+    """Who writes: the authentication layer's user (only when trusted), else "local" (the 127.0.0.1 screen)."""
+    if os.environ.get("OBS_OPS_TRUST_ROLE") == "1":
+        u = (headers.get(USER_HEADER) or "").strip()
+        if OPERATOR_RE.fullmatch(u):
+            return u
+    return "local"
+
+
+def is_ours(s):
+    by = str(s.get("createdBy", "")) if isinstance(s, dict) else ""
+    return by == CREATED_BY or by.startswith(CREATED_BY + " (")
+
+
+def ack_comment(c, op):
+    """An ACK comment names who acknowledged, whatever the client wrote after "ACK"."""
+    m = re.match(r"ACK\b[\s:]*(.*)", c)  # the ACK rule is ^ACK\b everywhere (notify-relay ACK_RE, command-center ACK_RE)
+    if not m:
+        return c
+    return (f"ACK by {op}" + (f": {m.group(1)}" if m.group(1) else ""))[:COMMENT_MAX]
+
+
+def allowed_hosts():
+    hosts = {"127.0.0.1", "localhost", "::1"}
+    pub = urllib.parse.urlsplit(os.environ.get("OBS_PUBLIC_URL", "")).hostname
+    bind = os.environ.get("OBS_BIND", "127.0.0.1")
+    if pub:
+        hosts.add(pub.lower())
+    if bind not in ("", "0.0.0.0"):
+        hosts.add(bind.lower())
+    return hosts
+
+
+def writable(headers):
+    if bind_is_local():
+        return True, "127.0.0.1 only: silences / ACK allowed"
+    role = ops_role(headers)
+    if role:
+        return True, f"role {role}: silences / ACK allowed"
+    return False, "LAN 公開中は抑止・確認の操作はできません (認証がありません)"
+
+
+def same_origin(headers):
+    origin, host = headers.get("Origin") or "", headers.get("X-Forwarded-Host") or headers.get("Host") or ""
+    o = urllib.parse.urlsplit(origin)
+    if o.scheme not in ("http", "https") or not host or headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
+        return False
+    return (o.hostname or "") in allowed_hosts() and o.netloc.lower() == host.split(",")[0].strip().lower()
+
+
+def am_time(v, what):
+    try:
+        d = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", str(v)).replace("Z", "+00:00"))
+    except ValueError:
+        raise Rejected(f"{what} must be an RFC 3339 time") from None
+    if d.tzinfo is None:
+        raise Rejected(f"{what} needs a time zone")
+    return d.timestamp()
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def silence_matchers(ms):
+    if not isinstance(ms, list) or not 1 <= len(ms) <= len(SILENCE_LABELS):
+        raise Rejected("matchers: 1 to 4 equality matchers")
+    out, names = [], set()
+    for m in ms:
+        if not isinstance(m, dict) or set(m) - {"name", "value", "isRegex", "isEqual"}:
+            raise Rejected("matcher fields: name, value, isRegex, isEqual")
+        if m.get("isRegex", False) is not False or m.get("isEqual", True) is not True:
+            raise Rejected("only equality matchers (isRegex false, isEqual true) are accepted")
+        name, value = m.get("name"), m.get("value")
+        if name not in SILENCE_LABELS or name in names:
+            raise Rejected(f"matcher names: {', '.join(SILENCE_LABELS)} (each once)")
+        if not isinstance(value, str) or not 0 < len(value) <= 128:
+            raise Rejected("matcher value: 1 to 128 characters")
+        check_literal(value)
+        if any(not x.group(4) for x in MASKED_IPV4.finditer(value)) or MASKED_MAC.search(value):
+            raise Rejected("a masked address without its token cannot be matched exactly")
+        names.add(name)
+        out.append({"name": name, "value": _rewrite(value, as_regex=False), "isRegex": False, "isEqual": True})
+    if not names & {"alertname", "instance"}:
+        raise Rejected("a silence must name the alert (alertname) or the device (instance)")
+    return out
+
+
+def check_comment(c):
+    c = c.strip() if isinstance(c, str) else ""
+    if not 0 < len(c) <= COMMENT_MAX or any(ord(ch) < 32 for ch in c):
+        raise Rejected(f"comment: 1 to {COMMENT_MAX} characters, one line")
+    return c
+
+
+def check_end(v, start, now, began=None):
+    """began: an extended silence's start; the 7 days count from there too (no endless extension)."""
+    end = am_time(v, "endsAt")
+    if not now < end <= now + SILENCE_MAX_S + CLOCK_SLACK_S or end <= start:
+        raise Rejected("endsAt: in the future, at most 7 days from now")
+    if began is not None and end > began + SILENCE_MAX_S + CLOCK_SLACK_S:
+        raise Rejected("endsAt: a silence lasts at most 7 days from its start (make a new one)")
+    return end
+
+
+def silence_body(body, now, existing=None, op="local"):
+    """Client body -> the Alertmanager silence to post. New: matchers + endsAt + comment. Extend (id given): endsAt and
+    optionally comment; matchers and start stay those of the existing command-center silence."""
+    if not isinstance(body, dict) or set(body) - {"id", "matchers", "endsAt", "comment", "createdBy"}:
+        raise Rejected("fields: matchers, endsAt, comment (id to extend)")
+    if "createdBy" in body:
+        raise Rejected("createdBy is set by the server")
+    if "id" in body:
+        if existing is None:
+            raise Rejected("unknown silence")
+        if "matchers" in body:
+            raise Rejected("an extension keeps the silence's matchers")
+        start = am_time(existing["startsAt"], "startsAt")
+        comment = ack_comment(check_comment(body["comment"]), op) if "comment" in body else existing.get("comment")
+        return {"id": existing["id"], "matchers": existing["matchers"], "startsAt": existing["startsAt"],
+                "endsAt": iso(check_end(body.get("endsAt"), max(start, now - CLOCK_SLACK_S), now, began=start)),
+                "createdBy": existing.get("createdBy"), "comment": comment}
+    return {"matchers": silence_matchers(body.get("matchers")), "startsAt": iso(now), "endsAt": iso(check_end(body.get("endsAt"), now, now)),
+            "createdBy": f"{CREATED_BY} ({op})", "comment": ack_comment(check_comment(body.get("comment")), op)}
+
+
+def am_request(path, method="GET", body=None):
+    """-> (status, raw body) from Alertmanager (errors included)."""
+    req = urllib.request.Request(ALERTMANAGER + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+            return r.status, read_capped(r)
+    except urllib.error.HTTPError as e:
+        return e.code, read_capped(e)
+
+
+def own_silence(sid):
+    """The silence if it exists and was made by the command-center (only those may be extended / expired here)."""
+    status, raw = am_request(f"/api/v2/silence/{sid}")
+    try:
+        s = json.loads(raw) if status == 200 else None
+    except ValueError:
+        s = None
+    if not is_ours(s):
+        raise Rejected("unknown silence, or not created by the command-center")
+    if (s.get("status") or {}).get("state") == "expired":
+        raise Rejected("the silence has already expired")
+    return s
+
+
+def rate_limited(now):
+    _writes[:] = [t for t in _writes if now - t < 60]
+    if len(_writes) >= WRITES_PER_MIN:
+        return True
+    _writes.append(now)
+    return False
+
+
+def am_json(status, obj):
+    return status, json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(), "application/json"
+
+
+def am_handle(method, raw_path, headers, read_body):
+    """/am/... -> (status, body, content type)."""
+    parts = urllib.parse.urlsplit(raw_path)
+    path = parts.path
+    if method in ("GET", "HEAD"):
+        if parts.query:
+            return am_json(400, {"status": "error", "error": "no parameters accepted here"})
+        if path == AM_OPS:
+            ok, reason = writable(headers)
+            return am_json(200, {"writable": ok, "reason": reason, "max_s": SILENCE_MAX_S, "labels": SILENCE_LABELS})
+        if path not in AM_READ:
+            return am_json(403, {"status": "error", "error": "forbidden"})
+        status, raw = am_request(AM_READ[path])
+        return (status, *masked_body(raw, "application/json"))
+    is_new = method == "POST" and path == AM_SILENCES
+    sid = AM_SILENCE_ID.fullmatch(path) if method == "DELETE" else None
+    if not is_new and not sid:
+        return am_json(403 if method in ("POST", "DELETE") else 405, {"status": "error", "error": "only silences can be written"})
+    ok, reason = writable(headers)
+    if not ok:
+        return am_json(403, {"status": "error", "errorType": "forbidden", "error": reason})
+    if headers.get(CSRF_HEADER) != "1" or not same_origin(headers):
+        return am_json(403, {"status": "error", "errorType": "csrf", "error": "cross-site or scripted request refused (same origin + X-Obs-Csrf required)"})
+    if rate_limited(time.monotonic()):
+        return am_json(429, {"status": "error", "error": "too many changes; wait a minute"})
+    try:
+        if sid:
+            own_silence(sid.group(1))
+            status, raw = am_request(f"/api/v2/silence/{sid.group(1)}", "DELETE")
+            return am_json(status, {"status": "success" if status == 200 else "error"})
+        if "json" not in (headers.get("Content-Type") or ""):
+            raise Rejected("Content-Type: application/json required")
+        length = headers.get("Content-Length") or "0"
+        length = int(length) if length.isdigit() else -1
+        if not 0 < length <= WRITE_MAX_BODY:
+            raise Rejected("body too large or empty")
+        try:
+            body = json.loads(read_body(length))
+        except ValueError:
+            raise Rejected("body is not JSON") from None
+        existing = None
+        if isinstance(body, dict) and "id" in body:
+            if not (isinstance(body["id"], str) and UUID_RE.fullmatch(body["id"])):
+                raise Rejected("id: a silence id")
+            existing = own_silence(body["id"])
+        status, raw = am_request("/api/v2/silences", "POST", silence_body(body, time.time(), existing, operator(headers)))
+        return (status, *masked_body(raw, "application/json"))
+    except Rejected as e:
+        return am_json(400, {"status": "error", "errorType": "rejected", "error": str(e)})
+
+
+def respond(method, raw_path, headers, read_body):
+    """-> (status, body, content type) for one request."""
+    _role = request_role(headers)  # always "viewer": masking never depends on it (writes: see writable())
+    try:
+        if raw_path.startswith("/am/"):
+            return am_handle(method, raw_path, headers, read_body)
+        url, post, err = route(method, raw_path)
+        if err:
+            return err[0], error_body(*err), "application/json"
+        if isinstance(post, CountSpec):
+            return run_count(post)
+        if isinstance(post, LogSpec):
+            return run_log(post)
+        return fetch(url, post)
+    except TimeoutError:
+        return 504, error_body(504, "upstream timeout"), "application/json"
+    except (OSError, ValueError) as e:  # URLError, connection reset, bad/oversize JSON
+        print(f"upstream error: {type(e).__name__}", file=sys.stderr)
+        return 502, error_body(502, "upstream unavailable"), "application/json"
+
+
 class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         t0 = time.monotonic()
-        _role = request_role(self.headers)  # always "viewer" in P1: nothing below depends on it yet
-        url, post, err = route(self.command, self.path)
-        if err:
-            status, body, ctype = err[0], error_body(*err), "application/json"
-        else:
-            try:
-                if isinstance(post, CountSpec):
-                    status, body, ctype = run_count(post)
-                elif isinstance(post, LogSpec):
-                    status, body, ctype = run_log(post)
-                else:
-                    status, body, ctype = fetch(url, post)
-            except TimeoutError:
-                status, body, ctype = 504, error_body(504, "upstream timeout"), "application/json"
-            except (OSError, ValueError) as e:  # URLError, connection reset, bad/oversize JSON
-                print(f"upstream error: {type(e).__name__}", file=sys.stderr)
-                status, body, ctype = 502, error_body(502, "upstream unavailable"), "application/json"
+        status, body, ctype = respond(self.command, self.path, self.headers, self.rfile.read)
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -666,6 +936,116 @@ PROM_PROBES = [
     'info(up)',
     "demo_flow_bytes_total{dst_ip='1.2'}",
 ]
+
+
+def am_selftest(tok):
+    """/am/: masked reads, the write allowlist and its guards, against a fake Alertmanager."""
+    global am_request
+    calls, store = [], {}
+    sid = "0b9cbd2e-8d2c-4a39-9e0f-4b0c6e6c1a11"
+
+    def fake(path, method="GET", body=None):
+        calls.append((method, path, body))
+        if path.startswith("/api/v2/alerts"):
+            return 200, json.dumps([{"labels": {"alertname": "DeviceDown", "instance": "203.0.113.50"}, "fingerprint": "0123456789abcdef"}]).encode()
+        if path == "/api/v2/silences" and method == "POST":
+            return 200, json.dumps({"silenceID": sid}).encode()
+        if path == f"/api/v2/silence/{sid}":
+            return (200, json.dumps(store.get(sid) or {}).encode()) if method == "GET" else (200, b"")
+        return 404, b"{}"
+    real, am_request = am_request, fake
+    env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_OPS_TRUST_ROLE", "OBS_PUBLIC_URL")}
+    try:
+        os.environ["OBS_BIND"], os.environ["OBS_OPS_TRUST_ROLE"], os.environ["OBS_PUBLIC_URL"] = "127.0.0.1", "0", "http://127.0.0.1:8080"
+        hdr = {"Origin": "http://127.0.0.1:8080", "X-Forwarded-Host": "127.0.0.1:8080", "X-Obs-Csrf": "1", "Content-Type": "application/json",
+               "Sec-Fetch-Site": "same-origin"}
+        now = time.time()
+        good = {"matchers": [{"name": "alertname", "value": "DeviceDown", "isRegex": False, "isEqual": True},
+                             {"name": "instance", "value": tok}], "endsAt": iso(now + 3600), "comment": "ACK: looking into it"}
+
+        def post(body, headers=hdr, path=AM_SILENCES, method="POST"):
+            raw = json.dumps(body).encode()
+            st, out, _ = am_handle(method, path, {**headers, "Content-Length": str(len(raw))}, lambda n: raw[:n])
+            return st, json.loads(out or b"null")
+        st, out = am_handle("GET", "/am/api/v2/alerts", {}, None)[:2]
+        assert st == 200 and b"203.0.113.50" not in out and tok.encode() in out  # masked; same token as Prometheus' alerts
+        assert am_handle("GET", "/am/api/v2/alerts?filter=x", {}, None)[0] == 400 and am_handle("GET", "/am/api/v2/status", {}, None)[0] == 403
+        assert json.loads(am_handle("GET", AM_OPS, {}, None)[1])["writable"] is True
+        st, out = post(good)
+        assert st == 200 and out == {"silenceID": sid}, (st, out)
+        sent = calls[-1][2]
+        assert sent["createdBy"] == "command-center (local)" and sent["matchers"][1] == {"name": "instance", "value": "203.0.113.50", "isRegex": False, "isEqual": True}
+        assert abs(am_time(sent["startsAt"], "") - now) < 5 and sent["comment"] == "ACK by local: looking into it", sent
+        post({**good, "comment": "ACK by mallory"})
+        assert calls[-1][2]["comment"] == "ACK by local: by mallory"  # the operator is never taken from the comment
+        post({**good, "comment": "maintenance"})
+        assert calls[-1][2]["comment"] == "maintenance"
+        # DNS rebinding (reviewer probe): a page on evil.example resolved to 127.0.0.1 - Host and Origin both the attacker's
+        for h in ({**hdr, "Origin": "http://evil.example:8080", "X-Forwarded-Host": "evil.example:8080"},
+                  {**hdr, "Origin": "http://evil.example:8080", "Host": "evil.example:8080", "X-Forwarded-Host": "evil.example:8080"}):
+            assert post(good, h)[0] == 403, h
+        assert post(good, {**hdr, "Origin": "http://localhost:8080", "X-Forwarded-Host": "localhost:8080"})[0] == 200
+        raw = b"{}"
+        for bad_len in ("abc", "-5", "99999999"):
+            assert am_handle("POST", AM_SILENCES, {**hdr, "Content-Length": bad_len}, lambda n: raw)[0] == 400, bad_len
+        rejected = [
+            {**good, "matchers": [{"name": "alertname", "value": "Device.*", "isRegex": True}]},                    # regex matcher
+            {**good, "matchers": [{"name": "alertname", "value": "X", "isEqual": False}]},                          # negative matcher
+            {**good, "matchers": [{"name": "job", "value": "snmp"}]},                                               # label not allowed
+            {**good, "matchers": [{"name": "severity", "value": "critical"}]},                                      # mutes everything critical
+            {**good, "matchers": [{"name": "instance", "value": "203.0.113.50"}]},                                  # raw address
+            {**good, "matchers": [{"name": "instance", "value": "203.0.113.x"}]},                                   # masked without token
+            {**good, "matchers": [{"name": "instance", "value": "203.0.113.x~000000000000"}]},                      # forged token
+            {**good, "matchers": []}, {**good, "matchers": [good["matchers"][0]] * 2},
+            {**good, "endsAt": iso(now + 8 * 86400)}, {**good, "endsAt": iso(now - 10)}, {**good, "endsAt": "tomorrow"},  # duration
+            {**good, "comment": ""}, {**good, "comment": "x" * 201}, {**good, "comment": "a\nb"},
+            {**good, "createdBy": "admin"}, {**good, "createdBy": "command-center"}, {**good, "startsAt": iso(now)}, [good],
+        ]
+        for i, bad in enumerate(rejected):
+            st, out = post(bad)
+            assert st == 400 and out["errorType"] == "rejected", (i, st, out)
+        for h in ({k: v for k, v in hdr.items() if k != "X-Obs-Csrf"}, {**hdr, "Origin": "http://evil.example"},
+                  {k: v for k, v in hdr.items() if k != "Origin"}, {**hdr, "Sec-Fetch-Site": "cross-site"}):
+            assert post(good, h)[0] == 403 and post(good, h)[1]["errorType"] == "csrf", h
+        assert post(good, {**hdr, "Content-Type": "text/plain"})[0] == 400
+        assert post(good, path="/am/api/v2/alerts")[0] == 403 and post(good, method="PUT")[0] == 405
+        # extend / expire: only the command-center's own, not yet expired silences; matchers are kept
+        store[sid] = {"id": sid, "createdBy": "command-center (local)", "comment": "maintenance", "startsAt": iso(now - 600), "endsAt": iso(now + 60),
+                      "status": {"state": "active"}, "matchers": [{"name": "instance", "value": "wlx222", "isRegex": False, "isEqual": True}]}
+        st, _ = post({"id": sid, "endsAt": iso(now + 7200)})
+        assert st == 200 and calls[-1][2]["matchers"] == store[sid]["matchers"] and calls[-1][2]["id"] == sid and calls[-1][2]["startsAt"] == store[sid]["startsAt"]
+        assert calls[-1][2]["createdBy"] == "command-center (local)" and calls[-1][2]["comment"] == "maintenance"
+        assert post({"id": sid, "endsAt": iso(now + 7200), "matchers": good["matchers"]})[0] == 400
+        _writes.clear()  # (the rate limit is tested below)
+        store[sid] = {**store[sid], "startsAt": iso(now - 6 * 86400)}  # extensions stop at 7 days from the start
+        assert post({"id": sid, "endsAt": iso(now + 2 * 86400)})[0] == 400 and post({"id": sid, "endsAt": iso(now + 86400 - 600)})[0] == 200
+        store[sid] = {**store[sid], "startsAt": iso(now - 600)}
+        assert am_handle("DELETE", f"/am/api/v2/silence/{sid}", {**hdr, "Origin": "http://evil.example:8080", "X-Forwarded-Host": "evil.example:8080"}, None)[0] == 403
+        assert post({"id": "nope", "endsAt": iso(now + 7200)})[0] == 400
+        assert am_handle("DELETE", f"/am/api/v2/silence/{sid}", hdr, None)[0] == 200 and calls[-1][:2] == ("DELETE", f"/api/v2/silence/{sid}")
+        store[sid] = {**store[sid], "createdBy": "amtool"}
+        assert am_handle("DELETE", f"/am/api/v2/silence/{sid}", hdr, None)[0] == 400  # not ours
+        assert am_handle("DELETE", "/am/api/v2/silences", hdr, None)[0] == 403
+        # LAN exposure: no writes, whatever the headers say; a trusted auth layer's operator role may write
+        os.environ["OBS_BIND"] = "192.168.100.10"
+        lan = {**hdr, "Origin": "http://192.168.100.10:8080", "X-Forwarded-Host": "192.168.100.10:8080", "X-Obs-Role": "admin"}
+        st, out = post(good, lan)
+        assert st == 403 and out["errorType"] == "forbidden" and json.loads(am_handle("GET", AM_OPS, lan, None)[1])["writable"] is False
+        os.environ["OBS_OPS_TRUST_ROLE"] = "1"
+        assert post(good, lan)[0] == 200 and post(good, {**lan, "X-Obs-Role": "viewer"})[0] == 403
+        assert post(good, {**lan, "X-Obs-User": "alice"})[0] == 200
+        assert calls[-1][2]["createdBy"] == "command-center (alice)" and calls[-1][2]["comment"].startswith("ACK by alice")
+        assert post(good, {**lan, "X-Obs-User": "bad user;"})[0] == 200 and calls[-1][2]["createdBy"] == "command-center (local)"
+        _writes[:] = [time.monotonic()] * WRITES_PER_MIN
+        assert post(good, lan)[0] == 429  # rate limit
+        _writes.clear()
+    finally:
+        am_request = real
+        for k, v in env_was.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def selftest():
@@ -942,6 +1322,7 @@ def selftest():
         assert plan(path)[2][0] == 403, path
     assert route("POST", pq("up"))[2][0] == 405
     assert request_role({}) == request_role({"X-Obs-Role": "admin"}) == request_role({"X-Obs-Role": " Viewer "}) == "viewer"
+    am_selftest(tok)
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
 

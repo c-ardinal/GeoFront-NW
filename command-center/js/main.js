@@ -8,6 +8,7 @@ import * as UI from './ui.js';
 import * as M from './views-modal.js';
 import * as D from './views-drawer.js';
 import { setNoFlowSource } from './views-common.js';
+import * as AL from './alerting.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -116,6 +117,8 @@ const Q = {
   lokiRx: 'sum(rate(loki_distributor_lines_received_total[1m]))',
 };
 
+const notifySlot = (a) => { const st = AL.notifyState(a); return { ...st, kindClass: AL.NT_KIND[st.kind], nextText: AL.nextText(st) }; };
+
 function normFlows(res) {
   return res.map((r) => {
     const mt = r.metric;
@@ -132,6 +135,7 @@ async function pollProm() {
     P.WAN.instance ? promRange(gate(`rate(ifHCInOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [], // no WAN configured: nothing to ask
     P.WAN.instance ? promRange(gate(`rate(ifHCOutOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [],
     promAlerts(),
+    AL.pollAlerting(), // notification state (Alertmanager / notify records): never fails, its own state says "unknown"
   ]);
   const m = {
     up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'),
@@ -168,7 +172,7 @@ async function pollProm() {
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
   P.renderWlan(s, state.seenWlan, nav);
-  P.renderAlerts(alerts, nav);
+  P.renderAlerts(alerts, nav, notifySlot);
   P.renderHealth(s, nav);
   P.fitRightColumn();
 }
@@ -401,12 +405,15 @@ UI.initUi({ onClear: () => { G.setSelection(null); G.resetView(); }, onView: app
 const openAlerts = () => (WALLBOARD.matches ? UI.openModal(M.alertsModal()) : UI.selectTab('alert'));
 $('alert-banner').addEventListener('click', openAlerts);
 $('alert-banner').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAlerts(); } });
+AL.setOnChange(() => poll()); // after an ACK / silence change: show its effect now, not at the next poll
 G.initGlobe({ onDest: (key) => { const [cc, city] = key.split('|'); nav.dest({ cc, city }); }, onInteract: () => UI.touched() });
 wirePanelTitles();
 boot();
 tickClock();
 setInterval(tickClock, 1000);
-poll();
+poll().then(() => { // link in the notifications (OBS_PUBLIC_URL/?open=alerts): the alert list, once there is data
+  if (new URLSearchParams(location.search).get('open') === 'alerts') openAlerts();
+});
 setInterval(poll, POLL_MS);
 // scripted-test hook (read-only): screen position of a destination on the globe
 window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode };

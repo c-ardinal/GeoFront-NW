@@ -2,14 +2,19 @@
 #   :80   -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/
 #   :9090 -> 127.0.0.1 only: Prometheus UI, read-only (the admin API used by `tools backup` is never proxied)
 #   :3000 -> 127.0.0.1 only: old Grafana URLs, redirected to /grafana/
+# Host allowlist (DNS rebinding): every site answers only for the names the screens are really opened with. :80 =
+# {$OBS_SITES}, built by the proxy's entrypoint (compose.yaml) from 127.0.0.1 / localhost / [::1], the host of
+# OBS_PUBLIC_URL and the LAN bind address. Any other Host (e.g. an attacker's name pointed at 127.0.0.1) gets 421 from
+# the catch-all blocks below: no screen, no masked data, no writes. LAN users open OBS_PUBLIC_URL.
 {
 	admin off
 	auto_https off
 }
 
-:80 {
-	# A role header only ever comes from the auth layer below, never from the client.
+{$OBS_SITES:http://127.0.0.1:80, http://localhost:80, http://[::1]:80} {
+	# A role / user header only ever comes from the auth layer below, never from the client.
 	request_header -X-Obs-Role
+	request_header -X-Obs-User
 
 	# ---- authentication insertion point (P1: no authentication) -------------------------------------
 	# Put a forward-auth provider (Authelia, authentik, oauth2-proxy, ...) on the compose network and enable:
@@ -20,8 +25,10 @@
 	# }
 	# @admins header Remote-Groups *obs-admin*
 	# request_header @admins X-Obs-Role admin
+	# request_header X-Obs-User {http.request.header.Remote-User}   # operator name in ACK comments / createdBy
 	#
-	# mask-api reads X-Obs-Role (today it always treats the request as viewer and keeps masking on).
+	# mask-api reads X-Obs-Role (today it always treats the request as viewer and keeps masking on; with
+	# OBS_OPS_TRUST_ROLE=1 operator / admin may write silences, see /am/ below).
 	# Grafana can trust the same identity with GF_AUTH_PROXY_ENABLED / GF_AUTH_PROXY_HEADER_NAME=Remote-User.
 	# ---------------------------------------------------------------------------------------------------
 
@@ -39,6 +46,20 @@
 	}
 	handle /healthz {
 		respond "ok" 200
+	}
+	# Alerts / silences for the command-center, through mask-api: reads are masked like /prom/ and /loki/; the only
+	# writes are creating / extending / expiring silences (ACK). mask-api checks each write (allowlist, same origin,
+	# X-Obs-Csrf header, matchers and duration). Writes are refused here as well while the screens are on the LAN: there
+	# is no authentication yet. An authentication layer above may open them for X-Obs-Role operator / admin instead:
+	# replace @amLanWrite with a check of that role and set OBS_OPS_TRUST_ROLE=1 for mask-api.
+	handle /am/* {
+		@amLanWrite {
+			not method GET HEAD
+			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
+		}
+		header @amLanWrite Content-Type application/json
+		respond @amLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中は抑止・確認の操作はできません (認証がありません)"\}` 403
+		reverse_proxy mask-api:8000
 	}
 	redir /grafana /grafana/ 308
 	handle /grafana/* {
@@ -61,7 +82,15 @@
 	}
 }
 
-:9090 {
+# Host not in the allowlist: nothing (the health check of `tools check` stays answerable)
+:80 {
+	handle /healthz {
+		respond "ok" 200
+	}
+	respond "misdirected request: open the screens with OBS_PUBLIC_URL (or 127.0.0.1)" 421
+}
+
+http://127.0.0.1:9090, http://localhost:9090, http://[::1]:9090 {
 	@admin path /api/v1/admin/*
 	respond @admin "forbidden" 403
 	@write {
@@ -72,11 +101,19 @@
 	reverse_proxy prometheus:9090
 }
 
-:3000 {
+:9090 {
+	respond "misdirected request" 421
+}
+
+http://127.0.0.1:3000, http://localhost:3000, http://[::1]:3000 {
 	handle /grafana/* {
 		reverse_proxy grafana:3000
 	}
 	handle {
 		redir * /grafana{uri} 302
 	}
+}
+
+:3000 {
+	respond "misdirected request" 421
 }

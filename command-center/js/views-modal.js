@@ -7,6 +7,8 @@ import {
   section, chartBlock, drawRange, fetchRange, rangeSelect, mbps, lv, linkBtn, putIn, tiles, vsAvg, rankBars, keyLegend, timeline,
   stackCols, SEV_KEYS, sevBuckets, sevTiles, SEV_LEVELS, SEV_BAD, sevKey, multiples, seriesBy, maxOf, dataView, listSection, alertLanes, alertKey, ipTokens, ALERT_KEYS, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
 } from './views-common.js';
+import { notifyState, nextText, silenceSection, NT_KIND } from './alerting.js';
+import { promRules } from './api.js';
 
 const fmtN = (d) => (v) => fixed(v, d);
 const CORE_SEV = ['critical', 'error', 'warning', 'notice', 'informational']; // always shown on cards, extra levels when > 0
@@ -420,8 +422,9 @@ export function wlanModal() {
 
 // ---- alerts ------------------------------------------------------------------------------------
 export function alertsModal() {
-  let dv, sum, tl, last, secs = 6 * HOUR;
+  let dv, sum, tl, last, sil, secs = 6 * HOUR;
   const tok = {};
+  const alertNames = () => promRules().then((rs) => [...new Set(rs.filter((r) => r.type === 'alerting').map((r) => r.name))].sort());
   return {
     title: 'Alerts — firing and pending', src: 'prom',
     mount(body) {
@@ -434,13 +437,14 @@ export function alertsModal() {
         { key: 'state', label: 'State' }, { key: 'severity', label: 'Severity' }, { key: 'name', label: 'Alert' }, { key: 'instance', label: 'Instance' },
         { key: 'ifName', label: 'ifName' }, { key: 'activeAt', label: 'Active since (JST)', fmt: (v) => jstFull.format(new Date(v)) },
         { key: 'dur', label: 'Duration', num: true, fmt: (v) => fmtDur(v) }, { key: 'value', label: 'Value', num: true, fmt: fmtN(2) },
-        { key: 'summary', label: 'Summary' },
+        { key: 'notify', label: 'Notification' }, { key: 'summary', label: 'Summary' },
       ], { key: 'dur', desc: true }, (r) => ({
         title: r.name, sub: [r.instance, r.ifName].filter(Boolean).join(' '), badge: sevKind(r.severity), cls: r.state === 'pending' ? 'card-pending' : '',
-        fields: [['State', r.state], ['Active for', fmtDur(r.dur)], ['Since', jstFull.format(new Date(r.activeAt))], ['Value', fixed(r.value, 2)]],
+        fields: [['State', r.state], ['Active for', fmtDur(r.dur)], ['Since', jstFull.format(new Date(r.activeAt))], ['Value', fixed(r.value, 2)], ['Notification', r.notify]],
         extra: r.summary ? el('p', 'card-note', r.summary) : null,
       }), (r) => maskText(alertKey(r.raw.labels)));
-      body.append(sum, s1.wrap, listSection('Firing and pending alerts', '', dv).wrap);
+      sil = silenceSection({ devices: () => DEVICES, alertNames });
+      body.append(sum, s1.wrap, listSection('Firing and pending alerts', 'notification: 通知済 · 抑止中 · 確認済 (ACK) · 未通知', dv).wrap, sil.wrap);
     },
     async update(ctx) {
       last = ctx;
@@ -449,6 +453,9 @@ export function alertsModal() {
       const cnt = (s) => firing.filter((a) => a.labels.severity === s).length;
       const crit = cnt('critical'), warn = cnt('warning');
       const longest = al.length ? Math.max(...al.map((a) => (Date.now() - Date.parse(a.activeAt)) / 1000)) : undefined;
+      const states = firing.map((a) => notifyState(a));
+      const n = (k) => states.filter((x) => x.kind === k).length;
+      const muted = n('acked') + n('silenced');
       putIn(sum, tiles([
         { label: 'Firing', value: firing.length, d: 0, kind: crit ? 'crit' : warn ? 'warn' : firing.length ? 'info' : 'ok', status: crit ? 'critical firing' : warn ? 'warning firing' : firing.length ? 'info only' : 'all clear' },
         { label: 'Critical', value: crit, d: 0, ...(crit ? { kind: 'crit', status: 'firing' } : {}) },
@@ -456,11 +463,20 @@ export function alertsModal() {
         { label: 'Info / other', value: firing.length - crit - warn, d: 0 },
         { label: 'Pending', value: al.length - firing.length, d: 0, sub: 'waiting for the rule\'s for:' },
         { label: 'Longest active', value: has(longest) ? fmtDur(longest) : undefined },
+        { label: 'Notified', value: n('sent'), d: 0,
+          ...(n('failed') || n('partial') ? { kind: 'warn', status: [n('failed') && `${n('failed')} failed`, n('partial') && `${n('partial')} partly unconfirmed`].filter(Boolean).join(' · ') } : {}),
+          sub: n('pending') ? `${n('pending')} not yet` : undefined },
+        { label: 'ACK / silenced', value: `${n('acked')} / ${n('silenced')}`, kind: muted ? NT_KIND.acked : 'none', status: muted ? 'repeats stopped' : undefined },
       ]));
-      dv.update(al.map((a) => ({
-        state: a.state, severity: a.labels.severity, name: a.labels.alertname, instance: a.labels.instance, ifName: a.labels.ifName,
-        activeAt: Date.parse(a.activeAt), dur: (Date.now() - Date.parse(a.activeAt)) / 1000, value: Number(a.value), summary: a.annotations.summary, raw: a,
-      })), (r) => ctx.nav.alert(r.raw));
+      dv.update(al.map((a) => {
+        const st = a.state === 'firing' ? notifyState(a) : null;
+        return {
+          state: a.state, severity: a.labels.severity, name: a.labels.alertname, instance: a.labels.instance, ifName: a.labels.ifName,
+          activeAt: Date.parse(a.activeAt), dur: (Date.now() - Date.parse(a.activeAt)) / 1000, value: Number(a.value), summary: a.annotations.summary, raw: a,
+          notify: st ? [st.label, nextText(st)].filter(Boolean).join(' · ') : undefined,
+        };
+      }), (r) => ctx.nav.alert(r.raw));
+      sil.update();
       const r = await fetchRange(tok, [{ q: 'ALERTS', name: () => '' }], secs);
       if (r) putIn(tl, timeline(alertLanes(r, al, ctx.nav), r.t0, r.t1, 'no alert was active in this window'));
     },

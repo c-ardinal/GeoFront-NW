@@ -4,7 +4,8 @@
   check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表で出す
   targets      台帳から Prometheus の scrape 対象・Alloy の送信元対応表・snmp_exporter の auth を生成する
   backup       設定と Prometheus スナップショット・Loki・Grafana を 1 つのアーカイブにまとめる
-  restore      backup のアーカイブを戻す (prometheus / loki / grafana は止めてから)
+  restore      backup のアーカイブを戻す (prometheus / loki / grafana / alertmanager は止めてから)
+  notify-test  各通知先にテスト通知を送り (Alertmanager 経由)、応答 (HTTP / SMTP) を表で出す
   test-syslog  fixtures を Alloy に送り、Loki に正しく解析されて入ったかを確かめる (回帰テスト)
 
 Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
@@ -39,6 +40,10 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
 
+from notify import (DEMO_PLAN, NOTIFY_ENV, RECEIVER_TYPES, RELAY, RELAY_UID, SMTP_PORTS, TEST_ALERT, URL_SECRETS,
+                    alertmanager_config, check_receivers, notify_summary, relay_config, render_receivers)
+import notify  # the notification model (tools/notify.py, next to this file)
+
 WORK = Path(os.environ.get("OBS_WORK", "/work"))
 GEN = Path(os.environ.get("OBS_GENERATED", "/generated"))
 VOL = Path(os.environ.get("OBS_VOLUMES", "/vol"))
@@ -56,10 +61,10 @@ TEMPLATE_VARS = ("SNMP_V3_AUTH_PROTO", "SNMP_V3_PRIV_PROTO")  # filled in by us;
 # community: that one is written into the generated auths.yml (generated volume only, mode 0600, never printed).
 LITERAL_SECRETS = ("SNMP_COMMUNITY",)
 # data volume -> owner the service runs as (a fresh volume first mounted here would otherwise be root-owned)
-VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0)}
+VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0), "alertmanager": (65534, 65534)}
 IFNAME_RE = re.compile(r"[A-Za-z0-9_/:-]{1,64}")  # no dots: mask-api rejects digit.digit in query literals
 RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in the inventory (alloy/config.alloy)
-PUBLIC_URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?")
+PUBLIC_URL_RE = re.compile(r"https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?")  # host name, IPv4 or [IPv6]
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 HOST_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
 DEFAULT_GF_PASSWORDS = ("", "admin", "change-me")
@@ -181,15 +186,22 @@ def wan_of(rows, demo):
 
 
 def wan_rules(wan):
-    """Prometheus rule file: WAN download utilization above 80 % (empty when no WAN interface is configured)."""
+    """Prometheus rule file for the configured WAN interface (empty when there is none): the alert for download
+    utilization above 80 %, and the WAN traffic recorded as obs_wan:* series, which the Grafana wallboard reads (so its
+    WAN panels follow the inventory without naming a device)."""
     if not wan:
         return {"groups": []}
     sel = 'job="snmp",instance="%s",ifName="%s"' % (wan["device"], wan["ifName"])
-    return {"groups": [{"name": "yamaha-wan", "rules": [{
-        "alert": "WanHighUtilization",
-        "expr": f"rate(ifHCInOctets{{{sel}}}[1m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
-        "for": "30s", "labels": {"severity": "warning"},
-        "annotations": {"summary": f'WAN ({wan["device"]} {wan["ifName"]}) download utilization {{{{ $value | printf "%.0f" }}}}%'}}]}]}
+    where = f'{wan["device"]} {wan["ifName"]}'
+    return {"groups": [{"name": "yamaha-wan", "rules": [
+        {"record": "obs_wan:ifHCInOctets:rate1m", "expr": f"rate(ifHCInOctets{{{sel}}}[1m])"},
+        {"record": "obs_wan:ifHCOutOctets:rate1m", "expr": f"rate(ifHCOutOctets{{{sel}}}[1m])"},
+        {"alert": "WanHighUtilization",
+         "expr": f"rate(ifHCInOctets{{{sel}}}[1m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
+         "for": "30s", "labels": {"severity": "warning"},
+         "annotations": {"summary": f'WAN ({where}) download utilization {{{{ $value | printf "%.0f" }}}}%',
+                         "summary_ja": f'WAN ({where}) の下り使用率が {{{{ $value | printf "%.0f" }}}}% です (80% 超)',
+                         "value": '{{ $value | printf "%.0f" }}%'}}]}]}
 
 
 # ---- .env validation ----------------------------------------------------------------------------
@@ -219,7 +231,7 @@ def check_env(values, used_auths=()):
     """-> (errors, warnings) for compose's environment (from .env); Japanese messages."""
     errs, warns = [], []
     for key, v in values.items():
-        if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "GF_")) and ("'" in v or "\n" in v):
+        if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "GF_", "SMTP_", "SLACK_", "DISCORD_", "LINE_", "WEBHOOK_")) and ("'" in v or "\n" in v):
             errs.append(f"{key}: ' (シングルクォート) と改行は使えません")
     for key in ("OBS_BIND", "SYSLOG_BIND"):
         v = values.get(key, "127.0.0.1")
@@ -231,6 +243,10 @@ def check_env(values, used_auths=()):
     pub = values.get("OBS_PUBLIC_URL", "")
     if pub and not PUBLIC_URL_RE.fullmatch(pub):
         errs.append(f"OBS_PUBLIC_URL={pub}: http(s)://ホスト名か IP[:ポート] の形にしてください (末尾の / やパスは付けない)")
+    elif values.get("OBS_BIND") == "0.0.0.0" and (not pub or re.match(r"https?://(127\.|localhost|\[::1\])", pub)):
+        # the proxy answers only the loopback names, OBS_PUBLIC_URL's host and a concrete bind address (DNS rebinding)
+        errs.append("OBS_BIND=0.0.0.0 で OBS_PUBLIC_URL が空か 127.0.0.1 のままです: LAN からは 421 で開けません — "
+                    "OBS_PUBLIC_URL にこのホストの LAN 名 / IP を設定してください (例 http://192.168.100.10:8080)")
     elif lan_bind(values) and (not pub or re.match(r"https?://(127\.|localhost)", pub)):
         warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN から開くと Grafana のリンク (共有 URL など) がこの PC を指します。"
                      "LAN から開くときの URL (例 http://192.168.100.10:8080) にしてください")
@@ -323,15 +339,17 @@ def hostmap(rows, demo=False):
             + "".join(rules) + "  }\n\n  export \"receiver\" {\n    value = loki.relabel.inventory.receiver\n  }\n}\n")
 
 
-def write_atomic(path, text, mode=0o644):
+def write_atomic(path, text, mode=0o644, owner=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(text, encoding="utf-8")
     os.chmod(tmp, mode)
+    if owner and os.geteuid() == 0:  # the service reading it runs as this uid (only root may chown)
+        os.chown(tmp, *owner)
     os.replace(tmp, path)
 
 
-def write_generated(rows, values, demo):
+def write_generated(rows, values, demo, plan=None):
     snmp, flows = file_sd(rows, demo)
     write_atomic(GEN / "prometheus/snmp.json", json.dumps(snmp, indent=2) + "\n")
     write_atomic(GEN / "prometheus/flows.json", json.dumps(flows, indent=2) + "\n")
@@ -343,6 +361,8 @@ def write_generated(rows, values, demo):
     write_atomic(GEN / "ui/config.json", json.dumps(ui_config(rows, demo), indent=2) + "\n")
     write_atomic(GEN / "prometheus/wan-rules.yml", "# Generated by `tools targets`. Do not edit.\n"
                  + yaml.safe_dump(wan_rules(wan_of(rows, demo)), sort_keys=False, width=200))
+    if plan is not None:
+        write_alerting(plan, values)
 
 
 def ui_config(rows, demo):
@@ -353,12 +373,49 @@ def ui_config(rows, demo):
             "bind": env("OBS_BIND", "127.0.0.1")}
 
 
+# ---- alert notifications: files and commands (the model is tools/notify.py) ---------------------------------------
+
+ALERTMANAGER = "http://alertmanager:9093"
+
+
+def receivers_path():
+    return WORK / env("OBS_RECEIVERS", "alerting/receivers.yaml")
+
+
+def load_receivers(path=None):
+    """-> the parsed receivers file, or None when there is none (no notifications)."""
+    path = path or receivers_path()
+    if not path.exists():
+        return None
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise Fail(f"通知先 {rel(path)} の YAML が読めません: {e}") from None
+
+
+def write_alerting(plan, values):
+    write_atomic(GEN / "alertmanager/alertmanager.yml", "# Generated by `tools targets` from alerting/receivers.yaml. Do not edit. (no secrets)\n"
+                 + yaml.safe_dump(alertmanager_config(plan), sort_keys=False, width=200))
+    write_atomic(GEN / "notify/relay.json", json.dumps(relay_config(plan, public_url(values.get("OBS_BIND", "127.0.0.1"), values.get("OBS_PORT", "8080"), values.get("OBS_PUBLIC_URL", ""))), ensure_ascii=False, indent=2) + "\n", mode=0o600, owner=RELAY_UID)
+
+
+def notify_plan(demo, values):
+    """-> (errors, warnings, plan) for the profile: the demo always uses only the demo sink."""
+    if demo:
+        return [], [], DEMO_PLAN
+    return check_receivers(load_receivers(), values, rel(receivers_path()))
+
+
 def reload_services():
     """Apply regenerated files now (Prometheus file_sd needs nothing; Alloy's import.file would also notice within
-    a minute). snmp-exporter re-reads auths.yml; changed secrets in .env still need `docker compose up -d`."""
-    for url in ("http://alloy:12345/-/reload", "http://snmp-exporter:9116/-/reload", "http://prometheus:9090/-/reload"):
+    a minute). snmp-exporter re-reads auths.yml; notify-relay re-reads its config by itself; changed secrets in .env
+    still need `docker compose up -d` (setup step regenerates)."""
+    for url in ("http://alloy:12345/-/reload", "http://snmp-exporter:9116/-/reload", "http://prometheus:9090/-/reload",
+                ALERTMANAGER + "/-/reload"):
         try:
             urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as e:  # e.g. Alertmanager refusing the new config: it keeps the old one
+            print(f"[NG] {url.split('/')[2]} が新しい設定を読み込めませんでした (HTTP {e.code}): {e.read(300).decode('utf-8', 'replace').strip()}")
         except OSError:  # not running (first `up`, or demo): it reads the files when it starts
             pass
 
@@ -370,16 +427,19 @@ def cmd_targets(args):
         report(errs, warns)
         if errs:
             return 2
-        write_generated([], values, demo=True)
+        write_generated([], values, demo=True, plan=DEMO_PLAN)
         print(f"デモ用の scrape 対象を書きました: {', '.join(DEMO_DEVICES)} (demo-gen 経由)")
     else:
         errs, warns, rows = validate(values, load_inventory())
-        report(errs, warns)
-        if errs:
+        n_errs, n_warns, plan = notify_plan(False, values)
+        report(errs + n_errs, warns + n_warns)
+        if errs or n_errs:
             return 2
-        write_generated(rows, values, demo=False)
+        write_generated(rows, values, demo=False, plan=plan)
         print(f"scrape 対象 {len(rows)} 台を書きました ({rel(inventory_path())}): "
               + ", ".join(f"{d['name']}={d['address']}" for d in rows))
+    plan = DEMO_PLAN if args.demo else plan
+    print("通知先: " + (", ".join(f"{n} ({t}: {s})" for n, t, s, _ in notify_summary(plan)) or "なし (どこにも通知しません)"))
     reload_services()
     if (VOL / "grafana").is_dir():  # `run --rm tools targets`: check again right away (setup steps: the guard loop does)
         grafana_guard()
@@ -706,7 +766,8 @@ def mode():
 def services(m):
     base = [("prometheus", "http://prometheus:9090/-/healthy"), ("loki", "http://loki:3100/ready"),
             ("alloy", "http://alloy:12345/-/ready"), ("grafana", "http://grafana:3000/grafana/api/health"),
-            ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz")]
+            ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz"),
+            ("alertmanager", ALERTMANAGER + "/-/healthy"), ("notify-relay", RELAY + "/health")]
     extra = {"demo": [("demo-gen", "http://demo-gen:9116/fault/status")],
              "prod": [("snmp-exporter", "http://snmp-exporter:9116/")]}
     return base + extra.get(m, [])
@@ -796,6 +857,7 @@ def cmd_check(args):
     lan = on_lan(env_map())
     print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}")
     rc |= (not ok) and lan
+    rc |= check_notify(m)
     if not rows:
         return 1
     print("\n■ 機器 (SNMP: exporter 経由で sysUpTime と ifHC カウンタを取得 / Prometheus の up)")
@@ -826,6 +888,104 @@ def cmd_check(args):
         table(("機器", "syslog", "最初に届いた行 / 対処"), lrows)
     print("\n結果:", "すべて OK" if not rc else "NG があります (上の表を確認してください)")
     return 1 if rc else 0
+
+
+def check_notify(m):
+    """Receiver config, Alertmanager running the generated config, Prometheus sending to it. -> 1 on a problem."""
+    print("\n■ 通知 (Alertmanager と通知先)")
+    try:
+        errs, warns, plan = notify_plan(m == "demo", env_map())
+    except Fail as e:
+        errs, warns, plan = [str(e)], [], None
+    if m == "demo":
+        print("デモ: 通知はデモ用の受信先 (demo-sink) に記録するだけで、外部へは送りません")
+    report(errs, warns)
+    rc = int(bool(errs))
+    try:
+        same, when = alertmanager_current()
+        print(f"[OK] Alertmanager は生成された設定で動いています (読み込み {when})" if same else
+              "[NG] Alertmanager が生成済みの設定を読み込んでいません (docker compose run --rm tools targets で再生成・再読込。"
+              "直らなければ docker compose logs alertmanager)")
+    except (OSError, ValueError, KeyError, AttributeError, yaml.YAMLError) as e:
+        same = False
+        print(f"[NG] Alertmanager の設定を確認できません ({type(e).__name__})")
+    rc |= not same
+    try:
+        am = json.loads(http_get("http://prometheus:9090/api/v1/alertmanagers")[1])["data"]["activeAlertmanagers"]
+        print("[OK] Prometheus はアラートを Alertmanager に送っています" if am else "[NG] Prometheus に Alertmanager の送り先がありません")
+        rc |= not am
+    except (OSError, ValueError, KeyError) as e:
+        print(f"[NG] Prometheus に問い合わせできません ({type(e).__name__})")
+        rc = 1
+    if plan and plan["receivers"]:
+        table(("通知先", "種別", "重大度", "宛先"), notify_summary(plan))
+        print("  (実際に届くかは docker compose run --rm tools notify-test で確認)")
+    return rc
+
+
+def alertmanager_current():
+    """-> (True when Alertmanager's last reload succeeded, after the generated file was written, with the same receivers;
+    time of that reload). Its /api/v2/status shows the config with defaults filled in, so only the receivers compare."""
+    path = GEN / "alertmanager/alertmanager.yml"
+    metrics = http_get(ALERTMANAGER + "/metrics")[1]
+    ok = re.search(r"^alertmanager_config_last_reload_successful 1$", metrics, re.M)
+    t = float(re.search(r"^alertmanager_config_last_reload_success_timestamp_seconds (\S+)$", metrics, re.M).group(1))
+    loaded = yaml.safe_load(json.loads(http_get(ALERTMANAGER + "/api/v2/status")[1])["config"]["original"])
+    names = lambda c: sorted(r["name"] for r in c.get("receivers") or [])
+    gen = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return bool(ok) and t + 2 >= path.stat().st_mtime and names(loaded) == names(gen), time.strftime("%m-%d %H:%M:%S", time.localtime(t))
+
+
+def iso_utc(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def post_alerts(alerts):
+    req = urllib.request.Request(ALERTMANAGER + "/api/v2/alerts", data=json.dumps(alerts).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=HTTP_TIMEOUT).close()
+
+
+def cmd_notify_test(args):
+    """A synthetic alert through Alertmanager to each receiver (or one); the relay's record of each answer -> table."""
+    try:
+        am = yaml.safe_load((GEN / "alertmanager/alertmanager.yml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        raise Fail("通知の設定が生成されていません。docker compose up -d の後に実行してください") from None
+    names = [r["name"] for r in am.get("receivers", []) if r["name"] != "none"]
+    if args.receiver and args.receiver not in names:
+        raise Fail(f"通知先 {args.receiver} はありません (ある通知先: {', '.join(names) or 'なし'})")
+    names = [args.receiver] if args.receiver else names
+    if not names:
+        raise Fail(f"通知先がありません。{rel(receivers_path())} を作って (例 alerting/receivers.example.yaml) "
+                   "docker compose run --rm tools targets を実行してください")
+    run, now = f"{int(time.time())}-{os.getpid()}", time.time()
+    alert = lambda n, end: {"labels": {"alertname": TEST_ALERT, "severity": "info", "instance": "notify-test", "obs_test": run, "obs_test_receiver": n},
+                            "annotations": {"summary": "notification test (tools notify-test)", "summary_ja": "通知のテストです (tools notify-test)。対応は不要です",
+                                            "value": "—"}, "startsAt": iso_utc(now), "endsAt": iso_utc(end)}
+    try:
+        post_alerts([alert(n, now + 300) for n in names])
+    except OSError as e:
+        raise Fail(f"Alertmanager にテストのアラートを送れません ({type(e).__name__})。docker compose up -d の後に実行してください") from None
+    print(f"テスト通知を {len(names)} 件の通知先に送りました (run {run})。結果を最大 {args.timeout} 秒待ちます ...", flush=True)
+    got, deadline = {}, time.monotonic() + args.timeout
+    while time.monotonic() < deadline and len(got) < len(names):
+        time.sleep(2)
+        try:
+            for rec in json.loads(http_get(f"{RELAY}/results?test={run}")[1]):
+                got[rec["receiver"]] = rec  # the last attempt (Alertmanager retries a failed one)
+        except (OSError, ValueError) as e:
+            print(f"notify-relay に問い合わせできません ({type(e).__name__})")
+    try:
+        post_alerts([alert(n, time.time()) for n in names])  # resolve the test (the relay does not send its resolution)
+    except OSError:
+        pass
+    rows = [(n, got[n]["type"], "OK" if got[n]["result"] == "ok" else "NG", got[n]["detail"]) if n in got
+            else (n, "—", "NG", "届きませんでした (docker compose logs alertmanager notify-relay を確認)") for n in names]
+    table(("通知先", "種別", "結果", "応答"), rows)
+    bad = sum(r[2] != "OK" for r in rows)
+    print(f"\n{len(rows) - bad}/{len(rows)} OK")
+    return 1 if bad else 0
 
 
 def safe_inventory():
@@ -924,6 +1084,55 @@ def interactive(values, devices):
         devices.append(dev)
 
 
+def ask_receiver(rtype, values):
+    """Questions for one receiver: its non-secret part (-> receivers.yaml) and secrets (-> values, i.e. .env)."""
+    r = {"name": ask("  名前 (英小文字・数字・- _)", rtype), "type": rtype}
+    if rtype == "email":
+        r["to"] = [x.strip() for x in ask("  宛先メールアドレス (複数はカンマ区切り)").split(",") if x.strip()]
+        values["SMTP_HOST"] = ask("  SMTP サーバー (例 smtp.example.com)", values.get("SMTP_HOST", ""))
+        values["SMTP_TLS"] = ask("  暗号化 (starttls / tls / none)", values.get("SMTP_TLS") or "starttls")
+        values["SMTP_PORT"] = ask("  SMTP ポート", values.get("SMTP_PORT") or SMTP_PORTS.get(values["SMTP_TLS"], "587"))
+        values["SMTP_FROM"] = ask("  送信元メールアドレス", values.get("SMTP_FROM", ""))
+        values["SMTP_USER"] = ask("  SMTP ユーザー名 (認証なしなら空)", values.get("SMTP_USER", ""))
+        if values["SMTP_USER"]:
+            values["SMTP_PASSWORD"] = ask("  SMTP パスワード", values.get("SMTP_PASSWORD", ""), secret=True)
+    elif rtype == "line":
+        values["LINE_CHANNEL_ACCESS_TOKEN"] = ask("  LINE Messaging API のチャネルアクセストークン (長期)", values.get("LINE_CHANNEL_ACCESS_TOKEN", ""), secret=True)
+        r["to"] = ask("  送り先のユーザー ID / グループ ID (U… / C…、LINE Developers で確認)")
+    else:
+        key = URL_SECRETS[rtype]
+        what = {"slack": "Slack の Incoming Webhook URL", "discord": "Discord の Webhook URL", "webhook": "送り先の URL"}[rtype]
+        values[key] = ask(f"  {what}", values.get(key, ""), secret=True)
+        if rtype == "webhook":
+            values["WEBHOOK_BEARER_TOKEN"] = ask("  Authorization: Bearer に付けるトークン (不要なら空)", values.get("WEBHOOK_BEARER_TOKEN", ""), secret=True)
+    return r
+
+
+def interactive_receivers(values):
+    """init: optionally scaffold alerting/receivers.yaml (critical / warning to every receiver, info to none)."""
+    path = receivers_path()
+    if path.exists():
+        print(f"\n通知先: 既存の {rel(path)} を使います (変更は手で編集し、tools targets)")
+        return None
+    if ask("\nアラートの通知先 (メール / Slack / Discord / LINE / Webhook) を設定しますか? (y/N)", "n").lower() != "y":
+        print(f"通知先なし (アラートは画面にだけ出ます)。後から: alerting/receivers.example.yaml を {rel(path)} にコピーして編集")
+        return None
+    receivers = []
+    while True:
+        rtype = ask(f"  通知先の種類 ({' / '.join(RECEIVER_TYPES)}、空で終了)")
+        if not rtype:
+            break
+        if rtype not in RECEIVER_TYPES or any(r["type"] == rtype for r in receivers):
+            print("  使えない種類か、追加済みの種類です (秘密値は種類ごとに 1 組。メールの宛先は 1 件に複数書けます)")
+            continue
+        receivers.append(ask_receiver(rtype, values))
+    if not receivers:
+        return None
+    names = [r["name"] for r in receivers]
+    return {"receivers": receivers, "routes": {"critical": {"receivers": list(names), "repeat": "1h"},  # own lists: no YAML anchors
+                                               "warning": {"receivers": list(names), "repeat": "4h"}, "info": {"receivers": [], "repeat": "24h"}}}
+
+
 def grafana_password_from_env():
     v = env("GF_ADMIN_PASSWORD")
     return "" if v == "admin" else v  # "admin" is compose's fallback when .env has none, not a choice
@@ -963,18 +1172,24 @@ def cmd_init(args):
               "SNMP_V3_USER": args.snmp_user or env("SNMP_V3_USER"), "SNMP_V3_AUTH_PROTO": args.snmp_auth_proto,
               "SNMP_V3_AUTH_PASS": env("SNMP_V3_AUTH_PASS"), "SNMP_V3_PRIV_PROTO": args.snmp_priv_proto,
               "SNMP_V3_PRIV_PASS": env("SNMP_V3_PRIV_PASS"), "SNMP_COMMUNITY": env("SNMP_COMMUNITY"),
-              "OBS_INVENTORY": rel(inv), "OBS_PUBLIC_URL": args.public_url}
+              "OBS_INVENTORY": rel(inv), "OBS_PUBLIC_URL": args.public_url,
+              **{k: env(k) for k in NOTIFY_ENV if env(k)}}  # notification settings already in .env are kept
     devices = [parse_device(s) for s in args.device]
     apply_wan(devices, args.wan)
+    receivers = None
     if not args.yes:
         if not sys.stdin.isatty():
             raise Fail("対話できません (TTY なし)。`docker compose run --rm tools init` で実行するか、--yes と引数で指定してください")
         interactive(values, devices)
+        receivers = interactive_receivers(values)
     values["OBS_PUBLIC_URL"] = public_url(values["OBS_BIND"], values["OBS_PORT"], values["OBS_PUBLIC_URL"]) or ""
     if not values["OBS_PUBLIC_URL"] and not args.yes:
-        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 http://192.168.100.10:8080。Grafana のリンクに使う)").rstrip("/")
+        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 http://192.168.100.10:8080。通知と Grafana のリンクに使う)").rstrip("/")
     errs, warns, rows = validate(values, devices)
-    if not values["OBS_PUBLIC_URL"]:
+    if receivers is not None:
+        n_errs, n_warns, _ = check_receivers(receivers, values, rel(receivers_path()))
+        errs, warns = errs + n_errs, warns + n_warns
+    if not values["OBS_PUBLIC_URL"] and not any("421" in e for e in errs):  # (check_env already says it for 0.0.0.0)
         errs.append("OBS_BIND=0.0.0.0 のときは --public-url で LAN から開く URL を指定してください (例 http://192.168.100.10:8080)")
     if values["GF_ADMIN_PASSWORD"] in DEFAULT_GF_PASSWORDS and not any("GF_ADMIN_PASSWORD" in e for e in errs):  # prod: never the default
         errs.append("Grafana 管理者パスワード (GF_ADMIN_PASSWORD) を既定値 (空 / admin / change-me) 以外にしてください")
@@ -991,6 +1206,10 @@ def cmd_init(args):
     write_atomic(inv, render_inventory(rows))
     fix_owner(ENV_FILE, inv, inv.parent)
     print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)")
+    if receivers is not None:
+        write_atomic(receivers_path(), render_receivers(receivers))
+        fix_owner(receivers_path())
+        print(f"[OK] 書きました: {rel(receivers_path())} (通知先 {len(receivers['receivers'])} 件)。起動後に docker compose run --rm tools notify-test")
     offer_grafana_reset(values["GF_ADMIN_PASSWORD"], args)
     print("次: docker compose up -d   (COMPOSE_PROFILES=prod を .env に書いたので profile 指定は不要)\n"
           "    docker compose run --rm tools check   (SNMP 疎通・syslog 受信・health の確認)")
@@ -1068,7 +1287,7 @@ def cmd_backup(args):
     path = out / f"obs-backup-{stamp}.tar.gz"
     inv = inventory_path()
     manifest = {"created": stamp, "format": 2, "mode": mode(), "include_env": bool(args.include_env and ENV_FILE.exists()),
-                "inventory": rel(inv) if inv.exists() else None}
+                "inventory": rel(inv) if inv.exists() else None, "receivers": rel(receivers_path()) if receivers_path().exists() else None}
     snap = snapshot_prometheus()
     umask = os.umask(0o077)  # the archive (and the copies in tmp) are owner-only from the first byte
     try:
@@ -1076,11 +1295,13 @@ def cmd_backup(args):
             gdb = grafana_db_copy(tmp)
             skip_db = lambda ti: None if re.search(r"(^|/)grafana\.db(-wal|-shm|-journal)?$", ti.name) else ti
             sources = [("prometheus", "prometheus", snap, None), ("loki", "loki", VOL / "loki", None),
-                       ("grafana", "grafana", VOL / "grafana", skip_db)]
+                       ("grafana", "grafana", VOL / "grafana", skip_db), ("alertmanager", "alertmanager", VOL / "alertmanager", None)]
             if gdb:
                 sources.append(("grafana", "grafana/grafana.db", gdb, None))
             if inv.exists():
                 sources.append((None, "config/" + manifest["inventory"].lstrip("/"), inv, None))
+            if manifest["receivers"]:
+                sources.append((None, "config/" + manifest["receivers"].lstrip("/"), receivers_path(), None))
             if manifest["include_env"]:
                 sources.append((None, "config/.env", ENV_FILE, None))
             manifest = write_archive(path, manifest, [s for s in sources if Path(s[2]).exists()], tmp)
@@ -1091,12 +1312,12 @@ def cmd_backup(args):
     fix_owner(path)
     size = path.stat().st_size / 2**20
     print(f"[OK] {rel(path)} ({size:.1f} MiB): {', '.join(manifest['parts'])}"
-          + (", 機器台帳" if manifest["inventory"] else "") + (", .env (秘密値を含む。取り扱い注意)" if manifest["include_env"] else ", .env は含めていません"))
+          + (", 機器台帳" if manifest["inventory"] else "") + (", 通知先" if manifest["receivers"] else "") + (", .env (秘密値を含む。取り扱い注意)" if manifest["include_env"] else ", .env は含めていません"))
     return 0
 
 
 def running_services():
-    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000)) if probe(f"tcp://{n}:{port}")[0]]
+    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000), ("alertmanager", 9093)) if probe(f"tcp://{n}:{port}")[0]]
 
 
 def extract_part(tar, members, prefix, dest):
@@ -1134,13 +1355,15 @@ def check_manifest(manifest, members, with_config):
             raise Fail(f"アーカイブの {part} が manifest と合いません ({len(files)} ファイル / {sum(m.size for m in files)} バイト、"
                        f"記録は {want.get('files')} / {want.get('bytes')})。途中で切れたか壊れています (何も消していません)")
     out = []
-    inv = manifest.get("inventory")
-    if inv is not None:
-        rp = Path(str(inv))
+    for key, what, dirs in (("inventory", "機器台帳", ("inventory", "testbed")), ("receivers", "通知先", ("alerting", "testbed"))):
+        given = manifest.get(key)
+        if given is None:
+            continue
+        rp = Path(str(given))
         dst = (WORK / rp).resolve()
         if (rp.is_absolute() or ".." in rp.parts or rp.suffix not in (".yaml", ".yml")
-                or not any(dst.is_relative_to((WORK / d).resolve()) for d in ("inventory", "testbed"))):
-            raise Fail(f"manifest の機器台帳のパスが不正です (inventory/ か testbed/ の .yaml のみ): {inv!r}")
+                or not any(dst.is_relative_to((WORK / d).resolve()) for d in dirs)):
+            raise Fail(f"manifest の{what}のパスが不正です ({' か '.join(d + '/' for d in dirs)} の .yaml のみ): {given!r}")
         out.append((str(rp), dst))
     if manifest.get("include_env"):
         out.append((".env", ENV_FILE))
@@ -1156,7 +1379,7 @@ def cmd_restore(args):
         raise Fail(f"アーカイブがありません: {args.archive}")
     busy = running_services()
     if busy:
-        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana")
+        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana alertmanager")
     with tarfile.open(path, "r:gz") as tar:
         members = tar.getmembers()
         try:
@@ -1187,7 +1410,7 @@ def cmd_restore(args):
                     write_atomic(dst, f.read().decode("utf-8"), mode=0o600 if name == ".env" else 0o644)
                 fix_owner(dst)
                 print(f"[OK] {name} を戻しました (元のファイルは .bak-{stamp})")
-    print("次: docker compose up -d   (台帳を戻したなら docker compose run --rm tools targets も)")
+    print("次: docker compose up -d   (台帳・通知先を戻したなら docker compose run --rm tools targets も)")
     return 0
 
 
@@ -1309,6 +1532,12 @@ def selftest():
     errs, warns, _ = validate({**good, "SNMP_V3_AUTH_PASS": "short", "OBS_BIND": "0.0.0.0", "OBS_PORT": "0"}, dev)
     assert any("8 文字" in e for e in errs) and any("ポート" in e for e in errs), errs
     assert check_env({**good, "OBS_BIND": "0.0.0.0"})[1] and check_env({**good, "OBS_BIND": "lan"})[0]
+    # 0.0.0.0 needs a LAN name in OBS_PUBLIC_URL: the proxy answers no other LAN host (421)
+    assert any("421" in e for e in check_env({**good, "OBS_BIND": "0.0.0.0"})[0])
+    assert any("421" in e for e in check_env({**good, "OBS_BIND": "0.0.0.0", "OBS_PUBLIC_URL": "http://127.0.0.1:8080"})[0])
+    assert not check_env({**good, "OBS_BIND": "0.0.0.0", "OBS_PUBLIC_URL": "http://obs.lan:8080"})[0]
+    assert not check_env({**good, "OBS_BIND": "0.0.0.0", "OBS_PUBLIC_URL": "http://[fd00::10]:8080"})[0]  # IPv6 public URL
+    assert check_env({**good, "OBS_PUBLIC_URL": "http://[fd00::10/x"})[0]
     assert check_env({**good, "SNMP_V3_PRIV_PASS": "it's"})[0]
     lan = {**good, "OBS_BIND": "192.168.100.10"}
     assert check_env({**lan, "GF_ADMIN_PASSWORD": "admin"})[0] and not check_env({**good, "GF_ADMIN_PASSWORD": "admin"})[0]
@@ -1327,8 +1556,17 @@ def selftest():
     assert ui_config([], demo=True)["wan"] == {"device": "rtx1300", "ifName": "lan2"} and wan_rules(None) == {"groups": []}
     wrows = validate(good, [{**dev[0], "wan_interface": "lan2"}, dev[1]])[2]
     assert wan_of(wrows, demo=False) == {"device": "rtx1300", "ifName": "lan2"}
-    rule = wan_rules(wan_of(wrows, demo=False))["groups"][0]["rules"][0]
+    wrules = wan_rules(wan_of(wrows, demo=False))["groups"][0]["rules"]
+    rule = next(r for r in wrules if r.get("alert") == "WanHighUtilization")
     assert 'ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"}' in rule["expr"] and rule["annotations"]["summary"].startswith("WAN (rtx1300 lan2)")
+    assert rule["annotations"]["summary_ja"].startswith("WAN (rtx1300 lan2) の下り使用率") and rule["annotations"]["value"]
+    rec = {r["record"]: r["expr"] for r in wrules if "record" in r}  # the Grafana wallboard's WAN panels read these
+    assert rec == {"obs_wan:ifHCInOctets:rate1m": 'rate(ifHCInOctets{job="snmp",instance="rtx1300",ifName="lan2"}[1m])',
+                   "obs_wan:ifHCOutOctets:rate1m": 'rate(ifHCOutOctets{job="snmp",instance="rtx1300",ifName="lan2"}[1m])'}, rec
+    wall = (WORK / "dashboards/wallboard.json").read_text(encoding="utf-8")
+    assert 'ifName=\\"lan2\\"' not in wall and "obs_wan:ifHCInOctets:rate1m" in wall, "wallboard WAN panels follow the inventory"
+    notify.selftest(good)
+    assert check_env({**good, "SLACK_WEBHOOK_URL": "https://x/'"})[0]  # quoting rules cover the notification secrets too
     werrs = check_devices([{**dev[0], "wan_interface": "ge0.1"}, {**dev[1], "wan_interface": "lan1"}], {"yamaha_v3"})
     assert any("ifName" in e for e in werrs) and any("1 台だけ" in e for e in werrs), werrs
     assert ui_config([], demo=True)["devices"][2] == {"name": "wlx222", "kind": "wlx"} and ui_config([], demo=True)["flows_configured"]
@@ -1479,15 +1717,18 @@ def parser():
     b = sub.add_parser("backup", help="設定とデータを 1 つのアーカイブに")
     b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
     b.add_argument("--out", default="backups", help="出力先 (リポジトリからの相対、既定 backups)")
-    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana は停止しておく)")
+    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana / alertmanager は停止しておく)")
     r.add_argument("archive")
-    r.add_argument("--with-config", action="store_true", help="機器台帳 (と含まれていれば .env) も戻す")
+    r.add_argument("--with-config", action="store_true", help="機器台帳・通知先 (と含まれていれば .env) も戻す")
     r.add_argument("--yes", action="store_true", help="確認せずに実行")
     g = sub.add_parser("grafana-guard", help="(常駐) 管理者が既定パスワードの間は LAN からの /grafana/ を閉じる。定期的に確認")
     g.add_argument("--once", action="store_true", help="1 回だけ確認して終わる")
     sub.add_parser("guard-health", help="(grafana-guard の healthcheck)")
     sub.add_parser("grafana-reset-admin", help="Grafana の admin パスワードを .env の GF_ADMIN_PASSWORD にする")
     sub.add_parser("setup-check", help="(起動時に自動) profile の設定が済んでいるか")
+    n = sub.add_parser("notify-test", help="各通知先にテスト通知 (Alertmanager 経由) を送り、応答を表で出す")
+    n.add_argument("--receiver", default="", metavar="名前", help="この通知先だけ (既定: すべて)")
+    n.add_argument("--timeout", type=int, default=40, metavar="秒", help="結果を待つ秒数 (既定 40)")
     s = sub.add_parser("test-syslog", help="syslog 解析の回帰テスト (fixtures → Alloy → Loki)")
     s.add_argument("--host", default="alloy")
     s.add_argument("--port", type=int, default=514)
@@ -1504,7 +1745,7 @@ def main(argv):
     args = p.parse_args(argv)
     cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
             "grafana-guard": cmd_grafana_guard, "guard-health": cmd_guard_health, "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
-            "restore": cmd_restore, "test-syslog": cmd_test_syslog}
+            "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test}
     if args.cmd not in cmds:
         p.print_help()
         return 0
