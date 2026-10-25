@@ -1,0 +1,33 @@
+// YAMAHA syslog (RFC3164 over UDP) -> Loki
+loki.source.syslog "yamaha" {
+  listener {
+    address       = "0.0.0.0:514"
+    protocol      = "udp"
+    syslog_format = "rfc3164"
+    labels        = { job = "syslog" }
+  }
+  relabel_rules = loki.relabel.syslog.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.relabel "syslog" {
+  forward_to = []
+  rule {
+    source_labels = ["__syslog_message_hostname"]
+    target_label  = "host"
+  }
+  rule {
+    source_labels = ["__syslog_message_severity"]
+    target_label  = "severity"
+  }
+  rule {
+    source_labels = ["__syslog_message_facility"]
+    target_label  = "facility"
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

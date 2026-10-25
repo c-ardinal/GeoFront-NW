@@ -1,0 +1,124 @@
+/* Optional "eva" theme (enable with ?theme=eva or the THEME toggle).
+   Style inspiration only: black base, orange/amber with red warnings, green-cyan for OK, condensed heavy
+   headings, hazard stripes, hex grid, chamfered panels. No logos, names, emblems or copied UI assets.
+   Same layout, panels and data as the default theme; only tokens and decoration change.
+   Contrast of every text token is measured in the hand-off (all >= 4.5:1). */
+:root[data-theme="eva"] {
+  --bg: #050505;
+  --panel: #0c0c0c;
+  --hdr-bg: #140d04;
+  --topbar: #0a0a0a;
+  --frame: #4a3214;
+  --text: #f2eee6;
+  --text-2: #b9b1a3;
+  --accent: #ff9a1f;
+  --ok: #4fe0b0;
+  --warn: #ffc22e;
+  --crit: #ff5a4f;
+  --unknown: #cfc8bc;
+  --crit-tint: #2a0d0b;
+  --warn-tint: #261c06;
+  --banner: #a8100a;
+  --stale-tag: #8f1d14;
+  --track: #2a1f12;
+  --spark-1: #ff9a1f;
+  --hover: #1c1408;
+  --overlay: #0a0a0a;
+  --spark-2: #4fe0b0;
+  --display: 'Oswald', 'IBM Plex Sans', sans-serif;
+  --ja: 'Noto Serif JP', serif;
+  --chamfer: 14px;
+  --chamfer-s: 8px;
+}
+
+/* hex grid in the gutters (panels are opaque, so it never sits behind text) */
+[data-theme="eva"] body {
+  background-color: var(--bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='48' viewBox='0 0 28 48'%3E%3Cpath d='M14 0l14 8v16l-14 8-14-8V8z M14 32v16' fill='none' stroke='%23ff9a1f' stroke-opacity='0.10' stroke-width='1'/%3E%3C/svg%3E");
+  background-size: 28px 48px;
+}
+
+/* ---- top bar ---- */
+[data-theme="eva"] #topbar { border-top: 3px solid var(--accent); clip-path: polygon(0 0, 100% 0, 100% 100%, var(--chamfer) 100%, 0 calc(100% - var(--chamfer))); }
+[data-theme="eva"] .title { font: 700 22px var(--display); letter-spacing: 0.08em; display: flex; align-items: baseline; gap: var(--s3); }
+[data-theme="eva"] .title-ja { display: inline; font: 900 22px var(--ja); color: var(--accent); letter-spacing: 0.04em; }
+[data-theme="eva"] .k-v, [data-theme="eva"] .w-v, [data-theme="eva"] .badge { font-family: var(--display); }
+[data-theme="eva"] .k-v { font-size: 24px; font-weight: 700; }
+[data-theme="eva"] .w-v { font-size: 26px; font-weight: 700; }
+[data-theme="eva"] .k-l { text-transform: uppercase; }
+[data-theme="eva"] .demo-label { background: var(--warn); }
+
+/* emergency banner: hazard stripes in a block left of the text, never behind it */
+[data-theme="eva"] #alert-banner {
+  background-color: var(--banner);
+  background-image: repeating-linear-gradient(-45deg, #000 0 8px, var(--warn) 8px 16px);
+  background-size: 56px 100%; background-repeat: no-repeat;
+  padding-left: 68px; font-family: var(--display); font-size: 16px; letter-spacing: 0.06em;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+}
+[data-theme="eva"] #alert-banner::before {
+  content: '\8B66\544A'; font: 900 16px var(--ja); color: var(--warn); background: #000;
+  padding: 0 var(--s2); margin-right: var(--s3);
+}
+
+/* ---- panels: chamfered corners with an accent edge along each cut ---- */
+[data-theme="eva"] .panel {
+  border-color: var(--frame);
+  /* big cut top-right (header band), small cut bottom-left so it never reaches row text (pad >= 12px) */
+  clip-path: polygon(0 0, calc(100% - var(--chamfer)) 0, 100% var(--chamfer), 100% 100%, var(--chamfer-s) 100%, 0 calc(100% - var(--chamfer-s)));
+  background-color: var(--panel);
+  background-image:
+    linear-gradient(225deg, transparent calc(var(--chamfer) * 0.7 - 1px), var(--accent) calc(var(--chamfer) * 0.7 - 1px) calc(var(--chamfer) * 0.7 + 1px), transparent calc(var(--chamfer) * 0.7 + 1px)),
+    linear-gradient(45deg, transparent calc(var(--chamfer-s) * 0.7 - 1px), var(--accent) calc(var(--chamfer-s) * 0.7 - 1px) calc(var(--chamfer-s) * 0.7 + 1px), transparent calc(var(--chamfer-s) * 0.7 + 1px));
+  background-size: 28px 28px, 16px 16px;
+  background-position: 100% 0, 0 100%;
+  background-repeat: no-repeat;
+}
+[data-theme="eva"] .panel.stale { border-style: dashed; border-color: var(--crit); }
+
+/* headers: double heading (JA + EN) on a dark amber band with a hazard stripe under it */
+[data-theme="eva"] .panel > h2 {
+  background-color: var(--hdr-bg);
+  background-image: repeating-linear-gradient(-45deg, var(--accent) 0 6px, #000 6px 12px);
+  background-size: 100% 4px; background-position: 0 100%; background-repeat: no-repeat;
+  border-bottom: 0; padding-bottom: 4px;
+}
+[data-theme="eva"] .h-ja { display: inline; font: 900 15px var(--ja); color: var(--accent); letter-spacing: 0.04em; }
+[data-theme="eva"] .h-t { font: 700 15px var(--display); letter-spacing: 0.08em; color: var(--text); }
+
+/* status badges: chamfered tags */
+[data-theme="eva"] .st { clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%); letter-spacing: 0.08em; }
+
+/* ---- red-alert mode: steady red "warning" frame, slow pulse only ---- */
+[data-theme="eva"] body.red-alert::before { border: 4px solid var(--crit); }
+[data-theme="eva"] body.red-alert #topbar { border-top-color: var(--crit); }
+
+[data-theme="eva"] #theme-toggle { border-color: var(--accent); color: var(--text); }
+
+/* ---- eva globe: legend swatches match the eva arc colours; HTML labels on a dark chip ---- */
+[data-theme="eva"] .lg-out { background: #ff9a1f; }
+[data-theme="eva"] .lg-in { background: #4fe0b0; }
+[data-theme="eva"] .globe-wrap { background: #000; }
+.glabel { pointer-events: none; transition: opacity 0.2s; }
+.glabel span {
+  position: relative; left: 10px; display: inline-block; white-space: nowrap;
+  font: 600 13px/16px var(--display); letter-spacing: 0.08em;
+  color: var(--warn); background: rgba(0, 0, 0, 0.85); padding: 0 var(--s1);
+  border-left: 2px solid var(--accent);
+}
+.glabel::before { content: ''; position: absolute; left: -3px; top: 5px; width: 6px; height: 6px; background: var(--accent); }
+.glabel-home span { color: var(--text); border-left-color: var(--warn); font-size: 14px; }
+.glabel-home::before { background: var(--warn); }
+@media (prefers-reduced-motion: reduce) { .glabel { transition: none; } }
+
+/* ---- eva: drawer / modal frames ---- */
+[data-theme="eva"] #drawer, [data-theme="eva"] #modal {
+  clip-path: polygon(0 0, calc(100% - var(--chamfer)) 0, 100% var(--chamfer), 100% 100%, var(--chamfer-s) 100%, 0 calc(100% - var(--chamfer-s)));
+}
+[data-theme="eva"] .drawer-head, [data-theme="eva"] .modal-head {
+  background-color: var(--hdr-bg);
+  background-image: repeating-linear-gradient(-45deg, var(--accent) 0 6px, #000 6px 12px);
+  background-size: 100% 4px; background-position: 0 100%; background-repeat: no-repeat; border-bottom: 0; padding-bottom: 12px;
+}
+[data-theme="eva"] #modal-title, [data-theme="eva"] #drawer-title { font-family: var(--display); letter-spacing: 0.06em; }
+[data-theme="eva"] .v-h { font-family: var(--display); }
