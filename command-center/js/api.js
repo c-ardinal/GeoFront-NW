@@ -2,7 +2,13 @@
 
 export async function getJson(url) {
   const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`${url.split('?')[0]} HTTP ${r.status}`);
+  if (!r.ok) {
+    // mask-api refuses queries that could reveal a hidden address (errorType masked_query).
+    const body = r.status === 400 ? await r.json().catch(() => null) : null;
+    const err = new Error(body?.error || `${url.split('?')[0]} HTTP ${r.status}`);
+    err.rejected = body?.errorType === 'masked_query';
+    throw err;
+  }
   const j = await r.json();
   if (j.status && j.status !== 'success') throw new Error(j.error || 'query failed');
   return j.data;
