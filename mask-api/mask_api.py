@@ -564,9 +564,22 @@ def error_body(status, msg):
     return json.dumps({"status": "error", "errorType": "masked_query" if status == 400 else "proxy", "error": msg}).encode()
 
 
+ROLE_HEADER = "X-Obs-Role"
+ROLES = ("viewer",)  # P1: no authentication layer yet, so no role may unmask anything
+
+
+def request_role(headers):
+    """Role for a request. Insertion point for the future auth layer: the front proxy strips X-Obs-Role from
+    clients and only its forward-auth step may set it (caddy/Caddyfile). Until roles that may see more exist
+    (SEC-03), every request is a viewer whatever the header says: masking and query restrictions always apply."""
+    claimed = (headers.get(ROLE_HEADER) or "").strip().lower()
+    return claimed if claimed in ROLES else "viewer"
+
+
 class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         t0 = time.monotonic()
+        _role = request_role(self.headers)  # always "viewer" in P1: nothing below depends on it yet
         url, post, err = route(self.command, self.path)
         if err:
             status, body, ctype = err[0], error_body(*err), "application/json"
@@ -743,11 +756,27 @@ def selftest():
     heavy = CountSpec(("severity",), "{}", [("|=", "R")], 0, s1, 1440 * s1, 11000)  # Codex case: 1440 s range, 1 s step
     lines = [({"severity": "info"}, rnd.randint(0, 11000 * s1), "R") for _ in range(100000)]
     t0 = time.monotonic()
-    res, done = count_buckets(heavy, lines, time.monotonic() + 30)
+    res, done = count_buckets(heavy, lines)  # no deadline: the image is also built on slow hardware / under emulation
     took = time.monotonic() - t0
-    assert done and took < 1.0, took
+    assert done
     print(f"count_buckets: 100k lines x 11000 points, 1440 s range / 1 s step: {took:.2f}s")
+    if os.environ.get("OBS_SELFTEST_PERF") == "1":  # absolute bound only where the hardware is known (local / CI runs)
+        assert took < 1.0, took
     assert sum(int(v) for r in res for _, v in r["values"]) > 100000 * 1000  # each line counted in many windows, at O(1) each
+    # complexity guard on any hardware: a line's cost must not grow with the number of windows covering it
+    # (a per-window loop would make the 1440-step range ~1440x slower than the 1-step one; the difference array ~1x)
+    few = lines[:20000]
+
+    def timed(spec):  # best of 3
+        best = float("inf")
+        for _ in range(3):
+            t = time.monotonic()
+            count_buckets(spec, few)
+            best = min(best, time.monotonic() - t)
+        return best
+    ratio = timed(heavy) / max(timed(heavy._replace(range_ns=s1)), 1e-6)
+    print(f"count_buckets: 1440-step range / 1-step range time ratio {ratio:.1f} (bound 20)")
+    assert ratio < 20, ratio
     res, done = count_buckets(heavy, lines, time.monotonic() - 1)  # deadline already past: stops, reports partial
     assert not done and res == []
 
@@ -912,6 +941,7 @@ def selftest():
     for path in ("/prom/api/v1/status/config", "/prom/api/v1/query/../admin/tsdb/snapshot", "/loki/loki/api/v1/push", "/loki/loki/api/v1/query"):
         assert plan(path)[2][0] == 403, path
     assert route("POST", pq("up"))[2][0] == 405
+    assert request_role({}) == request_role({"X-Obs-Role": "admin"}) == request_role({"X-Obs-Role": " Viewer "}) == "viewer"
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
 

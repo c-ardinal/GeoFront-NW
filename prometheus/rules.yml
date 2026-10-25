@@ -8,14 +8,8 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} SNMP scrape failing"
 
-      - alert: WanHighUtilization
-        expr: |
-          rate(ifHCInOctets{job="snmp",instance="rtx1300",ifName="lan2"}[1m]) * 8
-            / (ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"} * 1e6) * 100 > 80
-        for: 30s
-        labels: {severity: warning}
-        annotations:
-          summary: "WAN (rtx1300 lan2) download utilization {{ $value | printf \"%.0f\" }}%"
+      # WanHighUtilization is generated per profile from the WAN interface (demo: rtx1300 lan2; prod: the inventory's
+      # wan_interface): /etc/obs-generated/prometheus/wan-rules.yml, written by `tools targets`.
 
       - alert: InterfaceErrors
         expr: increase(ifInErrors{job="snmp"}[2m]) + increase(ifOutErrors{job="snmp"}[2m]) > 5

@@ -1,40 +1,60 @@
-# YAMAHA Network Observatory - Grafana-first 試行 (デモ版)
+# YAMAHA Network Observatory - Grafana-first 試行
 
-> **DEMO DATA / synthetic**
-> このスタックが表示するメトリクス・フロー・ログは、すべて `demo-gen` が生成した**疑似データ**です。
+> **DEMO DATA / synthetic (demo profile)**
+> `demo` profile が表示するメトリクス・フロー・ログは、すべて `demo-gen` が生成した**疑似データ**です。
 > 実機 (RTX1300 / WLX413 / WLX222) の観測値ではありません。国・都市・座標・ASN は架空の GeoIP 推定値で、
 > 宛先 IP はドキュメント用予約範囲 (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) のみを使います。
 
 仕様書 (要件定義・設計・試行計画 v1.0) の G1/G2 相当 — 収集 → 保存 → Grafana DB01-Wallboard — の挙動を、
-実機なしで確認するためのものです。
+実機なしで確認するためのものです。v2 P1 から、同じ compose 一式を実機につないで常時運用する `prod` profile と、
+実機なしで prod の経路を試す `testbed` profile を加えました (計画: `docs/plans/v2/PLAN.md`、`docs/plans/v2/P1-SPEC.md`)。
 
 ## 構成
 
+compose の profile で動かし方を選びます (`--profile <名前>`、または `.env` の `COMPOSE_PROFILES`)。共通のサービスはどの profile でも動きます。
+
+| profile | 内容 |
+|---|---|
+| `demo` | demo-gen の疑似データで動くデモ (これまでと同じ) |
+| `prod` | 実機: snmp-exporter (SNMPv3) と LAN からの syslog。対象は機器台帳 `inventory/devices.yaml` |
+| `testbed` | `prod` と一緒に使う疑似実機 (SNMPv3 で答える SNMP シミュレータ + syslog 送信器)。`testbed/testbed.env` で起動 |
+| `capture` | P3 (パケット取込) 用に名前だけ予約。まだサービスはありません |
+
 | サービス | イメージ | 役割 | ホスト公開 |
 |---|---|---|---|
-| demo-gen | python:3.12-slim (自作, 標準ライブラリのみ) | snmp_exporter 互換 `/snmp`、フロー `/flows`、RFC3164 syslog 送信、異常注入 | 127.0.0.1:9116 |
-| prometheus | prom/prometheus:v3.6.0 | SNMP/フロー/自己監視のスクレイプ (15s)、アラートルール | 127.0.0.1:9090 |
-| loki | grafana/loki:3.5.5 | syslog 保存 (single binary, filesystem, tsdb v13、保持 30 日) | なし |
-| alloy | grafana/alloy:v1.11.0 | syslog UDP 514 (rfc3164) 受信 → Loki | なし |
-| grafana | grafana/grafana:12.2.0 | データソース・ダッシュボードをプロビジョニング | 127.0.0.1:3000 |
-| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | コマンドセンター用の読み取り専用プロキシ。Prometheus/Loki の応答中の IP/MAC をサーバ側で伏せる | なし (command-center からのみ) |
+| proxy | caddy:2.11.7-alpine | 前段のリバースプロキシ。command-center を `/`、Grafana を `/grafana/` で配信。認証の差し込み口 | `OBS_BIND:OBS_PORT` (既定 127.0.0.1:8080)、127.0.0.1:9090 (Prometheus 読み取り専用)、127.0.0.1:3000 (旧 Grafana URL の転送) |
+| command-center | nginx:1.29.2-alpine | 自作の司令室画面 (静的) と mask-api への中継 | なし (proxy 経由) |
+| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki の応答中の IP/MAC をサーバ側で伏せる | なし |
+| prometheus | prom/prometheus:v3.6.0 | SNMP/フロー/自己監視のスクレイプ (15s)、アラートルール | なし (proxy の :9090 経由で読み取りのみ) |
+| loki | grafana/loki:3.5.5 | syslog 保存 (single binary, filesystem, tsdb v13) | なし |
+| alloy | grafana/alloy:v1.21.2 | syslog UDP/TCP 514 (raw 受信 + 解析) → Loki | `SYSLOG_BIND:SYSLOG_PORT` (既定 127.0.0.1:514、UDP/TCP) |
+| grafana | grafana/grafana:12.2.0 | データソース・ダッシュボードをプロビジョニング (`/grafana/` 配下) | なし (proxy 経由) |
+| demo-gen (`demo`) | python:3.12-slim (自作) | snmp_exporter 互換 `/snmp`、フロー `/flows`、RFC3164 syslog 送信、異常注入 | 127.0.0.1:9116 |
+| snmp-exporter (`prod`) | prom/snmp-exporter:v0.30.1 | 実機への SNMP (IF-MIB ifTable/ifXTable、SNMPv2-MIB system)。SNMPv3 authPriv 既定 | なし |
+| testbed-rtx / testbed-wlx (`testbed`) | python:3.12-slim + snmpsim (自作) | 疑似実機。SNMPv3 応答と YAMAHA 形式 syslog の送信を同じアドレスから | なし |
+| demo-setup / prod-setup | tools (自作) | 起動時に 1 回だけ動き、profile に合った scrape 対象を生成して終了 | なし |
+| tools | python:3.12-slim + PyYAML (自作) | `docker compose run --rm tools <コマンド>` の初期設定・確認・バックアップ | なし |
 
-ポートはすべて 127.0.0.1 のみに bind します。host network は使いません。
+既定ではすべて 127.0.0.1 にだけ bind します。host network は使いません。
 
-保持期間: syslog (Loki) は 30 日です (`loki/loki-config.yaml` の compactor retention、`retention_period: 720h`)。期限切れのデータは compactor が 10 分ごとに印を付け、2 時間後に削除します。メトリクス (Prometheus) も 30 日です (`--storage.tsdb.retention.time=30d`)。
+運用設定 (全サービス): healthcheck、`restart: unless-stopped` (一回だけ動く setup / tools は除く)、メモリ / CPU 上限 (Raspberry Pi 4 4GB を想定した既定値。`.env` の `PROM_MEM` などで変更)、コンテナログのローテーション (json-file、`LOG_MAX_SIZE` 既定 10m × `LOG_MAX_FILE` 既定 3)、イメージはタグ + digest 固定 (どれも linux/amd64 と linux/arm64 の両方がある multi-arch イメージ。自作イメージの元の python:3.12-slim も digest 固定)。
 
-## 起動
+保持期間: syslog (Loki) は `LOKI_RETENTION` (既定 720h = 30 日。`loki/loki-config.yaml` の compactor retention)。期限切れのデータは compactor が 10 分ごとに印を付け、2 時間後に削除します。メトリクス (Prometheus) は `PROM_RETENTION` (既定 30d)。SD カードの容量で抑えたいときは `PROM_RETENTION_SIZE` (例 `8GB`、古いブロックから消える)。
+
+## デモで試す
 
 ```sh
-cp .env.example .env   # 任意。無くても起動する (Grafana admin パスワードは "admin"、初回ログイン時に変更を促される)
-docker compose up -d --build
+docker compose --profile demo up -d --build
 ```
 
-- Wallboard (ログイン不要・匿名 Viewer): http://127.0.0.1:3000/d/yamaha-wallboard?kiosk
-- Grafana 管理: http://127.0.0.1:3000 (admin / `.env` の `GF_ADMIN_PASSWORD`)
-- Prometheus: http://127.0.0.1:9090 (アラート: /alerts)
+`.env` は無くても動きます (Grafana admin パスワードは "admin"、初回ログイン時に変更を促される)。`cp .env.example .env` して `COMPOSE_PROFILES=demo` を有効にすると `docker compose up -d` だけで起動できます。
 
-停止: `docker compose down` (データも消す場合は `docker compose down -v`)
+- コマンドセンター: http://127.0.0.1:8080/
+- Wallboard (ログイン不要・匿名 Viewer): http://127.0.0.1:8080/grafana/d/yamaha-wallboard?kiosk (以前の http://127.0.0.1:3000/d/yamaha-wallboard?kiosk も転送されます)
+- Grafana 管理: http://127.0.0.1:8080/grafana/ (admin / `.env` の `GF_ADMIN_PASSWORD`)
+- Prometheus: http://127.0.0.1:9090 (アラート: /alerts。読み取り専用。admin API と書き込みは proxy が 403 にします)
+
+停止: `docker compose --profile demo stop` (コンテナも消すなら `down`、データも消す場合は `down -v`)
 
 ## Wallboard (DB01) の見方
 
@@ -80,7 +100,7 @@ docker compose up -d --build
     - **Prometheus**: 文字列は `=` / `!=` のラベル一致の値としてだけ使えます。正規表現マッチ (`=~` `!~`) と、ラベルの文字列を読む・写す・並べる関数 (`label_replace` `label_join` `sort_by_label` `count_values` `info` `limitk` `limit_ratio`) は拒否します。パラメータは `query` と時刻 (`time` / `start` / `end` / `step`) だけです。
     - 共通: 文字列の中に完全な IPv4 / MAC、部分 IP (伏せた形とトークンを除いた残りに **数字.数字**。例 `113.50`、`2.4GHz` も該当)、部分 MAC (**4 組以上の 16 進ペア**。例 `5e:20:00:01`)、発行していないトークン、`\x2e` のように文字を隠すエスケープがあれば拒否します。
   - 伏せた形 (`203.0.113.x`、`02:00:5e:xx:xx:xx`) での絞り込みは使えます。ログビューアでは伏せた本文にそのまま一致します。Prometheus のラベル一致では「同じ先頭を持つ任意のアドレス」に書き換えます (例: `dst_ip="203.0.113.x"` は同じ /24 の全宛先)。
-  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) IPv6 は伏せません (デモデータに含まれません)。ドット区切りの MAC 表記 (`0200.5e10.0001`) も対象外です。(4) Grafana (127.0.0.1:3000) と Prometheus (127.0.0.1:9090) は localhost 限定の管理ツールとして生の値を表示します。マスク対象はコマンドセンター (:8080) 経由の経路だけです。
+  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) IPv6 は伏せません (デモデータに含まれません)。ドット区切りの MAC 表記 (`0200.5e10.0001`) も対象外です。(4) Grafana (`/grafana/`) と Prometheus (127.0.0.1:9090) は管理ツールとして生の値を表示します。マスク対象はコマンドセンター (`/prom/` `/loki/`) 経由の経路だけです。`OBS_BIND` で LAN 公開すると Grafana はログインが必要になります (`OBS_GRAFANA_ANON_ON_LAN=1` で匿名 Viewer に戻すと、LAN から生の値が見えます)。Prometheus の :9090 は常に 127.0.0.1 のみです。
 - 読み取り専用のプロキシ許可パスに `/prom/api/v1/rules` (GET のみ、アラートのルール式表示用) を追加しました。
 
 ## 異常注入
@@ -98,19 +118,128 @@ curl "http://127.0.0.1:9116/fault/status"
 ```
 
 demo-gen の自己テスト: `docker compose exec demo-gen python demo_gen.py --selftest` (イメージビルド時にも実行)。
+mask-api の自己テスト (`python mask-api/mask_api.py --selftest`、イメージビルド時にも実行) は、件数集計の処理時間の絶対値 (1 秒以内) を `OBS_SELFTEST_PERF=1` のときだけ判定します (Pi やエミュレーションでのビルドを時間で落とさないため)。計算量の退行は、範囲の広さを変えたときの処理時間の比でどの環境でも検出します。
 
-## 実機への切り替え
+## 本番に入れる (Raspberry Pi / 小型 PC)
 
-`demo-gen` は snmp_exporter の HTTP 契約 (`/snmp?target=&module=if_mib`) と if_mib のメトリクス名を模倣しています。
-実機を使うときは `prometheus/prometheus.yml` の job `snmp` で
+前提: 64 bit の Linux (Raspberry Pi OS 64-bit / Ubuntu など、arm64 または amd64)、Docker Engine と compose plugin。
+ホストに Python などは要りません (設定作業は `tools` コンテナで行います)。Pi 4 (4 GB) で動く既定値にしてあります。
+P1 時点で実機での動作確認はまだです (下記「既知の制限」)。
 
-- `replacement: demo-gen:9116` を実 snmp_exporter のアドレスへ
-- `targets` を実機の管理 IP へ
+```sh
+# 1. 取得 (git clone など) して、そのディレクトリで:
+docker compose run --rm tools init          # 対話で .env と inventory/devices.yaml を作り、検証する
+#    非対話: docker compose run --rm -e GF_ADMIN_PASSWORD=... -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... \
+#              tools init --yes --snmp-user obs --syslog-bind 192.168.100.10 \
+#              --device rtx1300,rtx,192.168.100.1 --device wlx413,wlx,192.168.100.2 --wan rtx1300:lan2
+#    (この例は tools --selftest が README と突き合わせて確認しています)
+# 2. 機器側に SNMPv3 ユーザーと syslog 送信先を設定する (下記「機器側の設定例」。手作業)
+# 3. 起動 (init が .env に COMPOSE_PROFILES=prod を書くので profile 指定は不要)
+docker compose up -d --build
+# 4. 確認: 設定の検証、各機器への SNMP (sysUpTime・ifHC カウンタ)、syslog の受信待ち (既定 60 秒)、各サービスの health
+docker compose run --rm tools check
+```
 
-変更し、RTX/WLX の syslog 送信先をこのホストの UDP 514 にします (compose で alloy の 514/udp を公開する必要あり)。
-`demo_wlan_clients` と `/flows` はデモ専用で、実機の対応 MIB・フロー収集 (P2) は未確定です。
+- 秘密値 (SNMP のパスワード・コミュニティ、Grafana 管理者パスワード) は `.env` にだけ入ります (git 管理外、権限 600)。機器台帳 `inventory/devices.yaml` (git 管理外。例は `inventory/devices.example.yaml`) には auth の名前だけを書きます。
+- 機器台帳を変えたら `docker compose run --rm tools targets` (Prometheus の scrape 対象と、syslog の送信元 → 機器名の対応表を作り直します。再起動は不要)。`docker compose up` のたびにも `prod-setup` が作り直します。
+- SNMP: `snmp/auths.yml` が auth のテンプレートです。`yamaha_v3` (SNMPv3 authPriv、既定 SHA / AES) と `yamaha_v2c` (`SNMP_COMMUNITY` が空なら無効)。方式は `.env` から埋め込み、SNMPv3 のユーザー名とパスワードは snmp_exporter が起動時に環境変数から読みます (生成物にも書きません)。SNMPv2c のコミュニティは snmp_exporter が環境変数を展開しない項目のため、生成物 (generated ボリューム内の auths.yml、権限 600) に値を書きます (リポジトリやログには出しません)。モジュールは snmp_exporter 同梱の `if_mib` + `system` (IF-MIB / SNMPv2-MIB) です。
+- syslog: `.env` の `SYSLOG_BIND` をこのホストの LAN 側 IP (または `0.0.0.0`) にすると、UDP/TCP `SYSLOG_PORT` (既定 514) で機器から受けます。既定の 127.0.0.1 では LAN から届きません。送信元は機器台帳の `address` で機器名 (Loki の `host`) に対応付けます (IP なら送信元 IP、DNS 名なら送信元の逆引き名)。`host` は送信元アドレスだけで決め、syslog ヘッダのホスト名は使いません (LAN 上の誰でもヘッダに `rtx1300` と書けるため)。台帳に無い送信元は `host="unknown"` で、送信元 IP を `src_ip` ラベルに入れます (画面では伏せ字)。`.env` の `SYSLOG_DROP_UNKNOWN=1` で台帳に無い送信元の行を捨てます。ヘッダのホスト名が機器名と違うときは本文の先頭に残します (ホスト名を省いた RFC3164 で本文の先頭語が欠けることもありません)。`tools check` の syslog 受信待ちも、この送信元アドレスで決まった `host` で数えます。UDP の送信元アドレス自体は偽装できるので、これは認証ではなく取り違えの防止です。台帳の `address` は IP で書くのを勧めます。DNS 名で書くと逆引き名で照合するため、DHCP でホスト名を名乗れる端末に機器名を騙られる余地があります。インターネットから届くホストで `SYSLOG_BIND=0.0.0.0` にする場合は `SYSLOG_DROP_UNKNOWN=1` にし、FW で送信元を絞ってください。Alloy は送信元の逆引き名をキャッシュするため、機器の `address` は固定 IP (DHCP 予約) で書くのが確実です。DNS 名で書いた機器の IP が変わったら `docker compose restart alloy` してください (testbed の疑似機器を作り直したときも同じ。compose には疑似機器の更新時に Alloy も再起動する指定を入れてあります)。
+- WLX の無線クライアント数 (`demo_wlan_clients`) とフロー (`/flows`) はデモ専用です。YAMAHA の独自 MIB の OID は確認できるまで推測で入れません。prod では command-center の WIRELESS CLIENTS は不明 (—)、通信先 (地球儀・TOP DESTINATIONS / SOURCES) はデータなしになります (フロー収集は P3)。
+- WAN: 台帳でルーターに `wan_interface: <ifName>` (例 `lan2`、1 台だけ) を書くと、command-center の WAN パネル・スパークライン・詳細画面 (見出し `WAN · <機器名> <ifName>`) とアラート `WanHighUtilization` (生成される `wan-rules.yml`) がそのインターフェースを使います。`tools init` が rtx の機器で尋ね (非対話は `--wan rtx1300:lan2`)、`tools check` はその ifName が実機の IF-MIB にあるかを確かめます。書かなければ WAN パネルは「WAN interface not configured」と表示し、アラートも作りません。デモは従来どおり rtx1300 の lan2 です。Grafana の Wallboard (`dashboards/wallboard.json`) の WAN パネルは rtx1300 lan2 のままです。
 
-## 既知の観察事項 (実機検証で確認すべき点)
+### 機器側の設定例 (手作業で投入。ツールからは機器の設定を変更しません)
 
-- RFC3164 パーサは、タグ無しで始まる YAMAHA 風メッセージの先頭語をタグとして解釈します。例: `PP[01] Rejected at ...` は本文が `01] Rejected at ...`、`LAN2: link up` は `link up` になります。実機ログの形式を採取してパーサを調整する必要があります (仕様 08 / TC-003)。
-- syslog は受信時刻でタイムスタンプされます (RFC3164 はタイムゾーンを持たないため)。
+仕様 08 章の原則どおり、監視側からは読み取りだけです (SNMP は GET/WALK のみ、書き込みビューは作らない)。以下は**例**です。
+コマンドの書式は機種・ファームウェアのコマンドリファレンスで確認してから投入してください (実機ではまだ確認していません)。
+`192.168.100.10` は監視ホスト、パスワードは `.env` と同じ値にします。
+
+RTX (コンソール / telnet / ssh のコマンド例):
+
+```
+# SNMPv3: 読み取り専用ユーザー (認証 SHA、暗号 AES128-CFB -> .env は SNMP_V3_AUTH_PROTO=SHA / SNMP_V3_PRIV_PROTO=AES)
+snmpv3 usm user 1 obs group 1 sha <認証パスワード> aes128-cfb <暗号パスワード>
+snmpv3 vacm view 1 include 1.3.6.1.2.1
+snmpv3 vacm access 1 read 1
+snmpv3 host 192.168.100.10 user 1
+# syslog の送信先
+syslog host 192.168.100.10
+syslog notice on
+syslog info on
+save
+```
+
+WLX: Web GUI の SNMP 設定で SNMPv3 の読み取り専用ユーザー (同じ認証・暗号方式とパスワード、アクセスを許すホストに監視ホスト) を作り、syslog の送信先に監視ホストを指定します。
+
+確認: `docker compose run --rm tools check` で SNMP が OK、syslog の受信待ちで該当機器の行が届けば完了です。NG の詳細に原因の目安 (応答なし = IP・ポート・SNMP 有効化・ACL、認証エラー = ユーザー名・パスワード・方式) を出します。
+
+## 疑似実機で prod の経路を試す (testbed)
+
+実機なしで prod 構成をそのまま動かします。SNMP シミュレータ (snmpsim) と syslog 送信器が 2 台分 (`testbed-rtx` = rtx1300 は SNMPv3 authPriv、`testbed-wlx` = wlx413 は SNMPv2c) 立ち、本物の snmp-exporter → Prometheus、Alloy → Loki を通ります。
+`testbed/testbed.env` を使うので `.env` には触れず、別プロジェクト名 (別ボリューム) と別ポート (画面 18080、Prometheus 19090、Grafana 13000、syslog 10514) で動きます。資格情報はダミー値です。
+
+```sh
+docker compose --env-file testbed/testbed.env up -d --build
+docker compose --env-file testbed/testbed.env run --rm tools check          # SNMP・up・syslog・health がすべて OK になる
+docker compose --env-file testbed/testbed.env run --rm tools test-syslog    # syslog 解析の回帰テスト
+docker compose --env-file testbed/testbed.env down -v                       # 片付け (testbed のボリュームだけ消える)
+```
+
+シミュレータは実機のファームウェアを模したものではありません (インターフェース構成はデモと同じ、標準 MIB のみ、syslog は fixtures の YAMAHA 形式の行)。
+
+## syslog の解析 (TC-003)
+
+Alloy は syslog を raw で受け (PRI から重要度・facility だけを取り、残りはそのまま)、`loki.process` で RFC5424 / RFC3164 のヘッダがあれば外します。YAMAHA 形式 (PRI のみ・時刻 / ホスト名 / タグなし) は本文をそのまま残すので、以前の RFC3164 パーサで起きていた先頭語の欠け (`PP[01] Rejected at ...` が `01] Rejected at ...`、`LAN2: link up` が `link up` になる) は起きません。デモの syslog も同じ経路なので、デモのログ表示も先頭語まで出るようになりました。raw 受信は Alloy の experimental 機能のため、alloy は `--stability.level=experimental` で動かしています。
+
+- 回帰テスト: `docker compose run --rm tools test-syslog` (`testbed/fixtures/syslog.jsonl` の各行を UDP と TCP で Alloy に送り、Loki に入った行の host / severity / facility / 本文を期待値と比べる)。テストの送信元 (tools コンテナ) は台帳に無いので、すべて `host="unknown"`・`src_ip`=送信元になり、ヘッダのホスト名は本文の先頭に残ることも確かめます。テストの行は `[obs-test …]` の印つきで実際の Loki に入るので、本番では testbed で実行するのがおすすめです (`SYSLOG_DROP_UNKNOWN=1` のときは届きません)。
+- fixtures はデモ生成ログ (demo-gen) の形と、公開仕様 (RFC 3164 / 5424) の例の形から作ったものです。**実機の syslog はまだ採取していません**。実機ログを採取したら fixtures に足して形式を確かめてください。
+- 受信時刻でタイムスタンプします (RFC3164 / YAMAHA 形式は時刻やタイムゾーンを持たない / 持たないことがあるため。RFC5424 の時刻も使いません)。
+
+## 公開範囲と認証の差し込み口
+
+- Grafana が作る絶対 URL (共有リンク・`/grafana/goto/...` など) は `.env` の `OBS_PUBLIC_URL` (既定 `http://127.0.0.1:8080`) を元にします。LAN 公開するときは LAN から開く URL にしてください (`tools init` は `--bind` と `--port` から作り、`0.0.0.0` のときは尋ねます。非対話は `--public-url`)。
+- 台帳の機器名 `unknown` は使えません (台帳に無い syslog 送信元の host に使う予約語)。`SYSLOG_DROP_UNKNOWN=1` で捨てるのは「台帳との対応付けが無かった行」で、ラベルの値では判断しません。
+- 既定は 127.0.0.1 のみ。`.env` の `OBS_BIND` を LAN 側の IP (または `0.0.0.0`) にすると、proxy が command-center と Grafana を LAN に公開します。このとき **認証はありません**。proxy の起動ログに `WARNING: ... WITHOUT authentication (認証なしで LAN 公開中)` を出し、command-center の上部バーに `認証なしで LAN 公開中` (幅が足りないときは `無認証 LAN`) を常に表示します。判定は proxy が返す `/obs/exposure.json` によります (127.x / localhost 以外なら表示)。答えが無いときは `/obs/config.json` に入っている OBS_BIND を使い、どちらも答えないときは前回の値でも 127.x なら信用せず `LAN 公開: 不明` と表示します (前回が LAN なら LAN と表示)。どちらも 60 秒ごとに取り直すので、後から答えが戻ったり OBS_BIND を変えたりしても表示が追従します。
+- Grafana は生の値 (IP / MAC を伏せない) を表示するため、LAN 公開時 (`OBS_BIND` が 127.x 以外) は匿名 Viewer を切り、ログインを必須にします (起動ログに `Grafana anonymous access disabled`)。管理者パスワードは `.env` の `GF_ADMIN_PASSWORD` で、`tools init` は既定値 (空 / admin / change-me) を受け付けず、`tools check` も LAN 公開で既定値なら NG にします (Grafana がこの値を使うのは初回起動時だけ。以降は Grafana の画面で変更)。どうしても LAN でログインなしにしたい場合だけ `OBS_GRAFANA_ANON_ON_LAN=1` (起動ログと check に警告)。command-center (伏せ字あり) はログインなしのままです。
+- Grafana の管理者パスワードの確認: `GF_ADMIN_PASSWORD` は Grafana が最初にデータベースを作るときにしか使われないため、デモで作られた `grafana-data` ボリュームは admin/admin (または change-me) のままになります。そこで常駐の `grafana-guard` (tools イメージ) が `OBS_GRAFANA_GUARD_INTERVAL` 秒 (既定 60) ごとに `grafana.db` の一貫したコピー (SQLite の backup API、元は読み取り専用) を取り、すべてのサーバー管理者 (`is_admin`。名前が admin でなくてもよい) と admin という名前のユーザーについて、保存されたパスワードのハッシュ (Grafana 12.2 の方式: PBKDF2-HMAC-SHA256・10000 回・50 バイト・ユーザーごとの salt) を既定値 (admin / change-me / 空) と比べます。ログインは試さないので、ログイン失敗の記録も Grafana のアカウントロックも起きません。LAN 公開時の `/grafana/` は、proxy が毎回 grafana-guard (内部ネットワークのみ、ホストには出さない) に問い合わせ (Caddy の forward_auth)、「直近の確認が成功で、しかも 2 間隔以内」のときだけ通します。確認の成功 = 「データベースを読めて、サーバー管理者が 1 人以上いて、形式が想定どおりで、どの管理者も既定値ではない」です。それ以外 (既定値の管理者がいる、読めない、壊れている、形式が違う) は 403 で閉じ、開いた後でも次の確認 (最長 1 間隔) で閉じます。grafana-guard が止まった・固まった・応答しない場合も、proxy は 2 秒で諦めて通しません (502 / 504)。確認が 2 間隔より古くなった場合も 403 です。理由は `docker compose logs grafana-guard` と check に出し、LAN 公開を閉じている間は grafana-guard が unhealthy になります (127.0.0.1 公開のときは閉じず、check で注意)。ローカルのパスワードを持たない管理者 (OAuth / LDAP / 認証プロキシで作られ、password も salt も空) は、パスワードでログインできないので既定値には数えません。Grafana の画面で変えたパスワードは `.env` の値と違っても問題ありません (既定値でなければ開きます)。既定値のときは `docker compose run --rm tools grafana-reset-admin` (明示的に実行したときだけ、既定値と分かった管理者ごとに、その既定値で 1 回だけログインし、Grafana の API で `.env` の値に変えます。受け付けられなかった管理者には手での変更方法を表示します)。admin は `docker compose exec grafana grafana cli admin reset-admin-password '<値>'` でも変えられます。`tools init` は既定値の管理者がいれば名前を挙げて変更を提案し (非対話は `--reset-grafana-admin`)、`tools check` と `tools targets` も同じハッシュ確認を使います。
+- 内部ネットワークについて (SEC-03 で扱う): Prometheus の admin API・`/-/reload` は compose の内部ネットワーク上のどのコンテナからも認証なしで呼べます (ホストや LAN には出していません)。Grafana は command-center と同じオリジン (`/grafana/`) で配信されます (以前は別ポート)。command-center は静的な画面で CSP も厳しくしていますが、分離の度合いは下がっています。
+- 認証を後から入れる場所: `caddy/Caddyfile` の forward_auth の例 (コメント)。認証プロキシ (Authelia など) を compose に足して有効にし、役割を `X-Obs-Role` ヘッダで渡します。proxy はクライアントから来た `X-Obs-Role` を必ず消します。mask-api は `X-Obs-Role` を受け取る口 (`request_role`) を持ちますが、今は常に viewer 扱いで伏せ字とクエリ制限は外しません (仕様 SEC-03 の認証層ができるまで)。
+
+## バックアップ / 復元
+
+```sh
+docker compose run --rm tools backup                 # backups/obs-backup-<日時 (JST、.env の TZ で変更)>.tar.gz
+docker compose run --rm tools backup --include-env   # .env (秘密値) も含める。取り扱い注意
+```
+
+1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、機器台帳、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
+
+```sh
+docker compose stop prometheus loki grafana
+docker compose run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz        # 確認あり (--yes で省略)
+docker compose run --rm tools restore backups/... --with-config                         # 機器台帳 (と含まれていれば .env) も戻す
+docker compose up -d
+```
+
+restore は対象のサービスが動いていると止めるよう案内して何もしません。ボリュームの中身を消してアーカイブの内容に置き換え、各サービスの実行ユーザーに所有者を合わせます (空の新しいボリュームにも戻せます)。往復テスト (testbed で backup → ボリューム削除 → restore → 同じ時刻の値と Grafana の印のフォルダが一致) は確認済みです。
+
+## profile を付けずに起動した場合
+
+`docker compose up -d` を profile なし (`.env` に `COMPOSE_PROFILES` も無い) で実行すると、`setup-check` が「profile が指定されていません」と出して失敗し、共有サービスは起動しません (scrape 対象や syslog の対応表が無いまま動かさないため)。`--profile demo` を付けるか、`tools init` で `.env` を作ってください。一度どれかの profile で起動したあとは、最後に生成した設定で動きます。
+
+## 更新
+
+```sh
+git pull                              # compose.yaml のイメージ (タグ + digest) や設定が更新される
+docker compose run --rm tools backup  # 念のため
+docker compose pull                   # 固定された新しいイメージを取得
+docker compose up -d --build          # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す)
+docker compose run --rm tools check
+```
+
+イメージを上げるときは、`compose.yaml` のタグと digest を一緒に変え、linux/amd64 と linux/arm64 の両方があることを確かめます:
+`docker buildx imagetools inspect <image>:<tag>` (Digest と、Manifests の Platform に linux/amd64・linux/arm64 があること)。
+
+## 既知の制限 (P1 時点)
+
+- 実機 (RTX/WLX) では未検証です。SNMPv3 の方式・syslog の形式・機器側コマンドは実機で確かめる必要があります。
+- command-center は proxy の `/obs/config.json` (setup が生成: profile・フロー収集の有無・台帳の機器名と種別。アドレスや資格情報は含まない) で動作を切り替えます。60 秒ごとに取り直し、内容が変わっていれば (初回の取得に失敗していた、`tools targets` で台帳を変えた など) 画面を読み込み直します。調査中 (INVESTIGATE) は読み込み直さず、WALLBOARD に戻ったとき (Esc / BACK TO LIVE / 無操作) に読み込み直します。prod では `DEMO DATA / SYNTHETIC` 表示を出さず、機器一覧は台帳の機器、通信先 (地球儀・TOP DESTINATIONS / SOURCES・UNKNOWN GEO と詳細画面) は「no flow source configured (P3)」の表示になり、フロー未設定は鮮度バッジの DEGRADED / STALE の理由に数えません (設定済みのソースが止まった場合の STALE はこれまでどおり)。WIRELESS CLIENTS は prod では見出しが `MIB unconfirmed` になり、WLX ごとの値は不明 (—) で、0 は表示しません (鮮度バッジには影響しません)。

@@ -1,0 +1,82 @@
+# Front reverse proxy: the only service published beyond localhost.
+#   :80   -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/
+#   :9090 -> 127.0.0.1 only: Prometheus UI, read-only (the admin API used by `tools backup` is never proxied)
+#   :3000 -> 127.0.0.1 only: old Grafana URLs, redirected to /grafana/
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+	# A role header only ever comes from the auth layer below, never from the client.
+	request_header -X-Obs-Role
+
+	# ---- authentication insertion point (P1: no authentication) -------------------------------------
+	# Put a forward-auth provider (Authelia, authentik, oauth2-proxy, ...) on the compose network and enable:
+	#
+	# forward_auth authelia:9091 {
+	# 	uri /api/authz/forward-auth
+	# 	copy_headers Remote-User Remote-Groups
+	# }
+	# @admins header Remote-Groups *obs-admin*
+	# request_header @admins X-Obs-Role admin
+	#
+	# mask-api reads X-Obs-Role (today it always treats the request as viewer and keeps masking on).
+	# Grafana can trust the same identity with GF_AUTH_PROXY_ENABLED / GF_AUTH_PROXY_HEADER_NAME=Remote-User.
+	# ---------------------------------------------------------------------------------------------------
+
+	handle /obs/exposure.json {
+		header Content-Type application/json
+		header Cache-Control no-store
+		respond `\{"bind":"{$OBS_BIND:127.0.0.1}"\}` 200
+	}
+	# profile / flow source / inventory device names for the command-center (written by the setup step)
+	handle /obs/config.json {
+		root * /srv/obs-generated/ui
+		rewrite * /config.json
+		header Cache-Control no-store
+		file_server
+	}
+	handle /healthz {
+		respond "ok" 200
+	}
+	redir /grafana /grafana/ 308
+	handle /grafana/* {
+		# Published beyond localhost, every /grafana/ request is first asked of `grafana-guard` (internal network only):
+		# it answers 200 only while its last check of grafana.db was positive (no admin with a default password) and at
+		# most two check intervals old. 403 from the guard is passed to the client; a stopped, frozen or slow guard means
+		# no answer within 2 s -> 502 / 504. Fail closed by construction. On 127.0.0.1 nothing is asked.
+		@onLan expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
+		forward_auth @onLan grafana-guard:8099 {
+			uri /allow
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 2s
+			}
+		}
+		reverse_proxy grafana:3000
+	}
+	handle {
+		reverse_proxy command-center:80
+	}
+}
+
+:9090 {
+	@admin path /api/v1/admin/*
+	respond @admin "forbidden" 403
+	@write {
+		not method GET HEAD
+		not path /api/v1/query /api/v1/query_range /api/v1/series /api/v1/labels /api/v1/query_exemplars /api/v1/format_query /api/v1/parse_query
+	}
+	respond @write "forbidden" 403
+	reverse_proxy prometheus:9090
+}
+
+:3000 {
+	handle /grafana/* {
+		reverse_proxy grafana:3000
+	}
+	handle {
+		redir * /grafana{uri} 302
+	}
+}

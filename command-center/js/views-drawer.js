@@ -2,10 +2,10 @@
 // Each drawer reads top-down: summary tiles -> charts / relation bars -> detail lists.
 import { el, has, fixed, fmtUptime, fmtDur, maskIp, maskText, jstFull, upState } from './util.js';
 import { lokiLogs, promRules } from './api.js';
-import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind } from './panels.js';
+import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind, FLOW_TEXT, isWlx } from './panels.js';
 import {
   section, kv, linkList, chartBlock, drawRange, fetchRange, mbps, lv, putIn, tiles, vsAvg, rankBars, keyLegend, timeline, alertLanes, alertKey,
-  ALERT_KEYS, stackCols, SEV_KEYS, SEV_BAD, sevBuckets, multiples, seriesBy, maxOf, ipTokens, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN,
+  ALERT_KEYS, stackCols, SEV_KEYS, SEV_BAD, sevBuckets, multiples, seriesBy, maxOf, ipTokens, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
 } from './views-common.js';
 
 const HOUR = 3600;
@@ -64,7 +64,7 @@ export function deviceView(name) {
         { label: 'Traffic ↓ (sum)', value: m.devIn.get(name), unit: 'Mbps', sub: vsAvg(pointsOf(lastR, 0), 1) && `1 h ${vsAvg(pointsOf(lastR, 0), 1)}`, spark: sparkOf(lastR, 0, 'sp-1') },
         { label: 'Traffic ↑ (sum)', value: m.devOut.get(name), unit: 'Mbps', sub: vsAvg(pointsOf(lastR, 1), 1) && `1 h ${vsAvg(pointsOf(lastR, 1), 1)}`, spark: sparkOf(lastR, 1, 'sp-2') },
         { label: 'Errors', value: err, unit: '/min', kind: errKind(err), status: errStatus(err) },
-        { label: 'WLAN clients', value: name.startsWith('wlx') ? m.clients.get(name) : 'n/a', d: 0 },
+        { label: 'WLAN clients', value: isWlx(name) ? m.clients.get(name) : 'n/a', d: 0 },
         { label: 'Firing alerts', value: rel.length, d: 0, kind: rel.length ? 'crit' : 'ok', status: rel.length ? 'see below' : 'none' },
       ]));
       sum();
@@ -162,7 +162,7 @@ export function destView(d) {
       const srcs = [...byKey(fl, (f) => f.src).values()].sort((a, b) => b.bps - a.bps);
       const unknown = d.cc === 'Unknown';
       putIn(s.sum, tiles([
-        { label: 'Total', value: mbps(bps), d: 2, unit: 'Mbps', kind: ok ? 'none' : 'unknown', status: ok ? undefined : 'flow source DOWN' },
+        { label: 'Total', value: mbps(bps), d: 2, unit: 'Mbps', kind: ok ? 'none' : 'unknown', status: ok ? undefined : FLOW_TEXT.status },
         { label: '↓ inbound', value: ok ? mbps(bps - out) : undefined, d: 2, unit: 'Mbps' },
         { label: '↑ outbound', value: mbps(out), d: 2, unit: 'Mbps' },
         { label: 'Share of all flow', value: ok ? pct(bps, all) : undefined, unit: '%' },
@@ -181,7 +181,7 @@ export function destView(d) {
         : 'Location is a GeoIP estimate of the destination (synthetic in this demo). Arcs show a logical relation, not a physical route.'));
       const sel = d.ip ? `dst_ip=${lv(d.ip)}` : `dst_country=${lv(d.cc)}${d.city ? `,dst_city=${lv(d.city)}` : ''}`;
       await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{${sel}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${label} traffic by direction`);
-      if (!ok) throw new Error(FLOWS_DOWN);
+      if (!ok) flowsMissing(ctx.snap);
     },
   };
 }
@@ -208,7 +208,7 @@ export function srcView(host) {
       const all = totalBps(ctx.snap.flows);
       const ccs = [...byKey(fl, (f) => f.cc).values()].sort((a, b) => b.bps - a.bps);
       putIn(s.sum, tiles([
-        { label: 'Total', value: mbps(bps), d: 2, unit: 'Mbps', kind: ok ? 'none' : 'unknown', status: ok ? undefined : 'flow source DOWN' },
+        { label: 'Total', value: mbps(bps), d: 2, unit: 'Mbps', kind: ok ? 'none' : 'unknown', status: ok ? undefined : FLOW_TEXT.status },
         { label: '↑ outbound', value: mbps(out), d: 2, unit: 'Mbps' },
         { label: '↓ inbound', value: ok ? mbps(bps - out) : undefined, d: 2, unit: 'Mbps' },
         { label: 'Share of all flow', value: ok ? pct(bps, all) : undefined, unit: '%' },
@@ -223,7 +223,7 @@ export function srcView(host) {
           onOpen: () => ctx.nav.dest(f.lat === null ? { cc: 'Unknown', ip: g.key } : { cc: f.cc, city: f.city }) };
       }), { head: ['destination', 'Mbps', 'of host'] }) : el('p', 'na', FLOWS_DOWN));
       await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{src_host=${lv(host)}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${host} traffic by direction`);
-      if (!ok) throw new Error(FLOWS_DOWN);
+      if (!ok) flowsMissing(ctx.snap);
     },
   };
 }

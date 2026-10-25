@@ -7,6 +7,7 @@ import * as G from './globe.js';
 import * as UI from './ui.js';
 import * as M from './views-modal.js';
 import * as D from './views-drawer.js';
+import { setNoFlowSource } from './views-common.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -32,7 +33,7 @@ function applyTheme(name, persist) {
 
 // ---- state ----------------------------------------------------------------------------------
 // seen* keep rows that disappear from Prometheus (target down) visible as UNKNOWN instead of vanishing.
-const state = { promOkAt: -Infinity, lokiOkAt: -Infinity, promOkWall: 0, dataAgeAtOk: 0, waitFresh: false, saidMode: null, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
+const state = { flowsConfigured: true, promOkAt: -Infinity, lokiOkAt: -Infinity, promOkWall: 0, dataAgeAtOk: 0, waitFresh: false, saidMode: null, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
 
 // ---- navigation: every "open related data" action goes through here ------------------------------
 // Each drawer view carries its own globe selection; it is (re)applied whenever that view is shown,
@@ -87,7 +88,6 @@ function wirePanelTitles() {
 const UP = 'on (instance) (up{job="snmp"} == 1)';
 const gate = (expr) => `(${expr}) and ${UP}`;
 const ERR_EXPR = '(rate(ifInErrors{job="snmp"}[2m]) + rate(ifOutErrors{job="snmp"}[2m])) * 60';
-const WAN_SEL = `job="snmp",instance="${P.WAN.instance}",ifName="${P.WAN.ifName}"`;
 const Q = {
   // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
   flows: '(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(demo_flow_bytes_total[2m])) * 8) and on () (up{job="flows"} == 1)',
@@ -129,8 +129,8 @@ async function pollProm() {
   const names = Object.keys(Q);
   const [res, sDown, sUp, alerts] = await Promise.all([
     Promise.all(names.map((n) => promQuery(Q[n]))).then((vals) => Object.fromEntries(names.map((n, i) => [n, vals[i]]))),
-    promRange(gate(`rate(ifHCInOctets{${WAN_SEL}}[1m]) * 8 / 1e6`), 900, 15),
-    promRange(gate(`rate(ifHCOutOctets{${WAN_SEL}}[1m]) * 8 / 1e6`), 900, 15),
+    P.WAN.instance ? promRange(gate(`rate(ifHCInOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [], // no WAN configured: nothing to ask
+    P.WAN.instance ? promRange(gate(`rate(ifHCOutOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [],
     promAlerts(),
   ]);
   const m = {
@@ -156,7 +156,7 @@ async function pollProm() {
   // flow source freshness: its scrape target must exist, be up and have a recent sample (else flow data is UNKNOWN)
   const flowsOk = targets.some((t) => t.job === 'flows' && t.up === 1 && t.age < FLOW_MAX_AGE_S);
   state.snap = {
-    at: Date.now(), m, flowsOk, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
+    at: Date.now(), m, flowsOk, flowsConfigured: state.flowsConfigured, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
     freshMin: scalar(res.freshMin), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx),
   };
@@ -164,7 +164,7 @@ async function pollProm() {
   P.renderDevices(m, nav); // before the flow rankings: they are fitted to the height the device list leaves
   P.renderFlows(s, nav);
   G.renderGlobe(s.flows);
-  if (!flowsOk) $('arc-note').textContent = 'flow source DOWN · arcs UNKNOWN';
+  if (!flowsOk) $('arc-note').textContent = P.FLOW_TEXT.arcs;
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
   P.renderWlan(s, state.seenWlan, nav);
@@ -224,7 +224,7 @@ function updateHealth() {
   const promLate = now - state.promOkAt;
   const promStale = promLate > STALE_AFTER_MS;
   const lokiStale = now - state.lokiOkAt > STALE_AFTER_MS;
-  const flowStale = state.snap ? !state.snap.flowsOk : false;
+  const flowStale = state.snap ? state.flowsConfigured && !state.snap.flowsOk : false; // no flow source configured: not a failure
   for (const id of PROM_PANELS) $(id).classList.toggle('stale', promStale || (flowStale && FLOW_PANELS.includes(id)));
   for (const id of LOKI_PANELS) $(id).classList.toggle('stale', lokiStale);
   const s = state.snap;
@@ -305,7 +305,7 @@ function initLayout() {
 // ---- boot sequence -----------------------------------------------------------------------------
 function boot() {
   const lines = ['NETWORK OBSERVATORY // COMMAND CENTER', 'LINK prometheus ............ OK', 'LINK loki .................. OK',
-    'LOAD geo layer ............. OK', 'SOURCE: demo-gen (SYNTHETIC DATA)', 'ESTABLISHING LIVE FEED_'];
+    'LOAD geo layer ............. OK', `SOURCE: ${OBS.source}`, 'ESTABLISHING LIVE FEED_'];
   const pre = $('boot-text');
   const done = () => $('boot').classList.add('gone');
   if (REDUCED_MOTION) { pre.textContent = lines.join('\n'); setTimeout(done, 600); return; }
@@ -313,14 +313,90 @@ function boot() {
   setTimeout(done, 250 + lines.length * 330 + 500);
 }
 
+// ---- deployment info from the front proxy, applied before the bar fitter first measures and before the first render.
+//   /obs/exposure.json: the address the screens are published on (OBS_BIND). Beyond localhost they are on the LAN
+//     without authentication, which the bar says permanently.
+//   /obs/config.json: profile, whether a flow source is configured, the inventory devices, OBS_BIND (setup step).
+// Fresh answers are remembered; a remembered config keeps a prod screen from turning into the demo look when the proxy
+// is slow. The exposure indicator trusts fresh answers only (panels.exposureOf); both are fetched again every
+// OBS_REFRESH_MS, so a later recovery or an OBS_BIND change updates it. With no config at all the bar says so.
+const OBS_REFRESH_MS = 60000;
+const obsJson = (path) => fetch(path, { cache: 'no-store', signal: AbortSignal.timeout(3000) })
+  .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+function stored(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
+}
+function store(key, value) {
+  if (!value) return;
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+async function fetchObs() {
+  const cached = { exp: stored('obs-exposure'), cfg: stored('obs-config') };
+  const [exp, cfg] = await Promise.all([obsJson('/obs/exposure.json'), obsJson('/obs/config.json')]);
+  store('obs-exposure', exp);
+  store('obs-config', cfg);
+  return { exposure: P.exposureOf(exp, cfg, cached.exp, cached.cfg), cfg: cfg || cached.cfg, freshCfg: cfg };
+}
+const LAN_TEXT = '認証なしで LAN 公開中';
+function renderExposure(x) {
+  const lab = $('lan-label');
+  const was = [lab.hidden, lab.textContent].join('|');
+  if (x.kind === 'local') {
+    lab.hidden = true;
+  } else {
+    lab.textContent = x.kind === 'lan' ? LAN_TEXT : 'LAN 公開: 不明';
+    lab.classList.toggle('lan-unknown', x.kind !== 'lan'); // short form in the compact bar
+    lab.title = x.kind === 'lan'
+      ? `OBS_BIND=${x.bind}: screens are published on the LAN without authentication${x.cached ? ' (last known; the proxy did not answer)' : ''}`
+      : 'The proxy did not answer: the screens may be on the LAN without authentication';
+    lab.hidden = false;
+  }
+  return was !== [lab.hidden, lab.textContent].join('|');
+}
+let cfgWatch = { offer() {}, modeChanged() {} };
+function refreshExposure() {
+  fetchObs().then(({ exposure, freshCfg }) => {
+    if (renderExposure(exposure)) UI.refitTopbar(); // the bar's cached compaction does not track this item
+    cfgWatch.offer(freshCfg);
+  });
+}
+const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)' };
+async function applyObsInfo() {
+  const { exposure, cfg } = await fetchObs();
+  renderExposure(exposure);
+  cfgWatch = P.configWatcher(cfg, { mode: UI.mode, reload: () => location.reload() });
+  setInterval(refreshExposure, OBS_REFRESH_MS);
+  if (!cfg) { // never seen: neither the demo label nor prod assumptions
+    const lab = document.querySelector('.demo-label');
+    lab.textContent = 'CONFIG UNAVAILABLE';
+    lab.title = '/obs/config.json did not answer: profile unknown';
+    lab.classList.add('cfg-unknown');
+    OBS.source = 'unknown (config unavailable)';
+  }
+  if (!cfg || cfg.profile === 'demo') return;
+  OBS.profile = String(cfg.profile);
+  const devices = Array.isArray(cfg.devices) ? cfg.devices.filter((d) => d && typeof d.name === 'string') : [];
+  P.setDevices(devices);
+  P.setWan(cfg.wan);
+  $('p-wan').querySelector('.h-t').textContent = P.wanLabel();
+  P.WLAN.unconfirmed = true;
+  $('p-wlan').querySelector('.h-r').textContent = 'MIB unconfirmed';
+  OBS.source = `inventory (${devices.length} devices)`;
+  state.flowsConfigured = cfg.flows_configured !== false;
+  if (!state.flowsConfigured) setNoFlowSource();
+  document.querySelector('.demo-label').hidden = true;
+  document.title = document.title.replace(' (DEMO)', '');
+}
+
 applyTheme(new URLSearchParams(location.search).get('theme') || readStoredTheme(), false);
+await applyObsInfo();
 initLayout();
 $('theme-toggle').addEventListener('click', () => {
   applyTheme(THEMES[(THEMES.indexOf(document.documentElement.dataset.theme) + 1) % THEMES.length], true);
   G.styleGlobe();
   poll();
 });
-UI.initUi({ onClear: () => { G.setSelection(null); G.resetView(); }, onView: applyViewSelection });
+UI.initUi({ onClear: () => { G.setSelection(null); G.resetView(); }, onView: applyViewSelection, onModeChange: () => cfgWatch.modeChanged() });
 // the alert banner is the way into the firing alerts: their full list on the wallboard, the alerts tab / panel below it
 const openAlerts = () => (WALLBOARD.matches ? UI.openModal(M.alertsModal()) : UI.selectTab('alert'));
 $('alert-banner').addEventListener('click', openAlerts);

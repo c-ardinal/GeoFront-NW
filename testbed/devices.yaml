@@ -1,0 +1,14 @@
+# Testbed inventory: the two simulated devices of the `testbed` profile (testbed/device.py).
+# Used via testbed/testbed.env (OBS_INVENTORY=testbed/devices.yaml). Not real devices.
+devices:
+  - name: rtx1300
+    kind: rtx
+    address: testbed-rtx:1161
+    snmp_auth: yamaha_v3
+    syslog: true
+    wan_interface: lan2
+  - name: wlx413
+    kind: wlx
+    address: testbed-wlx:1161
+    snmp_auth: yamaha_v2c  # exercises the SNMPv2c path (community from testbed.env)
+    syslog: true

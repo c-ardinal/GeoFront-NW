@@ -1,0 +1,1522 @@
+"""Observatory setup / operations tool. Runs in the `tools` container: docker compose run --rm tools <command>.
+
+  init         .env と機器台帳 (inventory/devices.yaml) を対話または引数で作り、検証する
+  check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表で出す
+  targets      台帳から Prometheus の scrape 対象・Alloy の送信元対応表・snmp_exporter の auth を生成する
+  backup       設定と Prometheus スナップショット・Loki・Grafana を 1 つのアーカイブにまとめる
+  restore      backup のアーカイブを戻す (prometheus / loki / grafana は止めてから)
+  test-syslog  fixtures を Alloy に送り、Loki に正しく解析されて入ったかを確かめる (回帰テスト)
+
+Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
+Paths: the repository is mounted at /work, the generated volume at /generated, data volumes under /vol.
+Configuration comes from the environment compose passes in (from .env or --env-file); `init` writes .env.
+"""
+import argparse
+import base64
+import getpass
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import re
+import shutil
+import socket
+import sqlite3
+import sys
+import tarfile
+import tempfile
+import time
+import types
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import yaml
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import NamedTuple
+
+WORK = Path(os.environ.get("OBS_WORK", "/work"))
+GEN = Path(os.environ.get("OBS_GENERATED", "/generated"))
+VOL = Path(os.environ.get("OBS_VOLUMES", "/vol"))
+AUTH_TEMPLATE = WORK / "snmp/auths.yml"
+FIXTURES = WORK / "testbed/fixtures/syslog.jsonl"
+ENV_FILE = WORK / ".env"
+ENV_EXAMPLE = WORK / ".env.example"
+
+DEMO_DEVICES = ("rtx1300", "wlx413", "wlx222")
+KINDS = ("rtx", "wlx", "other")
+AUTH_PROTOS = ("SHA", "SHA224", "SHA256", "SHA384", "SHA512", "MD5")  # what snmp_exporter accepts
+PRIV_PROTOS = ("AES", "AES192", "AES256", "AES192C", "AES256C", "DES")
+TEMPLATE_VARS = ("SNMP_V3_AUTH_PROTO", "SNMP_V3_PRIV_PROTO")  # filled in by us; everything else stays ${...}
+# snmp_exporter's --config.expand-environment-variables covers username / password / priv_password only, not
+# community: that one is written into the generated auths.yml (generated volume only, mode 0600, never printed).
+LITERAL_SECRETS = ("SNMP_COMMUNITY",)
+# data volume -> owner the service runs as (a fresh volume first mounted here would otherwise be root-owned)
+VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0)}
+IFNAME_RE = re.compile(r"[A-Za-z0-9_/:-]{1,64}")  # no dots: mask-api rejects digit.digit in query literals
+RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in the inventory (alloy/config.alloy)
+PUBLIC_URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+HOST_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
+DEFAULT_GF_PASSWORDS = ("", "admin", "change-me")
+SAFE_ENV = re.compile(r"[A-Za-z0-9_./:,@+-]*")
+HTTP_TIMEOUT = 5
+GRAFANA = "http://grafana:3000/grafana"
+SNMP_TIMEOUT = 40
+
+
+class Fail(Exception):
+    """A user-facing error (Japanese message); exit code 2."""
+
+
+def rel(path):
+    """Path as shown and stored: relative to the repository when inside it (test runs may point elsewhere)."""
+    try:
+        return str(Path(path).relative_to(WORK))
+    except ValueError:
+        return str(path)
+
+
+def env(key, default=""):
+    return os.environ.get(key, default)
+
+
+def env_map():
+    return dict(os.environ)
+
+
+# ---- inventory ----------------------------------------------------------------------------------
+
+def inventory_path():
+    return WORK / env("OBS_INVENTORY", "inventory/devices.yaml")
+
+
+def split_address(address):
+    """'192.168.100.1' / 'rtx.lan' / 'host:1161' -> (host, port or None)."""
+    host, sep, port = str(address).rpartition(":")
+    return (host, port) if sep and port.isdigit() else (str(address), None)
+
+
+def is_ipv4(s):
+    try:
+        ipaddress.IPv4Address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def check_devices(devices, known_auths):
+    """-> list of Japanese error messages for an inventory's device list."""
+    errs, names, addrs, wans = [], set(), set(), []
+    if not isinstance(devices, list) or not devices:
+        return ["機器台帳に devices: の一覧がありません (1 台以上必要です)"]
+    for i, d in enumerate(devices, 1):
+        where = f"台帳の {i} 台目"
+        if not isinstance(d, dict):
+            errs.append(f"{where}: name / kind / address / snmp_auth を持つ項目にしてください")
+            continue
+        name, kind, addr, auth = (str(d.get(k, "")).strip() for k in ("name", "kind", "address", "snmp_auth"))
+        where = f"{where} ({name or '名前なし'})"
+        unknown = set(d) - {"name", "kind", "address", "snmp_auth", "syslog", "wan_interface"}
+        if unknown:
+            errs.append(f"{where}: 不明な項目 {', '.join(sorted(map(str, unknown)))}")
+        if name in RESERVED_NAMES:
+            errs.append(f"{where}: name '{name}' は予約語です (台帳に無い syslog 送信元の host に使うため)。別の名前にしてください")
+        elif not NAME_RE.fullmatch(name):
+            errs.append(f"{where}: name は英小文字・数字・- _ の 1〜32 文字にしてください (例 rtx1300)")
+        elif name in names:
+            errs.append(f"{where}: name が重複しています")
+        names.add(name)
+        if kind not in KINDS:
+            errs.append(f"{where}: kind は {' / '.join(KINDS)} のどれかにしてください")
+        host, port = split_address(addr)
+        looks_ip = re.fullmatch(r"[\d.]+", host) is not None
+        if not addr or not (is_ipv4(host) if looks_ip else HOST_RE.fullmatch(host)) or (port and not 0 < int(port) < 65536):
+            errs.append(f"{where}: address は管理 IP (IPv4) か DNS 名にしてください (ポート指定は host:1161 の形)")
+        elif addr in addrs:
+            errs.append(f"{where}: address が他の機器と重複しています")
+        addrs.add(addr)
+        if auth not in known_auths:
+            avail = " / ".join(sorted(known_auths)) or "なし (.env の SNMP 資格情報が空です)"
+            errs.append(f"{where}: snmp_auth '{auth}' は使えません。使える auth: {avail}")
+        if "syslog" in d and not isinstance(d["syslog"], bool):
+            errs.append(f"{where}: syslog は true / false にしてください")
+        if "wan_interface" in d:
+            wans.append(name)
+            if not IFNAME_RE.fullmatch(str(d["wan_interface"] or "")):
+                errs.append(f"{where}: wan_interface は ifName (英数字と _ / : - 、例 lan2) にしてください")
+    if len(wans) > 1:
+        errs.append(f"wan_interface は 1 台だけに書いてください (今は {', '.join(wans)})")
+    return errs
+
+
+def load_inventory(path=None):
+    path = path or inventory_path()
+    if not path.exists():
+        raise Fail(f"機器台帳 {rel(path)} がありません。`docker compose run --rm tools init` で作成してください")
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise Fail(f"機器台帳 {rel(path)} の YAML が読めません: {e}") from None
+    if not isinstance(doc, dict):
+        raise Fail(f"機器台帳 {rel(path)} は devices: から始まる形にしてください")
+    return doc.get("devices")
+
+
+def device_rows(devices):
+    return [{"name": str(d["name"]).strip(), "kind": str(d["kind"]).strip(), "address": str(d["address"]).strip(),
+             "snmp_auth": str(d["snmp_auth"]).strip(), "syslog": d.get("syslog", True),
+             **({"wan_interface": str(d["wan_interface"]).strip()} if d.get("wan_interface") else {})} for d in devices]
+
+
+def wan_of(rows, demo):
+    """-> {"device", "ifName"} of the WAN interface, or None (prod without wan_interface)."""
+    if demo:
+        return {"device": "rtx1300", "ifName": "lan2"}
+    return next(({"device": d["name"], "ifName": d["wan_interface"]} for d in rows if d.get("wan_interface")), None)
+
+
+def wan_rules(wan):
+    """Prometheus rule file: WAN download utilization above 80 % (empty when no WAN interface is configured)."""
+    if not wan:
+        return {"groups": []}
+    sel = 'job="snmp",instance="%s",ifName="%s"' % (wan["device"], wan["ifName"])
+    return {"groups": [{"name": "yamaha-wan", "rules": [{
+        "alert": "WanHighUtilization",
+        "expr": f"rate(ifHCInOctets{{{sel}}}[1m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
+        "for": "30s", "labels": {"severity": "warning"},
+        "annotations": {"summary": f'WAN ({wan["device"]} {wan["ifName"]}) download utilization {{{{ $value | printf "%.0f" }}}}%'}}]}]}
+
+
+# ---- .env validation ----------------------------------------------------------------------------
+
+def render_auths(values):
+    """snmp/auths.yml template -> (auths dict for snmp_exporter, names). Protocols are substituted; secret
+    references stay ${...}; an auth with an empty referenced variable is dropped."""
+    text = AUTH_TEMPLATE.read_text(encoding="utf-8")
+    for k in TEMPLATE_VARS:
+        text = text.replace("${%s}" % k, values.get(k, ""))
+    auths = (yaml.safe_load(text) or {}).get("auths", {})
+    keep = {}
+    for name, a in auths.items():
+        refs = re.findall(r"\$\{(\w+)\}", json.dumps(a))
+        if all(values.get(r) for r in refs):
+            keep[name] = {k: literal_secret(v, values) for k, v in a.items()}
+    return keep
+
+
+def literal_secret(v, values):
+    """A whole-value ${VAR} reference to one of LITERAL_SECRETS -> its value; anything else unchanged."""
+    m = re.fullmatch(r"\$\{(\w+)\}", v) if isinstance(v, str) else None
+    return values[m.group(1)] if m and m.group(1) in LITERAL_SECRETS else v
+
+
+def check_env(values, used_auths=()):
+    """-> (errors, warnings) for compose's environment (from .env); Japanese messages."""
+    errs, warns = [], []
+    for key, v in values.items():
+        if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "GF_")) and ("'" in v or "\n" in v):
+            errs.append(f"{key}: ' (シングルクォート) と改行は使えません")
+    for key in ("OBS_BIND", "SYSLOG_BIND"):
+        v = values.get(key, "127.0.0.1")
+        if not is_ipv4(v):
+            errs.append(f"{key}={v}: IPv4 アドレスにしてください (127.0.0.1 / LAN 側の IP / 0.0.0.0)")
+        elif not ipaddress.IPv4Address(v).is_loopback:
+            what = "画面 (command-center / Grafana)" if key == "OBS_BIND" else "syslog 受信"
+            warns.append(f"{key}={v}: {what}を LAN に公開します。認証はまだありません")
+    pub = values.get("OBS_PUBLIC_URL", "")
+    if pub and not PUBLIC_URL_RE.fullmatch(pub):
+        errs.append(f"OBS_PUBLIC_URL={pub}: http(s)://ホスト名か IP[:ポート] の形にしてください (末尾の / やパスは付けない)")
+    elif lan_bind(values) and (not pub or re.match(r"https?://(127\.|localhost)", pub)):
+        warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN から開くと Grafana のリンク (共有 URL など) がこの PC を指します。"
+                     "LAN から開くときの URL (例 http://192.168.100.10:8080) にしてください")
+    for key, default in (("OBS_PORT", "8080"), ("SYSLOG_PORT", "514")):
+        v = values.get(key, default)
+        if not (v.isdigit() and 0 < int(v) < 65536):
+            errs.append(f"{key}={v}: 1〜65535 のポート番号にしてください")
+    lan = on_lan(values)
+    if values.get("GF_ADMIN_PASSWORD", "admin") in DEFAULT_GF_PASSWORDS:
+        if lan:
+            errs.append("GF_ADMIN_PASSWORD が既定値のまま LAN に公開しようとしています。LAN 公開時は Grafana にログインが必要です。パスワードを変えてください")
+        else:
+            warns.append("GF_ADMIN_PASSWORD が既定値です。Grafana 管理者パスワードを変えてください (初回起動時のみ反映)")
+    if lan and values.get("OBS_GRAFANA_ANON_ON_LAN") == "1":
+        warns.append("OBS_GRAFANA_ANON_ON_LAN=1: Grafana をログインなし (匿名 Viewer) で LAN に公開します。IP / MAC は伏せられません")
+    if "yamaha_v3" in used_auths:
+        if not values.get("SNMP_V3_USER"):
+            errs.append("SNMP_V3_USER が空です (SNMPv3 のユーザー名)")
+        for key in ("SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
+            if len(values.get(key, "")) < 8:
+                errs.append(f"{key} は 8 文字以上にしてください (SNMPv3 の決まり)")
+        if values.get("SNMP_V3_AUTH_PROTO", "") not in AUTH_PROTOS:
+            errs.append(f"SNMP_V3_AUTH_PROTO は {' / '.join(AUTH_PROTOS)} のどれかにしてください")
+        if values.get("SNMP_V3_PRIV_PROTO", "") not in PRIV_PROTOS:
+            errs.append(f"SNMP_V3_PRIV_PROTO は {' / '.join(PRIV_PROTOS)} のどれかにしてください")
+    if "yamaha_v2c" in used_auths:
+        if not values.get("SNMP_COMMUNITY"):
+            errs.append("SNMP_COMMUNITY が空です (SNMPv2c のコミュニティ名)")
+        elif values["SNMP_COMMUNITY"] in ("public", "private"):
+            warns.append("SNMP_COMMUNITY が推測されやすい値です。SNMPv3 (yamaha_v3) を推奨します")
+        warns.append("SNMPv2c は暗号化されません。可能なら SNMPv3 (yamaha_v3) を使ってください")
+    return errs, warns
+
+
+def validate(values, devices):
+    """Full prod validation: (errors, warnings, device rows or None)."""
+    dev_errs = check_devices(devices, _declared_auths())
+    used = {str(d.get("snmp_auth", "")).strip() for d in devices if isinstance(d, dict)} if isinstance(devices, list) else set()
+    errs, warns = check_env(values, used)
+    if dev_errs:
+        return dev_errs + errs, warns, None
+    if not errs:  # an auth added to snmp/auths.yml by hand: its ${...} variables must be set too
+        errs = [f"snmp_auth {a} の資格情報 (snmp/auths.yml が参照する変数) が .env で空です" for a in sorted(used - set(render_auths(values)))]
+    return errs, warns, device_rows(devices)
+
+
+def _declared_auths():
+    return set((yaml.safe_load(AUTH_TEMPLATE.read_text(encoding="utf-8")) or {}).get("auths", {}))
+
+
+# ---- generated files (Prometheus file_sd, Alloy host map, snmp_exporter auths) --------------------
+
+def file_sd(rows, demo):
+    if demo:
+        snmp = [{"targets": [n], "labels": {"__device": n, "__exporter": "demo-gen:9116", "__param_module": "if_mib"}}
+                for n in DEMO_DEVICES]
+        return snmp, [{"targets": ["demo-gen:9116"]}]
+    snmp = [{"targets": [d["address"]], "labels": {"__device": d["name"], "__exporter": "snmp-exporter:9116",
+                                                   "__param_module": "if_mib,system", "__param_auth": d["snmp_auth"]}}
+            for d in rows]
+    return snmp, []
+
+
+def alloy_string(s):
+    return json.dumps(s)  # Alloy string literals use the same escapes
+
+
+def relabel_rule(sources, rx, replacement):
+    srcs = ", ".join(alloy_string(s) for s in sources)
+    return (f"    rule {{\n      source_labels = [{srcs}]\n      regex         = {alloy_string(rx)}\n"
+            f"      target_label  = \"inv_host\"\n      replacement   = {alloy_string(replacement)}\n    }}\n")
+
+
+def hostmap(rows, demo=False):
+    """Alloy module: syslog sender address -> inventory name (host label). An IP address matches the packet's
+    source IP; a DNS name matches the sender's reverse-DNS name (first label or full name). Demo: demo-gen sends
+    for all three devices from one address, so only that sender may name them in its header, and only those names."""
+    rules = []
+    if demo:
+        rules.append(relabel_rule(["src_name", "hdr_host"], r"[^;]*demo-gen[^;]*;(" + "|".join(DEMO_DEVICES) + ")", "$1"))
+    for d in rows:
+        host, _ = split_address(d["address"])
+        if is_ipv4(host):
+            rules.append(relabel_rule(["src_addr"], re.escape(host), d["name"]))
+        else:
+            rules.append(relabel_rule(["src_name"], re.escape(host) + r"(\..*)?", d["name"]))
+    return ("// Generated by `tools targets` from the device inventory. Do not edit: changes are overwritten.\n"
+            "declare \"hostmap\" {\n  argument \"forward_to\" { }\n\n"
+            "  loki.relabel \"inventory\" {\n    forward_to = argument.forward_to.value\n"
+            + "".join(rules) + "  }\n\n  export \"receiver\" {\n    value = loki.relabel.inventory.receiver\n  }\n}\n")
+
+
+def write_atomic(path, text, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def write_generated(rows, values, demo):
+    snmp, flows = file_sd(rows, demo)
+    write_atomic(GEN / "prometheus/snmp.json", json.dumps(snmp, indent=2) + "\n")
+    write_atomic(GEN / "prometheus/flows.json", json.dumps(flows, indent=2) + "\n")
+    write_atomic(GEN / "alloy/hostmap.alloy", hostmap([] if demo else rows, demo))
+    auths = render_auths(values) if not demo else {}
+    write_atomic(GEN / "snmp/auths.yml", "# Generated by `tools targets` from snmp/auths.yml. Do not edit.\n"
+                 + yaml.safe_dump({"auths": auths}, sort_keys=False), mode=0o600)  # may hold the v2c community
+    write_atomic(GEN / "mode", "demo\n" if demo else "prod\n")
+    write_atomic(GEN / "ui/config.json", json.dumps(ui_config(rows, demo), indent=2) + "\n")
+    write_atomic(GEN / "prometheus/wan-rules.yml", "# Generated by `tools targets`. Do not edit.\n"
+                 + yaml.safe_dump(wan_rules(wan_of(rows, demo)), sort_keys=False, width=200))
+
+
+def ui_config(rows, demo):
+    """What the command-center needs to know about the deployment (served by the proxy as /obs/config.json):
+    no addresses or credentials, only names."""
+    devices = [{"name": n, "kind": n[:3]} for n in DEMO_DEVICES] if demo else [{"name": d["name"], "kind": d["kind"]} for d in rows]
+    return {"profile": "demo" if demo else "prod", "flows_configured": demo, "devices": devices, "wan": wan_of(rows, demo),
+            "bind": env("OBS_BIND", "127.0.0.1")}
+
+
+def reload_services():
+    """Apply regenerated files now (Prometheus file_sd needs nothing; Alloy's import.file would also notice within
+    a minute). snmp-exporter re-reads auths.yml; changed secrets in .env still need `docker compose up -d`."""
+    for url in ("http://alloy:12345/-/reload", "http://snmp-exporter:9116/-/reload", "http://prometheus:9090/-/reload"):
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=HTTP_TIMEOUT)
+        except OSError:  # not running (first `up`, or demo): it reads the files when it starts
+            pass
+
+
+def cmd_targets(args):
+    values = env_map()
+    if args.demo:
+        errs, warns = check_env(values)  # e.g. a LAN-exposed demo with the default Grafana password
+        report(errs, warns)
+        if errs:
+            return 2
+        write_generated([], values, demo=True)
+        print(f"デモ用の scrape 対象を書きました: {', '.join(DEMO_DEVICES)} (demo-gen 経由)")
+    else:
+        errs, warns, rows = validate(values, load_inventory())
+        report(errs, warns)
+        if errs:
+            return 2
+        write_generated(rows, values, demo=False)
+        print(f"scrape 対象 {len(rows)} 台を書きました ({rel(inventory_path())}): "
+              + ", ".join(f"{d['name']}={d['address']}" for d in rows))
+    reload_services()
+    if (VOL / "grafana").is_dir():  # `run --rm tools targets`: check again right away (setup steps: the guard loop does)
+        grafana_guard()
+    return 0
+
+
+# ---- Grafana admin credential guard -------------------------------------------------------------
+# GF_SECURITY_ADMIN_PASSWORD only takes effect when Grafana creates its database, so a volume first started by the
+# demo keeps admin/admin (or change-me) whatever .env says later. The guard therefore checks the passwords Grafana
+# actually stores: the hashes in grafana.db (read through a consistent read-only copy, never a login, so it causes
+# no failed-login records and no lockouts, and works whatever a password was changed to in the UI). Only a positive
+# result opens the LAN; the grafana-guard service repeats it every OBS_GRAFANA_GUARD_INTERVAL seconds.
+
+GRAFANA_DB = VOL / "grafana/grafana.db"
+DEFAULT_LOGIN_PASSWORDS = ("admin", "change-me", "")
+# Grafana 12.2 pkg/util/encoding.go EncodePassword: hex(pbkdf2.Key(sha256, password, salt, 10000, 50))
+GF_HASH_ITERATIONS, GF_HASH_BYTES = 10000, 50
+GUARD_STATUS = Path("/tmp/grafana-guard.json")  # last result of the guard loop, read by its healthcheck
+
+
+def lan_bind(values):
+    return on_lan(values)
+
+
+def public_url(bind, port, given=""):
+    """Where browsers open the screens (Grafana builds its absolute links from it): given, else derived from OBS_BIND,
+    else None (0.0.0.0: every address of the host, so a name has to be chosen)."""
+    if given:
+        return given.rstrip("/")
+    if bind == "0.0.0.0":
+        return None
+    return f"http://{'127.0.0.1' if bind in ('localhost', '') else bind}:{port}"
+
+
+def on_lan(values):
+    b = values.get("OBS_BIND", "127.0.0.1")
+    return b != "localhost" and not (is_ipv4(b) and ipaddress.IPv4Address(b).is_loopback)
+
+
+def grafana_hash(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), GF_HASH_ITERATIONS, GF_HASH_BYTES).hex()
+
+
+class GrafanaDbUnreadable(Exception):
+    """grafana.db could not be read or does not look like Grafana 12's schema: nothing is known, stay closed."""
+
+
+class GfAdmin(NamedTuple):
+    login: str
+    password: str  # "" = no local password (an OAuth / LDAP / proxy-auth account): cannot log in with a password
+    salt: str
+
+
+def grafana_admins(db_path=None):
+    """Every server admin (is_admin = 1) plus a login named "admin" if there is one, from a consistent copy of
+    grafana.db (sqlite backup API, source opened read-only). Raises GrafanaDbUnreadable when this cannot be told."""
+    src = Path(db_path or GRAFANA_DB)
+    if not src.is_file():
+        raise GrafanaDbUnreadable(f"{src} がありません (Grafana がまだ初期化していない?)")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            con = sqlite3.connect(grafana_db_copy(tmp, src))
+            try:
+                if con.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                    raise GrafanaDbUnreadable("grafana.db の整合性検査に失敗しました")
+                cols = {r[1] for r in con.execute('PRAGMA table_info("user")')}
+                if not {"login", "password", "salt", "is_admin"} <= cols:
+                    raise GrafanaDbUnreadable(f"user テーブルが想定と違います (列: {sorted(cols) or 'なし'})")
+                rows = con.execute('SELECT login, password, salt, is_admin FROM "user" WHERE is_admin = 1 OR login = ?', ("admin",)).fetchall()
+            finally:
+                con.close()
+    except (OSError, sqlite3.Error) as e:
+        raise GrafanaDbUnreadable(f"grafana.db を読めません ({type(e).__name__}: {e})") from None
+    if not any(r[3] == 1 for r in rows):
+        raise GrafanaDbUnreadable("サーバー管理者 (is_admin) のユーザーが grafana.db にありません")
+    admins = []
+    for login, pw, salt, _ in rows:
+        if not pw and not salt:  # no local password at all
+            admins.append(GfAdmin(login, "", ""))
+        elif isinstance(pw, str) and re.fullmatch(r"[0-9a-f]{%d}" % (2 * GF_HASH_BYTES), pw) and isinstance(salt, str) and salt:
+            admins.append(GfAdmin(login, pw, salt))
+        else:
+            raise GrafanaDbUnreadable(f"ユーザー {login} のパスワードが想定の形式 (PBKDF2-SHA256 50 bytes hex) ではありません")
+    return admins
+
+
+def default_of(admin):
+    """The default password (admin / change-me / empty) this admin can log in with, or None."""
+    if not admin.password:
+        return None
+    return next((c for c in DEFAULT_LOGIN_PASSWORDS if hmac.compare_digest(grafana_hash(c, admin.salt), admin.password)), None)
+
+
+def grafana_defaults(db_path=None):
+    """-> [(admin, default password)] for every admin that still has a default password ([] = none)."""
+    return [(a, d) for a in grafana_admins(db_path) if (d := default_of(a)) is not None]
+
+
+def grafana_guard(db_path=None):
+    """One check: positive only when the database was read and no server admin has a default password.
+    -> (ok, message). The proxy asks the running grafana-guard (see GuardGate), never this directly."""
+    lan = on_lan(env_map())
+    try:
+        found = grafana_defaults(db_path)
+    except GrafanaDbUnreadable as e:
+        return False, f"確認できません: {e}。" + ("LAN からの /grafana/ は閉じたままです。" if lan else "")
+    if found:
+        who = ", ".join(f"{a.login} ({d or '空'})" for a, d in found)
+        return False, (f"Grafana の管理者が既定のパスワードのままです: {who} (.env の GF_ADMIN_PASSWORD は Grafana の初回起動時にしか"
+                       "反映されません)。" + ("LAN からの /grafana/ は閉じています。" if lan else "")
+                       + "直す: docker compose run --rm tools grafana-reset-admin")
+    return True, "Grafana の管理者は既定のパスワードではありません (grafana.db の値で確認。画面で変えた値でもよい)"
+
+
+GUARD_PORT = 8099  # internal network only (no host port); the proxy's forward_auth for /grafana/ on a LAN exposure
+
+
+def gate_allows(last, now, interval):
+    """The LAN gate's decision from the guard's last completed check: open only if it was positive and is at most two
+    intervals old. No check yet, a negative one, or a stale one (the loop hangs or died) -> closed."""
+    return bool(last and last["ok"] and 0 <= now - last["t"] <= 2 * interval)
+
+
+class GuardGate:
+    """Last result of the guard loop + a tiny HTTP endpoint for Caddy's forward_auth: GET /allow -> 200 or 403.
+    Fail closed by construction: if this process is stopped, frozen or gone, the proxy gets no 200 and denies."""
+
+    def __init__(self, interval):
+        self.interval, self.last = interval, None
+
+    def serve(self):
+        gate = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                allowed = gate_allows(gate.last, time.time(), gate.interval)
+                body = ("ok\n" if allowed else
+                        "Grafana is closed to the LAN: " + (gate.last["msg"] if gate.last else "not checked yet") + "\n").encode()
+                try:
+                    self.send_response(200 if allowed and self.path == "/allow" else 403)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):  # the proxy gave up waiting (e.g. after a freeze)
+                    pass
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("0.0.0.0", GUARD_PORT), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def cmd_grafana_guard(args):
+    """Long-running: re-check every interval and answer the proxy's gate from the latest result."""
+    interval = max(5, int(env("OBS_GRAFANA_GUARD_INTERVAL", "60") or 60))
+    gate = GuardGate(interval)
+    if not args.once:
+        gate.serve()
+    last = None
+    while True:
+        ok, msg = grafana_guard()
+        lan = on_lan(env_map())
+        gate.last = {"t": time.time(), "ok": ok, "msg": msg}
+        GUARD_STATUS.write_text(json.dumps({**gate.last, "lan": lan, "interval": interval}))
+        if (ok, msg) != last:  # log changes only
+            print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}", flush=True)
+            last = (ok, msg)
+        if args.once:
+            return 0 if ok or not lan else 1
+        time.sleep(interval)
+
+
+def cmd_guard_health(args):
+    """Healthcheck of grafana-guard: its last check is recent, and it did not have to keep a LAN exposure closed."""
+    try:
+        s = json.loads(GUARD_STATUS.read_text())
+    except (OSError, ValueError):
+        return 1
+    fresh = time.time() - s["t"] < 3 * s["interval"] + 30
+    return 0 if fresh and (s["ok"] or not s["lan"]) else 1
+
+
+def change_password(login, old, new):
+    """One login, as that user with the default password the hash revealed, to set the new one (Grafana API)."""
+    token = base64.b64encode(f"{login}:{old}".encode()).decode()
+    body = json.dumps({"oldPassword": old, "newPassword": new, "confirmNew": new}).encode()
+    req = urllib.request.Request(GRAFANA + "/api/user/password", data=body, method="PUT",
+                                 headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=HTTP_TIMEOUT).close()
+
+
+def manual_reset_hint(login):
+    if login == "admin":
+        return "docker compose exec grafana grafana cli admin reset-admin-password '<.env の値>'"
+    return f"Grafana の画面 (Administration > Users and access > Users > {login}) でパスワードを変更"
+
+
+def cmd_grafana_reset_admin(args):
+    """Give every server admin that still has a default password the GF_ADMIN_PASSWORD from .env. Run on request
+    only: the stored hashes tell which admins have a default, and only those are logged in to, once each."""
+    new = env("GF_ADMIN_PASSWORD")
+    if new in DEFAULT_GF_PASSWORDS:
+        raise Fail("先に .env の GF_ADMIN_PASSWORD を既定値 (空 / admin / change-me) 以外にしてください")
+    try:
+        found = grafana_defaults()
+    except GrafanaDbUnreadable as e:
+        raise Fail(f"Grafana のデータベースを確認できません: {e}") from None
+    if not found:
+        print("[OK] 既定のパスワードの管理者はいません。画面で変えたパスワードが .env の値と違っても問題ありません。"
+              "\n     admin を .env の値に揃えたい場合だけ: " + manual_reset_hint("admin"))
+    failed = []
+    for admin, old in found:
+        try:
+            change_password(admin.login, old, new)
+            print(f"[OK] {admin.login}: 既定のパスワードを .env の GF_ADMIN_PASSWORD に変更しました")
+        except urllib.error.HTTPError as e:
+            failed.append(admin.login)
+            print(f"[NG] {admin.login}: Grafana が変更を受け付けませんでした (HTTP {e.code})。手で: {manual_reset_hint(admin.login)}")
+        except OSError:
+            raise Fail("Grafana に接続できません。docker compose up -d の後に実行してください") from None
+    ok, msg = grafana_guard()
+    print(f"[{'OK' if ok else 'NG'}] {msg}")
+    return 0 if ok and not failed else 1
+
+
+def cmd_setup_check(args):
+    """Shared services need the files of a profile's setup step: fail clearly when no profile was chosen."""
+    if (GEN / "mode").exists():
+        print(f"profile の設定: {mode()}")
+        return 0
+    print("[NG] profile の設定がありません。profile を指定していない (docker compose --profile demo up -d か、"
+          ".env に COMPOSE_PROFILES=prod (tools init が書きます)) か、設定の生成に失敗しました "
+          "(理由: docker compose logs demo-setup prod-setup)", file=sys.stderr)
+    return 1
+
+
+# ---- output helpers -----------------------------------------------------------------------------
+
+def width(s):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+def table(headers, rows):
+    cols = [max(width(str(r[i])) for r in [headers, *rows]) for i in range(len(headers))]
+    line = lambda r: " | ".join(str(c) + " " * (w - width(str(c))) for c, w in zip(r, cols)).rstrip()
+    print(line(headers))
+    print("-+-".join("-" * w for w in cols))
+    for r in rows:
+        print(line(r))
+
+
+def report(errs, warns):
+    for e in errs:
+        print(f"[NG] {e}")
+    for w in warns:
+        print(f"[注意] {w}")
+
+
+def fix_owner(*paths):
+    """Files written into the mounted repository belong to the repository's owner, not to root."""
+    st = WORK.stat()
+    for p in paths:
+        try:
+            os.chown(p, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+
+
+def prepare_volumes():
+    for comp, (uid, gid) in VOLUMES.items():
+        p = VOL / comp
+        if p.is_dir() and p.stat().st_uid == 0 and not any(p.iterdir()):
+            os.chown(p, uid, gid)
+
+
+# ---- HTTP ---------------------------------------------------------------------------------------
+
+def http_get(url, timeout=HTTP_TIMEOUT):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return r.status, r.read().decode("utf-8", "replace")
+
+
+def probe(url):
+    """-> (ok, detail)"""
+    if url.startswith("tcp://"):
+        host, port = url[6:].split(":")
+        try:
+            socket.create_connection((host, int(port)), HTTP_TIMEOUT).close()
+            return True, "接続可"
+        except OSError as e:
+            return False, f"接続できません ({type(e).__name__})"
+    try:
+        status, _ = http_get(url)
+        return status < 400, f"HTTP {status}"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except OSError as e:
+        return False, f"応答なし ({type(e).__name__})"
+
+
+def prom_query(q):
+    _, body = http_get("http://prometheus:9090/api/v1/query?" + urllib.parse.urlencode({"query": q}))
+    return json.loads(body)["data"]["result"]
+
+
+def loki_lines(query, start_ns, end_ns, limit=1000):
+    url = "http://loki:3100/loki/api/v1/query_range?" + urllib.parse.urlencode(
+        {"query": query, "start": start_ns, "end": end_ns, "limit": limit, "direction": "forward"})
+    _, body = http_get(url, timeout=15)
+    return [(s["stream"], line) for s in json.loads(body)["data"]["result"] for _, line in s["values"]]
+
+
+# ---- check --------------------------------------------------------------------------------------
+
+def mode():
+    try:
+        return (GEN / "mode").read_text().strip()
+    except OSError:
+        return "unknown"
+
+
+def services(m):
+    base = [("prometheus", "http://prometheus:9090/-/healthy"), ("loki", "http://loki:3100/ready"),
+            ("alloy", "http://alloy:12345/-/ready"), ("grafana", "http://grafana:3000/grafana/api/health"),
+            ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz")]
+    extra = {"demo": [("demo-gen", "http://demo-gen:9116/fault/status")],
+             "prod": [("snmp-exporter", "http://snmp-exporter:9116/")]}
+    return base + extra.get(m, [])
+
+
+def snmp_probe(d, m):
+    """One scrape through the exporter -> (ok, sysUpTime text, ifHC series count, detail)."""
+    if m == "demo":
+        url = "http://demo-gen:9116/snmp?" + urllib.parse.urlencode({"target": d["name"], "module": "if_mib"})
+    else:
+        url = "http://snmp-exporter:9116/snmp?" + urllib.parse.urlencode(
+            {"target": d["address"], "module": "if_mib,system", "auth": d["snmp_auth"]})
+    try:
+        _, body = http_get(url, timeout=SNMP_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", "replace")
+        return False, "—", 0, snmp_error(msg) or f"HTTP {e.code}"
+    except OSError as e:
+        return False, "—", 0, f"exporter に接続できません ({type(e).__name__})"
+    up = re.search(r"^sysUpTime (\S+)$", body, re.M)
+    hc = len(re.findall(r"^ifHCInOctets\{", body, re.M))
+    if not up or not hc:
+        return False, "—", hc, snmp_error(body) or "sysUpTime / ifHCInOctets が取れません"
+    days = float(up.group(1)) / 100 / 86400
+    wan = d.get("wan_interface")
+    if wan:
+        names = sorted(set(re.findall(r'^ifHCInOctets\{[^}]*ifName="([^"]*)"', body, re.M)))
+        if wan not in names:
+            return False, f"{days:.1f} 日", hc, f"WAN の ifName {wan} がありません (ある ifName: {', '.join(names) or 'なし'})"
+        return True, f"{days:.1f} 日", hc, f"OK (WAN {wan})"
+    return True, f"{days:.1f} 日", hc, "OK"
+
+
+def snmp_error(text):
+    m = re.search(r"error walking target [^:]*: (.*)", text)
+    if not m:
+        return ""
+    hint = {"timeout": "応答なし (IP・ポート・SNMP 有効化・ACL を確認)", "authentic": "認証エラー (ユーザー名・パスワード・方式を確認)",
+            "unknown user": "SNMPv3 ユーザーが機器にありません", "decrypt": "暗号化エラー (priv パスワード・方式を確認)"}
+    for k, v in hint.items():
+        if k in m.group(1).lower():
+            return v
+    return m.group(1)[:80]
+
+
+def wait_syslog(rows, seconds):
+    """-> {name: first line seen or None} for lines that arrive in Loki during the wait."""
+    t0 = time.time_ns() - 2 * 10**9
+    seen = {d["name"]: None for d in rows}
+    deadline = time.monotonic() + seconds
+    print(f"syslog の受信を最大 {seconds} 秒待ちます ({', '.join(seen)}) ...", flush=True)
+    while time.monotonic() < deadline and None in seen.values():
+        for name in [n for n, v in seen.items() if v is None]:
+            try:
+                got = loki_lines('{job="syslog",host=%s}' % json.dumps(name), t0, time.time_ns(), limit=1)
+            except (OSError, ValueError, KeyError):
+                got = []
+            if got:
+                seen[name] = got[0][1]
+        time.sleep(2)
+    return seen
+
+
+def cmd_check(args):
+    m = mode()
+    rc = 0
+    print(f"モード: {m}  (生成済みの scrape 対象から判定。demo / prod)\n")
+    if m == "prod":
+        errs, warns, rows = validate(env_map(), safe_inventory())
+    else:
+        errs, warns = check_env(env_map())
+        rows = [{"name": n, "address": n, "snmp_auth": "-", "syslog": True, "kind": "demo"} for n in DEMO_DEVICES]
+    print("■ 設定の検証")
+    report(errs, warns)
+    if not errs:
+        print("[OK] .env と機器台帳に問題はありません" if m == "prod" else "[OK] .env に問題はありません")
+    rc |= bool(errs)
+    print("\n■ サービスの health")
+    srows = []
+    for name, url in services(m):
+        ok, detail = probe(url)
+        rc |= not ok
+        srows.append((name, "OK" if ok else "NG", detail))
+    table(("サービス", "状態", "詳細"), srows)
+    print("\n■ Grafana の管理者パスワード (grafana.db に保存された値で確認。ログインはしない)")
+    ok, msg = grafana_guard()
+    lan = on_lan(env_map())
+    print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}")
+    rc |= (not ok) and lan
+    if not rows:
+        return 1
+    print("\n■ 機器 (SNMP: exporter 経由で sysUpTime と ifHC カウンタを取得 / Prometheus の up)")
+    try:
+        up = {r["metric"].get("instance"): r["value"][1] for r in prom_query('up{job="snmp"}')}
+        up_err = None
+    except (OSError, ValueError, KeyError) as e:
+        up, up_err = {}, f"Prometheus に問い合わせできません ({type(e).__name__})"
+    drows = []
+    for d in rows:
+        ok, uptime, hc, detail = snmp_probe(d, m)
+        state = up.get(d["name"])
+        if up_err or state != "1":  # Prometheus is what the screens use: its target must exist and be up too
+            ok = False
+            why = up_err or ("Prometheus の scrape 対象にありません (tools targets を確認)" if state is None else "Prometheus の scrape が失敗中 (up=0)")
+            detail = why if detail.startswith("OK") else f"{detail} / {why}"
+        rc |= not ok
+        drows.append((d["name"], d["address"], "OK" if ok else "NG", uptime, hc, state or "—", detail))
+    table(("機器", "アドレス", "SNMP", "稼働時間", "ifHC 数", "up", "詳細"), drows)
+    targets = [d for d in rows if d.get("syslog", True)]
+    if args.syslog_wait > 0 and targets:
+        print()
+        seen = wait_syslog(targets, args.syslog_wait)
+        lrows = []
+        for name, line in seen.items():
+            rc |= line is None
+            lrows.append((name, "OK" if line else "NG", (line or "届きませんでした (機器の syslog host 設定・SYSLOG_BIND/PORT・FW を確認)")[:70]))
+        table(("機器", "syslog", "最初に届いた行 / 対処"), lrows)
+    print("\n結果:", "すべて OK" if not rc else "NG があります (上の表を確認してください)")
+    return 1 if rc else 0
+
+
+def safe_inventory():
+    try:
+        return load_inventory()
+    except Fail as e:
+        print(f"[NG] {e}")
+        return None
+
+
+# ---- init ---------------------------------------------------------------------------------------
+
+def env_line_value(v):
+    return v if SAFE_ENV.fullmatch(v) else f"'{v}'"  # single quotes: compose takes the value literally (no $ expansion)
+
+
+def render_env(values):
+    """.env.example with the given values filled in (comments and order kept; unknown keys appended)."""
+    out, done = [], set()
+    for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"#?\s*([A-Z][A-Z0-9_]*)=", line)
+        if m and m.group(1) in values:
+            out.append(f"{m.group(1)}={env_line_value(values[m.group(1)])}")
+            done.add(m.group(1))
+        else:
+            out.append(line)
+    out += [f"{k}={env_line_value(v)}" for k, v in values.items() if k not in done]
+    return "\n".join(out) + "\n"
+
+
+def render_inventory(rows):
+    head = ("# 機器台帳 (tools init が生成。手で編集してよい。変更後は `docker compose run --rm tools targets`)\n"
+            "#   name: 表示名 (Prometheus の instance / Loki の host)   kind: rtx | wlx | other\n"
+            "#   address: 管理 IP か DNS 名 (SNMP の宛先。syslog の送信元の照合にも使う)\n"
+            "#   snmp_auth: snmp/auths.yml の auth 名 (yamaha_v3 / yamaha_v2c)   syslog: syslog を送ってくるか\n"
+            "#   wan_interface: (任意、1 台だけ) WAN 側の ifName (例 lan2)。WAN 表示とアラート WanHighUtilization に使う\n"
+            "# 秘密値 (SNMP のパスワード等) はここに書かず .env に置く。\n")
+    return head + yaml.safe_dump({"devices": rows}, sort_keys=False, allow_unicode=True)
+
+
+def parse_device(spec):
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) not in (3, 4):
+        raise Fail(f"--device '{spec}': 名前,種別,アドレス[,auth] の形にしてください (例 rtx1300,rtx,192.168.100.1)")
+    return {"name": parts[0], "kind": parts[1], "address": parts[2],
+            "snmp_auth": parts[3] if len(parts) == 4 else "yamaha_v3", "syslog": True}
+
+
+def apply_wan(devices, spec):
+    """--wan NAME:IFNAME -> wan_interface on that device."""
+    if not spec:
+        return
+    name, _, ifname = spec.partition(":")
+    for d in devices:
+        if d["name"] == name:
+            d["wan_interface"] = ifname
+            return
+    raise Fail(f"--wan {spec}: 機器 {name} が --device にありません")
+
+
+def ask(prompt, default="", secret=False):
+    shown = f" [{default}]" if default and not secret else (" [設定済み]" if default else "")
+    v = (getpass.getpass if secret else input)(f"{prompt}{shown}: ").strip()
+    return v or default
+
+
+def interactive(values, devices):
+    print("対話モード: Enter で [ ] 内の既定値を使います。パスワードは表示されません。\n")
+    values["OBS_BIND"] = ask("画面を公開するアドレス (127.0.0.1 はこの PC のみ。LAN 公開は LAN 側 IP か 0.0.0.0、認証なし)", values["OBS_BIND"])
+    values["OBS_PORT"] = ask("画面のポート", values["OBS_PORT"])
+    values["SYSLOG_BIND"] = ask("syslog を受けるアドレス (機器から送るなら LAN 側 IP か 0.0.0.0)", values["SYSLOG_BIND"])
+    values["SYSLOG_PORT"] = ask("syslog のポート (UDP/TCP)", values["SYSLOG_PORT"])
+    values["GF_ADMIN_PASSWORD"] = ask("Grafana 管理者パスワード", values["GF_ADMIN_PASSWORD"], secret=True)
+    values["SNMP_V3_USER"] = ask("SNMPv3 ユーザー名 (機器側に設定したもの)", values["SNMP_V3_USER"])
+    values["SNMP_V3_AUTH_PROTO"] = ask(f"SNMPv3 認証方式 ({'/'.join(AUTH_PROTOS)})", values["SNMP_V3_AUTH_PROTO"])
+    values["SNMP_V3_AUTH_PASS"] = ask("SNMPv3 認証パスワード (8 文字以上)", values["SNMP_V3_AUTH_PASS"], secret=True)
+    values["SNMP_V3_PRIV_PROTO"] = ask(f"SNMPv3 暗号方式 ({'/'.join(PRIV_PROTOS)})", values["SNMP_V3_PRIV_PROTO"])
+    values["SNMP_V3_PRIV_PASS"] = ask("SNMPv3 暗号パスワード (8 文字以上)", values["SNMP_V3_PRIV_PASS"], secret=True)
+    values["SNMP_COMMUNITY"] = ask("SNMPv2c コミュニティ (使わないなら空のまま)", values["SNMP_COMMUNITY"], secret=True)
+    if devices:
+        print(f"機器 {len(devices)} 台は引数で指定済みです")
+        return
+    print("\n機器を登録します (名前を空にすると終了)")
+    while True:
+        name = ask("  機器名 (例 rtx1300)")
+        if not name:
+            break
+        kind = ask(f"  種別 ({'/'.join(KINDS)})", "rtx" if name.startswith("rtx") else "wlx" if name.startswith("wlx") else "other")
+        addr = ask("  管理 IP または DNS 名")
+        auth = ask("  SNMP 認証 (yamaha_v3 / yamaha_v2c)", "yamaha_v3")
+        dev = {"name": name, "kind": kind, "address": addr, "snmp_auth": auth, "syslog": True}
+        if kind == "rtx" and not any("wan_interface" in x for x in devices):
+            wan = ask("  WAN 側インターフェースの ifName (例 lan2。WAN 表示とアラートに使う。空ならなし)")
+            if wan:
+                dev["wan_interface"] = wan
+        devices.append(dev)
+
+
+def grafana_password_from_env():
+    v = env("GF_ADMIN_PASSWORD")
+    return "" if v == "admin" else v  # "admin" is compose's fallback when .env has none, not a choice
+
+
+def offer_grafana_reset(new, args):
+    """An existing grafana-data volume keeps its old admin password: offer to set it to the new .env value
+    (decided from the stored hash; no login attempt)."""
+    try:
+        found = grafana_defaults()
+    except GrafanaDbUnreadable:
+        print("[注意] Grafana のデータベースがまだありません (未起動)。既存の grafana-data ボリュームを使う場合、新しい GF_ADMIN_PASSWORD は"
+              "反映されません。起動後に docker compose run --rm tools check で確認してください")
+        return
+    if not found:
+        return
+    yes = args.reset_grafana_admin or (not args.yes and sys.stdin.isatty()
+                                       and input(f"Grafana の管理者 {', '.join(a.login for a, _ in found)} が既定のパスワードのままです。.env の値に変更しますか? [Y/n]: ").lower() != "n")
+    if not yes:
+        print(f"[注意] Grafana の管理者 {', '.join(a.login for a, _ in found)} は既定のパスワードのままです。後で: docker compose run --rm tools grafana-reset-admin")
+        return
+    os.environ["GF_ADMIN_PASSWORD"] = new
+    try:
+        cmd_grafana_reset_admin(args)
+    except Fail as e:
+        print(f"[NG] {e}")
+
+
+def cmd_init(args):
+    inv = inventory_path()
+    exists = [p for p in (ENV_FILE, inv) if p.exists()]
+    if exists and not args.force:
+        raise Fail("既にあります: " + ", ".join(rel(p) for p in exists)
+                   + "。作り直すなら --force (元のファイルは .bak に残します)")
+    values = {"COMPOSE_PROFILES": "prod", "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
+              "SYSLOG_PORT": args.syslog_port, "GF_ADMIN_PASSWORD": args.grafana_password or grafana_password_from_env(),
+              "SNMP_V3_USER": args.snmp_user or env("SNMP_V3_USER"), "SNMP_V3_AUTH_PROTO": args.snmp_auth_proto,
+              "SNMP_V3_AUTH_PASS": env("SNMP_V3_AUTH_PASS"), "SNMP_V3_PRIV_PROTO": args.snmp_priv_proto,
+              "SNMP_V3_PRIV_PASS": env("SNMP_V3_PRIV_PASS"), "SNMP_COMMUNITY": env("SNMP_COMMUNITY"),
+              "OBS_INVENTORY": rel(inv), "OBS_PUBLIC_URL": args.public_url}
+    devices = [parse_device(s) for s in args.device]
+    apply_wan(devices, args.wan)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise Fail("対話できません (TTY なし)。`docker compose run --rm tools init` で実行するか、--yes と引数で指定してください")
+        interactive(values, devices)
+    values["OBS_PUBLIC_URL"] = public_url(values["OBS_BIND"], values["OBS_PORT"], values["OBS_PUBLIC_URL"]) or ""
+    if not values["OBS_PUBLIC_URL"] and not args.yes:
+        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 http://192.168.100.10:8080。Grafana のリンクに使う)").rstrip("/")
+    errs, warns, rows = validate(values, devices)
+    if not values["OBS_PUBLIC_URL"]:
+        errs.append("OBS_BIND=0.0.0.0 のときは --public-url で LAN から開く URL を指定してください (例 http://192.168.100.10:8080)")
+    if values["GF_ADMIN_PASSWORD"] in DEFAULT_GF_PASSWORDS and not any("GF_ADMIN_PASSWORD" in e for e in errs):  # prod: never the default
+        errs.append("Grafana 管理者パスワード (GF_ADMIN_PASSWORD) を既定値 (空 / admin / change-me) 以外にしてください")
+        warns = [w for w in warns if not w.startswith("GF_ADMIN_PASSWORD")]
+    print("\n■ 設定の検証")
+    report(errs, warns)
+    if errs:
+        print("\n書き込みませんでした。上の NG を直してもう一度実行してください")
+        return 2
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for p in exists:
+        shutil.copy2(p, p.with_name(f"{p.name}.bak-{stamp}"))
+    write_atomic(ENV_FILE, render_env(values), mode=0o600)
+    write_atomic(inv, render_inventory(rows))
+    fix_owner(ENV_FILE, inv, inv.parent)
+    print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)")
+    offer_grafana_reset(values["GF_ADMIN_PASSWORD"], args)
+    print("次: docker compose up -d   (COMPOSE_PROFILES=prod を .env に書いたので profile 指定は不要)\n"
+          "    docker compose run --rm tools check   (SNMP 疎通・syslog 受信・health の確認)")
+    return 0
+
+
+# ---- backup / restore ---------------------------------------------------------------------------
+
+def snapshot_prometheus():
+    req = urllib.request.Request("http://prometheus:9090/api/v1/admin/tsdb/snapshot", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            name = json.loads(r.read())["data"]["name"]
+    except urllib.error.HTTPError as e:
+        raise Fail(f"Prometheus のスナップショットに失敗しました (HTTP {e.code}。admin API が無効?)") from None
+    except OSError:
+        raise Fail("Prometheus に接続できません。起動してから backup してください (docker compose up -d)") from None
+    return VOL / "prometheus/snapshots" / name
+
+
+def grafana_db_copy(tmp, src=None):
+    """Consistent copy of grafana.db while Grafana keeps running (sqlite backup API, source opened read-only;
+    Grafana uses journal_mode=delete). -> path of the copy, or None when there is no database."""
+    src = Path(src or VOL / "grafana/grafana.db")
+    if not src.exists():
+        return None
+    dst = Path(tmp) / "grafana.db"
+    s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    d = sqlite3.connect(dst)
+    try:
+        s.backup(d)
+    finally:
+        s.close()
+        d.close()
+    return dst
+
+
+def write_archive(path, manifest, sources, tmp):
+    """Write the backup to <path>.partial and move it into place only when everything was added. sources:
+    [(part or None, arcname, source path, tar filter)]. The manifest (last member) records files / bytes per part,
+    so restore can tell a complete archive from a cut one; on any error the partial file is removed."""
+    partial = path.with_name(path.name + ".partial")
+    counts = {}
+
+    def counting(part, flt):
+        def f(ti):
+            ti = flt(ti) if flt else ti
+            if ti is not None and part and ti.isfile():
+                c = counts.setdefault(part, {"files": 0, "bytes": 0})
+                c["files"] += 1
+                c["bytes"] += ti.size
+            return ti
+        return f
+    try:
+        with tarfile.open(partial, "w:gz") as tar:
+            for part, arcname, src, flt in sources:
+                tar.add(src, arcname, filter=counting(part, flt))
+            manifest = {**manifest, "parts": sorted(counts), "contents": counts}
+            mf = Path(tmp) / "manifest.json"
+            mf.write_text(json.dumps(manifest, indent=2))
+            tar.add(mf, "manifest.json")
+        os.replace(partial, path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return manifest
+
+
+def cmd_backup(args):
+    prepare_volumes()
+    out = WORK / args.out
+    out.mkdir(parents=True, exist_ok=True)
+    fix_owner(out)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = out / f"obs-backup-{stamp}.tar.gz"
+    inv = inventory_path()
+    manifest = {"created": stamp, "format": 2, "mode": mode(), "include_env": bool(args.include_env and ENV_FILE.exists()),
+                "inventory": rel(inv) if inv.exists() else None}
+    snap = snapshot_prometheus()
+    umask = os.umask(0o077)  # the archive (and the copies in tmp) are owner-only from the first byte
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            gdb = grafana_db_copy(tmp)
+            skip_db = lambda ti: None if re.search(r"(^|/)grafana\.db(-wal|-shm|-journal)?$", ti.name) else ti
+            sources = [("prometheus", "prometheus", snap, None), ("loki", "loki", VOL / "loki", None),
+                       ("grafana", "grafana", VOL / "grafana", skip_db)]
+            if gdb:
+                sources.append(("grafana", "grafana/grafana.db", gdb, None))
+            if inv.exists():
+                sources.append((None, "config/" + manifest["inventory"].lstrip("/"), inv, None))
+            if manifest["include_env"]:
+                sources.append((None, "config/.env", ENV_FILE, None))
+            manifest = write_archive(path, manifest, [s for s in sources if Path(s[2]).exists()], tmp)
+    finally:
+        os.umask(umask)
+        shutil.rmtree(snap, ignore_errors=True)
+    os.chmod(path, 0o600)
+    fix_owner(path)
+    size = path.stat().st_size / 2**20
+    print(f"[OK] {rel(path)} ({size:.1f} MiB): {', '.join(manifest['parts'])}"
+          + (", 機器台帳" if manifest["inventory"] else "") + (", .env (秘密値を含む。取り扱い注意)" if manifest["include_env"] else ", .env は含めていません"))
+    return 0
+
+
+def running_services():
+    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000)) if probe(f"tcp://{n}:{port}")[0]]
+
+
+def extract_part(tar, members, prefix, dest):
+    for m in members:
+        if m.name == prefix or not m.name.startswith(prefix + "/"):
+            continue
+        m.name = m.name[len(prefix) + 1:]
+        tar.extract(m, dest, filter="data")
+
+
+def chown_tree(root, uid, gid):
+    os.chown(root, uid, gid)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            os.chown(os.path.join(dirpath, n), uid, gid, follow_symlinks=False)
+
+
+def clear_dir(p):
+    for child in p.iterdir():
+        shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+
+
+def check_manifest(manifest, members, with_config):
+    """Reject an archive whose manifest points outside what restore may write. -> [(name, destination)] for config."""
+    parts = manifest.get("parts")
+    if not isinstance(parts, list) or not set(parts) <= set(VOLUMES):
+        raise Fail(f"manifest の parts が不正です: {parts!r}")
+    names = {m.name for m in members}
+    for part in parts:  # the archive must be complete before any volume is cleared
+        files = [m for m in members if m.isfile() and m.name.startswith(part + "/")]
+        want = (manifest.get("contents") or {}).get(part)
+        if not files:
+            raise Fail(f"アーカイブの {part} が空です。途中で切れたバックアップかもしれません (何も消していません)")
+        if want is not None and (len(files), sum(m.size for m in files)) != (want.get("files"), want.get("bytes")):
+            raise Fail(f"アーカイブの {part} が manifest と合いません ({len(files)} ファイル / {sum(m.size for m in files)} バイト、"
+                       f"記録は {want.get('files')} / {want.get('bytes')})。途中で切れたか壊れています (何も消していません)")
+    out = []
+    inv = manifest.get("inventory")
+    if inv is not None:
+        rp = Path(str(inv))
+        dst = (WORK / rp).resolve()
+        if (rp.is_absolute() or ".." in rp.parts or rp.suffix not in (".yaml", ".yml")
+                or not any(dst.is_relative_to((WORK / d).resolve()) for d in ("inventory", "testbed"))):
+            raise Fail(f"manifest の機器台帳のパスが不正です (inventory/ か testbed/ の .yaml のみ): {inv!r}")
+        out.append((str(rp), dst))
+    if manifest.get("include_env"):
+        out.append((".env", ENV_FILE))
+    for name, _ in out:
+        if "config/" + name not in names:
+            raise Fail(f"アーカイブに config/{name} がありません")
+    return out if with_config else []
+
+
+def cmd_restore(args):
+    path = (WORK / args.archive) if not Path(args.archive).is_absolute() else Path(args.archive)
+    if not path.exists():
+        raise Fail(f"アーカイブがありません: {args.archive}")
+    busy = running_services()
+    if busy:
+        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana")
+    with tarfile.open(path, "r:gz") as tar:
+        members = tar.getmembers()
+        try:
+            manifest = json.load(tar.extractfile("manifest.json"))
+        except KeyError:
+            raise Fail("manifest.json がありません。tools backup で作ったアーカイブではありません") from None
+        config = check_manifest(manifest, members, args.with_config)
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise Fail("確認できません (TTY なし)。--yes を付けてください")
+            if input(f"{', '.join(manifest['parts'])} の現在のデータを消して {path.name} の内容に置き換えます。続けますか? [y/N]: ").lower() != "y":
+                print("中止しました")
+                return 1
+        for comp in manifest["parts"]:
+            dest = VOL / comp
+            uid, gid = VOLUMES[comp]
+            clear_dir(dest)
+            extract_part(tar, members, comp, dest)
+            chown_tree(dest, uid, gid)
+            print(f"[OK] {comp} を戻しました")
+        if args.with_config:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            for name, dst in config:
+                if dst.exists():
+                    shutil.copy2(dst, dst.with_name(f"{dst.name}.bak-{stamp}"))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile("config/" + name) as f:
+                    write_atomic(dst, f.read().decode("utf-8"), mode=0o600 if name == ".env" else 0o644)
+                fix_owner(dst)
+                print(f"[OK] {name} を戻しました (元のファイルは .bak-{stamp})")
+    print("次: docker compose up -d   (台帳を戻したなら docker compose run --rm tools targets も)")
+    return 0
+
+
+# ---- syslog regression test ---------------------------------------------------------------------
+
+def load_fixtures():
+    return [json.loads(l) for l in FIXTURES.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def send_tcp(host, port, msgs):
+    with socket.create_connection((host, port), HTTP_TIMEOUT) as s:
+        for m in msgs:
+            b = m.encode()
+            s.sendall(b"%d %s" % (len(b), b))  # RFC 6587 octet counting
+
+
+def expected_line(f):
+    """Message as stored for a sender outside the inventory: a header hostname ("host" in the fixture, "$sender" =
+    none) is not the device's name, so it stays in front of the message."""
+    return f["line"] if f["host"] == "$sender" else f"{f['host']} {f['line']}"
+
+
+def cmd_test_syslog(args):
+    fixtures = load_fixtures()
+    run = f"{int(time.time())}-{os.getpid()}"
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.connect((args.host, args.port))
+    me = udp.getsockname()[0]
+    t0 = time.time_ns() - 5 * 10**9
+    want = {}
+    tcp_msgs = []
+    for i, f in enumerate(fixtures):
+        for proto in ("udp", "tcp"):
+            tag = f" [obs-test {run}-{proto}-{i}]"
+            want[tag.strip()] = (f, proto)
+            if proto == "udp":
+                udp.send((f["raw"] + tag).encode())
+            else:
+                tcp_msgs.append(f["raw"] + tag)
+    send_tcp(args.host, args.port, tcp_msgs)
+    got = {}
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline and len(got) < len(want):
+        time.sleep(2)
+        try:
+            for stream, line in loki_lines('{job="syslog"} |= %s' % json.dumps(f"[obs-test {run}-"), t0, time.time_ns() + 10**9):
+                m = re.search(r" (\[obs-test \S+\])$", line)
+                if m:
+                    got[m.group(1)] = (stream, line[:m.start()])
+        except (OSError, ValueError, KeyError) as e:
+            print(f"Loki 照会失敗: {e}")
+    rows, rc = [], 0
+    for tag, (f, proto) in want.items():
+        exp_line = expected_line(f)
+        if tag not in got:
+            rows.append((f["id"], f["form"], proto, "NG", "Loki に届いていません"))
+            rc = 1
+            continue
+        stream, line = got[tag]
+        # the test sender is not in the inventory: host must be "unknown" whatever the header claims (no spoofing)
+        diffs = [f"{k}={stream.get(k)!r} (期待 {v!r})" for k, v in (("host", "unknown"), ("src_ip", me), ("severity", f["severity"]),
+                                                                    ("facility", f["facility"])) if stream.get(k) != v]
+        if line != exp_line:
+            diffs.append(f"line={line!r} (期待 {exp_line!r})")
+        leaked = set(stream) & {"src_addr", "src_name", "hdr_host", "inv_host"}  # pipeline-internal labels
+        if leaked:  # (Loki itself adds service_name / detected_level; those are not ours)
+            diffs.append(f"内部ラベルが残っています {sorted(leaked)}")
+        rc |= bool(diffs)
+        rows.append((f["id"], f["form"], proto, "NG" if diffs else "OK", "; ".join(diffs) or exp_line[:48]))
+    table(("fixture", "形式", "経路", "結果", "詳細"), rows)
+    print(f"\n{sum(r[3] == 'OK' for r in rows)}/{len(rows)} OK (送信元 {me} → {args.host}:{args.port}, run {run})")
+    return rc
+
+
+# ---- self-test (image build) --------------------------------------------------------------------
+
+# `user` table exactly as grafana/grafana:12.2.0 creates it (sqlite_master of a fresh database), for the selftest
+GF_USER_SCHEMA = """CREATE TABLE `user` (
+`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL
+, `version` INTEGER NOT NULL
+, `login` TEXT NOT NULL
+, `email` TEXT NOT NULL
+, `name` TEXT NULL
+, `password` TEXT NULL
+, `salt` TEXT NULL
+, `rands` TEXT NULL
+, `company` TEXT NULL
+, `org_id` INTEGER NOT NULL
+, `is_admin` INTEGER NOT NULL
+, `email_verified` INTEGER NULL
+, `theme` TEXT NULL
+, `created` DATETIME NOT NULL
+, `updated` DATETIME NOT NULL
+, `help_flags1` INTEGER NOT NULL DEFAULT 0, `last_seen_at` DATETIME NULL, `is_disabled` INTEGER NOT NULL DEFAULT 0, is_service_account BOOLEAN DEFAULT 0, `uid` TEXT NULL, `is_provisioned` INTEGER NOT NULL DEFAULT 0)"""
+
+
+def selftest():
+    """Pure checks of validation and generation (reads snmp/auths.yml and .env.example from the repository):
+    docker compose run --rm tools --selftest"""
+    good = {"SNMP_V3_USER": "obs", "SNMP_V3_AUTH_PASS": "a" * 8, "SNMP_V3_PRIV_PASS": "p" * 8, "SNMP_V3_AUTH_PROTO": "SHA",
+            "SNMP_V3_PRIV_PROTO": "AES", "OBS_BIND": "127.0.0.1", "SYSLOG_BIND": "127.0.0.1", "GF_ADMIN_PASSWORD": "x" * 12}
+    dev = [{"name": "rtx1300", "kind": "rtx", "address": "192.168.100.1", "snmp_auth": "yamaha_v3"},
+           {"name": "wlx413", "kind": "wlx", "address": "testbed-wlx:1161", "snmp_auth": "yamaha_v3", "syslog": False}]
+    errs, warns, rows = validate(good, dev)
+    assert not errs and not warns and rows[1]["syslog"] is False, (errs, warns)
+    a = render_auths(good)
+    assert set(a) == {"yamaha_v3"} and a["yamaha_v3"]["auth_protocol"] == "SHA" and a["yamaha_v3"]["password"] == "${SNMP_V3_AUTH_PASS}"
+    assert set(render_auths({**good, "SNMP_COMMUNITY": "c0mm"})) == {"yamaha_v3", "yamaha_v2c"}
+    two = render_auths({**good, "SNMP_COMMUNITY": "c0mm: #x'"})  # snmp_exporter does not expand community: literal value
+    assert two["yamaha_v2c"]["community"] == "c0mm: #x'" and two["yamaha_v3"]["password"] == "${SNMP_V3_AUTH_PASS}"
+    dumped = yaml.safe_dump({"auths": two})
+    assert yaml.safe_load(dumped)["auths"]["yamaha_v2c"]["community"] == "c0mm: #x'"  # survives YAML quoting
+    assert "a" * 8 not in dumped and "p" * 8 not in dumped, "v3 secrets stay references"
+    bad = [{"name": "RTX!", "kind": "router", "address": "999.1.1.1:99999", "snmp_auth": "nope", "colour": 1}, dev[0], dev[0]]
+    errs = check_devices(bad, {"yamaha_v3"})
+    assert len(errs) >= 6 and any("重複" in e for e in errs) and any("address" in e for e in errs[:5]), errs
+    errs, warns, rows_bad = validate({**good, "OBS_BIND": "0.0.0.0", "SYSLOG_PORT": "70000"}, bad)  # device and env problems together
+    assert rows_bad is None and any("ポート" in e for e in errs) and any("name" in e for e in errs) and warns, (errs, warns)
+    errs, warns, _ = validate({**good, "SNMP_V3_AUTH_PASS": "short", "OBS_BIND": "0.0.0.0", "OBS_PORT": "0"}, dev)
+    assert any("8 文字" in e for e in errs) and any("ポート" in e for e in errs), errs
+    assert check_env({**good, "OBS_BIND": "0.0.0.0"})[1] and check_env({**good, "OBS_BIND": "lan"})[0]
+    assert check_env({**good, "SNMP_V3_PRIV_PASS": "it's"})[0]
+    lan = {**good, "OBS_BIND": "192.168.100.10"}
+    assert check_env({**lan, "GF_ADMIN_PASSWORD": "admin"})[0] and not check_env({**good, "GF_ADMIN_PASSWORD": "admin"})[0]
+    assert any("OBS_GRAFANA_ANON_ON_LAN" in w for w in check_env({**lan, "OBS_GRAFANA_ANON_ON_LAN": "1"})[1])
+    errs, _, _ = validate({**good, "SNMP_V3_USER": ""}, dev)  # v3 auth dropped -> reported as missing credentials
+    assert errs, errs
+    snmp, flows = file_sd(rows, demo=False)
+    assert snmp[0] == {"targets": ["192.168.100.1"], "labels": {"__device": "rtx1300", "__exporter": "snmp-exporter:9116",
+                                                                "__param_module": "if_mib,system", "__param_auth": "yamaha_v3"}} and flows == []
+    assert [t["targets"] for t in file_sd([], demo=True)[0]] == [["rtx1300"], ["wlx413"], ["wlx222"]]
+    hm = hostmap(rows)
+    assert '"192\\\\.168\\\\.100\\\\.1"' in hm and '"testbed\\\\-wlx(\\\\..*)?"' in hm and hm.count("rule {") == 2, hm
+    assert hostmap([]).count("rule {") == 0 and '"[^;]*demo-gen[^;]*;(rtx1300|wlx413|wlx222)"' in hostmap([], demo=True)
+    assert ui_config(rows, demo=False) == {"profile": "prod", "flows_configured": False, "wan": None, "bind": env("OBS_BIND", "127.0.0.1"),
+                                           "devices": [{"name": "rtx1300", "kind": "rtx"}, {"name": "wlx413", "kind": "wlx"}]}
+    assert ui_config([], demo=True)["wan"] == {"device": "rtx1300", "ifName": "lan2"} and wan_rules(None) == {"groups": []}
+    wrows = validate(good, [{**dev[0], "wan_interface": "lan2"}, dev[1]])[2]
+    assert wan_of(wrows, demo=False) == {"device": "rtx1300", "ifName": "lan2"}
+    rule = wan_rules(wan_of(wrows, demo=False))["groups"][0]["rules"][0]
+    assert 'ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"}' in rule["expr"] and rule["annotations"]["summary"].startswith("WAN (rtx1300 lan2)")
+    werrs = check_devices([{**dev[0], "wan_interface": "ge0.1"}, {**dev[1], "wan_interface": "lan1"}], {"yamaha_v3"})
+    assert any("ifName" in e for e in werrs) and any("1 台だけ" in e for e in werrs), werrs
+    assert ui_config([], demo=True)["devices"][2] == {"name": "wlx222", "kind": "wlx"} and ui_config([], demo=True)["flows_configured"]
+    e = render_env({"OBS_BIND": "0.0.0.0", "SNMP_V3_AUTH_PASS": "pa$$ word", "COMPOSE_PROFILES": "prod", "NEW_KEY": "1"})
+    assert "OBS_BIND=0.0.0.0\n" in e and "SNMP_V3_AUTH_PASS='pa$$ word'\n" in e and "COMPOSE_PROFILES=prod\n" in e and e.endswith("NEW_KEY=1\n")
+    assert width("機器a") == 5 and split_address("h:1161") == ("h", "1161") and split_address("10.0.0.1") == ("10.0.0.1", None)
+    assert snmp_error("error walking target x: request timeout (after 3 retries)").startswith("応答なし")
+    now = 1_000_000.0  # LAN gate: open only after a positive check at most two intervals old
+    assert gate_allows({"t": now - 119, "ok": True}, now, 60) and gate_allows({"t": now - 120, "ok": True}, now, 60)
+    assert not gate_allows({"t": now - 121, "ok": True}, now, 60)  # loop hung / stopped: stale -> closed
+    assert not gate_allows({"t": now, "ok": False}, now, 60) and not gate_allows(None, now, 60)
+    assert not gate_allows({"t": now + 5, "ok": True}, now, 60)  # a check from the future (clock jump) does not count
+    assert any("予約語" in e for e in check_devices([{**dev[0], "name": "unknown"}], {"yamaha_v3"}))
+    assert public_url("127.0.0.1", "8080") == "http://127.0.0.1:8080" and public_url("192.168.100.10", "8080") == "http://192.168.100.10:8080"
+    assert public_url("0.0.0.0", "8080") is None and public_url("0.0.0.0", "80", "http://obs.lan/") == "http://obs.lan"
+    assert check_env({**good, "OBS_PUBLIC_URL": "http://x/grafana"})[0] and not check_env({**good, "OBS_PUBLIC_URL": "https://obs.lan:8443"})[0]
+    assert any("OBS_PUBLIC_URL" in w for w in check_env({**good, "OBS_BIND": "192.168.100.10", "OBS_PUBLIC_URL": "http://127.0.0.1:8080"})[1])
+    assert on_lan({"OBS_BIND": "0.0.0.0"}) and not on_lan({"OBS_BIND": "127.0.0.1"}) and not on_lan({})
+    # Grafana password hashes: vectors taken from a real grafana/grafana:12.2.0 database (grafana cli reset-admin-password)
+    salt = "1bF3IJQiSA"
+    gf_admin = "0a123e015ced970aa22ba46e1657696c11425abcfb89547ed53509767909fbda30e3b82555536f5efa07b3045d711af42724"
+    gf_ui = "713ad63a32a3af318a8c791378d7f55f18ffe81d34d507f5fd828bf526bc58926a9d602f5aa74d3570e49eaa8b7ea34521d1"
+    assert grafana_hash("admin", salt) == gf_admin and grafana_hash("ui-changed-Pw!1", salt) == gf_ui
+    with tempfile.TemporaryDirectory() as tmp:
+        def db(name, users, schema=GF_USER_SCHEMA):
+            path = f"{tmp}/{name}.db"
+            con = sqlite3.connect(path)
+            con.execute(schema)
+            for u in users:
+                if schema is GF_USER_SCHEMA:
+                    login, pw, salt, adm = u
+                    con.execute("INSERT INTO `user` (version, login, email, password, salt, org_id, is_admin, created, updated) "
+                                "VALUES (0, ?, ?, ?, ?, 1, ?, '2026-10-26', '2026-10-26')", (login, f"{login}@x", pw, salt, adm))
+                else:
+                    con.execute("INSERT INTO `user` VALUES (?, ?, ?)", u)
+            con.commit()
+            con.close()
+            return path
+        logins = lambda path: [(a.login, d) for a, d in grafana_defaults(path)]
+        assert logins(db("default", [("admin", gf_admin, salt, 1)])) == [("admin", "admin")]
+        assert logins(db("changed", [("admin", gf_ui, salt, 1)])) == []  # changed in the UI: fine
+        other = grafana_hash("change-me", "s2")
+        assert logins(db("second", [("admin", gf_ui, salt, 1), ("ops", other, "s2", 1), ("viewer", other, "s2", 0)])) == [("ops", "change-me")]
+        assert logins(db("renamed", [("root", gf_admin, salt, 1)])) == [("root", "admin")]  # no login named admin needed
+        assert logins(db("oauth", [("sso-admin", None, None, 1), ("admin", gf_ui, salt, 0)])) == []  # no local password: not a default
+        undecidable = [db("noadmin", [("ops", gf_ui, salt, 0)]), db("badhash", [("admin", "bcrypt$2y$xx", salt, 1)]),
+                       db("halfset", [("admin", gf_ui, "", 1)]),
+                       db("schema", [("admin", gf_ui, salt)], schema="CREATE TABLE `user` (login TEXT, password TEXT, salt TEXT)"),
+                       f"{tmp}/missing.db"]
+        Path(f"{tmp}/corrupt.db").write_bytes(b"SQLite format 3\0" + b"\xff" * 4000)
+        undecidable.append(f"{tmp}/corrupt.db")
+        for path in undecidable:
+            try:
+                grafana_defaults(path)
+                raise AssertionError(path)
+            except GrafanaDbUnreadable:
+                pass
+    # restore: the manifest may only name volumes and an inventory under inventory/ or testbed/
+    mem = lambda *names: [types.SimpleNamespace(name=n, size=1, isfile=lambda: True) for n in names + ("loki/chunk",)]
+    good_m = {"parts": ["loki"], "inventory": "inventory/devices.yaml", "include_env": True}
+    assert check_manifest(good_m, mem("config/inventory/devices.yaml", "config/.env"), True) == [
+        ("inventory/devices.yaml", (WORK / "inventory/devices.yaml").resolve()), (".env", ENV_FILE)]
+    for bad_inv in ("../generated/alloy/hostmap.alloy", "/generated/alloy/hostmap.alloy", "inventory/../compose.yaml",
+                    "snmp/auths.yml", "inventory/x.alloy"):
+        try:
+            check_manifest({**good_m, "inventory": bad_inv}, mem("config/" + bad_inv.lstrip("/"), "config/.env"), True)
+            raise AssertionError(bad_inv)
+        except Fail:
+            pass
+    for bad in ({**good_m, "parts": ["etc"]}, {**good_m, "parts": "loki"}):
+        try:
+            check_manifest(bad, mem("config/inventory/devices.yaml", "config/.env"), True)
+            raise AssertionError(bad)
+        except Fail:
+            pass
+    assert check_manifest(good_m, mem("config/inventory/devices.yaml", "config/.env"), False) == []
+    # backup: written to .partial, moved into place only when complete; restore checks completeness first
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "loki")
+        (src / "chunks").mkdir(parents=True)
+        for i in range(3):
+            (src / "chunks" / f"c{i}").write_bytes(b"x" * (10 + i))
+        out = Path(tmp, "obs-backup-test.tar.gz")
+        m = write_archive(out, {"format": 2}, [("loki", "loki", src, None)], tmp)
+        assert out.exists() and not Path(f"{out}.partial").exists() and m["contents"] == {"loki": {"files": 3, "bytes": 33}}
+        with tarfile.open(out) as tar:
+            members = tar.getmembers()
+            mf = json.load(tar.extractfile("manifest.json"))
+        assert members[-1].name == "manifest.json" and mf["parts"] == ["loki"] and check_manifest(mf, members, False) == []
+        cut = [x for x in members if not x.name.endswith("c2")]  # a member missing: refused before anything is cleared
+        try:
+            check_manifest(mf, cut, False)
+            raise AssertionError("cut archive accepted")
+        except Fail:
+            pass
+        try:
+            check_manifest({**mf, "contents": {}}, [x for x in members if not x.name.startswith("loki/")], False)
+            raise AssertionError("empty part accepted")
+        except Fail:
+            pass
+
+        def vanish(ti):  # a source file disappearing mid-copy
+            if ti.name.endswith("c1"):
+                raise FileNotFoundError(ti.name)
+            return ti
+        failed = Path(tmp, "obs-backup-fail.tar.gz")
+        try:
+            write_archive(failed, {"format": 2}, [("loki", "loki", src, vanish)], tmp)
+            raise AssertionError("failure not raised")
+        except FileNotFoundError:
+            pass
+        assert not failed.exists() and not Path(f"{failed}.partial").exists(), "no archive (and no partial) after a failure"
+    # syslog: a header hostname that is not the device's name stays in the message
+    assert expected_line({"host": "nas01", "line": "sshd: x"}) == "nas01 sshd: x" and expected_line({"host": "$sender", "line": "a"}) == "a"
+    # docs: the README's non-interactive init example passes every value init requires (review S2)
+    readme = (WORK / "README.md").read_text(encoding="utf-8")
+    example = readme[readme.index("tools init --yes") - 200:readme.index("tools init --yes") + 300]
+    for var in ("GF_ADMIN_PASSWORD", "SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
+        assert f"-e {var}=" in example, var
+    print("selftest ok")
+
+
+# ---- CLI ----------------------------------------------------------------------------------------
+
+def parser():
+    p = argparse.ArgumentParser(prog="tools", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd")
+    i = sub.add_parser("init", help=".env と機器台帳を作る (対話 / --yes で引数のみ)")
+    i.add_argument("--yes", action="store_true", help="対話せず引数・環境変数と既定値で作る")
+    i.add_argument("--force", action="store_true", help="既存の .env / 台帳を作り直す (.bak に退避)")
+    i.add_argument("--device", action="append", default=[], metavar="名前,種別,アドレス[,auth]", help="機器 (複数回可)")
+    i.add_argument("--bind", default="127.0.0.1", help="画面の公開アドレス (既定 127.0.0.1)")
+    i.add_argument("--port", default="8080")
+    i.add_argument("--public-url", default="", help="LAN から開く URL (既定: --bind と --port から。0.0.0.0 のときは必須)")
+    i.add_argument("--syslog-bind", default="127.0.0.1", help="syslog 受信アドレス (機器から受けるなら LAN 側 IP)")
+    i.add_argument("--syslog-port", default="514")
+    i.add_argument("--grafana-password", default="", help="(履歴に残るので環境変数 GF_ADMIN_PASSWORD 推奨)")
+    i.add_argument("--snmp-user", default="")
+    i.add_argument("--snmp-auth-proto", default="SHA", choices=AUTH_PROTOS)
+    i.add_argument("--snmp-priv-proto", default="AES", choices=PRIV_PROTOS)
+    i.add_argument("--reset-grafana-admin", action="store_true", help="動いている Grafana の admin が既定値なら .env の値に変える")
+    i.add_argument("--wan", default="", metavar="機器名:ifName", help="WAN 側インターフェース (例 rtx1300:lan2)")
+    i.epilog = "SNMP のパスワードは引数にせず -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... (または対話) で渡します"
+    c = sub.add_parser("check", help="検証・SNMP 疎通・syslog 受信・health")
+    c.add_argument("--syslog-wait", type=int, default=60, metavar="秒", help="syslog の受信を待つ秒数 (0 で省略、既定 60)")
+    t = sub.add_parser("targets", help="台帳から scrape 対象などを生成")
+    t.add_argument("--demo", action="store_true", help="デモ用 (demo-gen) の対象を書く")
+    b = sub.add_parser("backup", help="設定とデータを 1 つのアーカイブに")
+    b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
+    b.add_argument("--out", default="backups", help="出力先 (リポジトリからの相対、既定 backups)")
+    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana は停止しておく)")
+    r.add_argument("archive")
+    r.add_argument("--with-config", action="store_true", help="機器台帳 (と含まれていれば .env) も戻す")
+    r.add_argument("--yes", action="store_true", help="確認せずに実行")
+    g = sub.add_parser("grafana-guard", help="(常駐) 管理者が既定パスワードの間は LAN からの /grafana/ を閉じる。定期的に確認")
+    g.add_argument("--once", action="store_true", help="1 回だけ確認して終わる")
+    sub.add_parser("guard-health", help="(grafana-guard の healthcheck)")
+    sub.add_parser("grafana-reset-admin", help="Grafana の admin パスワードを .env の GF_ADMIN_PASSWORD にする")
+    sub.add_parser("setup-check", help="(起動時に自動) profile の設定が済んでいるか")
+    s = sub.add_parser("test-syslog", help="syslog 解析の回帰テスト (fixtures → Alloy → Loki)")
+    s.add_argument("--host", default="alloy")
+    s.add_argument("--port", type=int, default=514)
+    s.add_argument("--timeout", type=int, default=30)
+    sub.add_parser("help", help="この説明")
+    return p
+
+
+def main(argv):
+    if "--selftest" in argv:
+        selftest()
+        return 0
+    p = parser()
+    args = p.parse_args(argv)
+    cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
+            "grafana-guard": cmd_grafana_guard, "guard-health": cmd_guard_health, "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
+            "restore": cmd_restore, "test-syslog": cmd_test_syslog}
+    if args.cmd not in cmds:
+        p.print_help()
+        return 0
+    try:
+        return cmds[args.cmd](args)
+    except Fail as e:
+        print(f"[NG] {e}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\n中止しました", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

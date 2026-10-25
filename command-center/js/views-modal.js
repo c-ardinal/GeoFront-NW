@@ -2,10 +2,10 @@
 // Every modal reads top-down: summary tiles (is it OK / what stands out) -> charts -> detail list (表 / カード).
 import { el, has, fixed, fmtUptime, fmtBytes, fmtDur, maskIp, maskText, jstFull, sortTable, upState, bar, refocus } from './util.js';
 import { promQuery, lokiLogs, lokiMetric, logqlString } from './api.js';
-import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow, sevKind } from './panels.js';
+import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow, sevKind, FLOW_TEXT, WAN, WAN_NOT_CONFIGURED, wanSel, wanLabel, WLAN, isWlx } from './panels.js';
 import {
   section, chartBlock, drawRange, fetchRange, rangeSelect, mbps, lv, linkBtn, putIn, tiles, vsAvg, rankBars, keyLegend, timeline,
-  stackCols, SEV_KEYS, sevBuckets, sevTiles, SEV_LEVELS, SEV_BAD, sevKey, multiples, seriesBy, maxOf, dataView, listSection, alertLanes, alertKey, ipTokens, ALERT_KEYS, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN,
+  stackCols, SEV_KEYS, sevBuckets, sevTiles, SEV_LEVELS, SEV_BAD, sevKey, multiples, seriesBy, maxOf, dataView, listSection, alertLanes, alertKey, ipTokens, ALERT_KEYS, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
 } from './views-common.js';
 
 const fmtN = (d) => (v) => fixed(v, d);
@@ -13,7 +13,7 @@ const CORE_SEV = ['critical', 'error', 'warning', 'notice', 'informational']; //
 const HOUR = 3600;
 const sumDef = (vals) => { const v = vals.filter(has); return v.length ? v.reduce((a, b) => a + b, 0) : undefined; };
 const grid2 = (...secs) => { const g = el('div', 'v-grid2'); g.append(...secs.map((s) => s.wrap)); return g; };
-const flowsDownTiles = (labels) => tiles(labels.map((label) => ({ label, value: undefined, kind: 'unknown', status: 'flow source DOWN' })));
+const flowsDownTiles = (labels) => tiles(labels.map((label) => ({ label, value: undefined, kind: 'unknown', status: FLOW_TEXT.status })));
 // small "share of total" bar for cards; label carries the number for AT
 function shareBar(p) {
   const b = bar(has(p) ? p : 0);
@@ -37,12 +37,12 @@ export function devicesModal() {
       dv = dataView('devices', [
         { key: 'name', label: 'Device' }, { key: 'status', label: 'Status' }, { key: 'uptime', label: 'Uptime', num: true, fmt: (v) => (has(v) ? fmtUptime(v) : '—') },
         { key: 'in', label: '↓ Mbps', num: true, fmt: fmtN(1) }, { key: 'out', label: '↑ Mbps', num: true, fmt: fmtN(1) },
-        { key: 'err', label: 'Errors /min', num: true, fmt: fmtN(1) }, { key: 'clients', label: 'WLAN clients', num: true, fmt: (v, r) => (r.name.startsWith('wlx') ? fixed(v, 0) : 'n/a') },
+        { key: 'err', label: 'Errors /min', num: true, fmt: fmtN(1) }, { key: 'clients', label: 'WLAN clients', num: true, fmt: (v, r) => (isWlx(r.name) ? fixed(v, 0) : 'n/a') },
         { key: 'ifCount', label: 'Interfaces', num: true },
       ], { key: 'name' }, (r) => ({
         title: r.name.toUpperCase(), badge: r.badge,
         fields: [['↓', fixed(r.in), 'Mbps'], ['↑', fixed(r.out), 'Mbps'], ['Errors', fixed(r.err), '/min'],
-          ['Uptime', has(r.uptime) ? fmtUptime(r.uptime) : undefined], ['WLAN clients', r.name.startsWith('wlx') ? fixed(r.clients, 0) : 'n/a'], ['Interfaces', r.ifCount]],
+          ['Uptime', has(r.uptime) ? fmtUptime(r.uptime) : undefined], ['WLAN clients', isWlx(r.name) ? fixed(r.clients, 0) : 'n/a'], ['Interfaces', r.ifCount]],
       }), (r) => r.name);
       const ls = listSection('Devices', 'click a row / card for details', dv);
       const ifSec = section('Interfaces per device');
@@ -72,7 +72,7 @@ export function devicesModal() {
         { label: 'Traffic ↓ (sum)', value: sumDef(rows.map((r) => r.in)), unit: 'Mbps', sub: down.length ? 'UP devices only' : undefined },
         { label: 'Traffic ↑ (sum)', value: sumDef(rows.map((r) => r.out)), unit: 'Mbps', sub: down.length ? 'UP devices only' : undefined },
         { label: 'Errors', value: err, unit: '/min', kind: has(err) ? (err > 0 ? 'warn' : 'ok') : 'unknown', status: has(err) ? (err > 0 ? 'errors seen' : 'none') : 'unknown' },
-        { label: 'WLAN clients', value: sumDef(rows.filter((r) => r.name.startsWith('wlx')).map((r) => r.clients)), d: 0 },
+        { label: 'WLAN clients', value: sumDef(rows.filter((r) => isWlx(r.name)).map((r) => r.clients)), d: 0 },
         { label: 'Firing alerts', value: firing, d: 0, kind: firing ? 'crit' : 'ok', status: firing ? 'see Alerts' : 'none' },
       ]));
       dv.update(rows, (r) => ctx.nav.device(r.name));
@@ -133,7 +133,8 @@ export function destModal() {
         putIn(rank, el('p', 'na', FLOWS_DOWN));
         dv.update([]);
         await trendP;
-        throw new Error(FLOWS_DOWN);
+        flowsMissing(ctx.snap);
+        return;
       }
       const [bytes, r] = await Promise.all([promQuery('sum by (dst_ip) (increase(demo_flow_bytes_total[15m]))'), trendP]);
       lastR = r || lastR;
@@ -198,7 +199,8 @@ export function srcModal() {
         putIn(sum, flowsDownTiles(['Source hosts', 'Total flow', 'Top host', '↑ outbound']));
         putIn(rank, el('p', 'na', FLOWS_DOWN));
         dv.update([]);
-        throw new Error(FLOWS_DOWN);
+        flowsMissing(ctx.snap);
+        return;
       }
       const flows = ctx.snap.flows;
       const all = totalBps(flows);
@@ -241,7 +243,8 @@ export function unknownModal() {
         putIn(sum, flowsDownTiles(['Unknown destinations', 'Unknown traffic', 'Share of all flow', 'Source hosts']));
         putIn(rank, el('p', 'na', FLOWS_DOWN));
         dv.update([]);
-        throw new Error(FLOWS_DOWN);
+        flowsMissing(ctx.snap);
+        return;
       }
       const all = totalBps(ctx.snap.flows);
       const unkFlows = ctx.snap.flows.filter((f) => f.lat === null);
@@ -267,7 +270,7 @@ export function wanModal() {
   const traffic = chartBlock('tall'), util = chartBlock(), errs = chartBlock('small');
   const pts = (res) => (res?.[0]?.values || []).map(([t, v]) => [Number(t), Number(v)]);
   return {
-    title: 'WAN — RTX1300 LAN2', src: 'prom',
+    title: wanLabel().replace(' · ', ' — '), src: 'prom',
     mount(body) {
       sum = el('div');
       const sel = rangeSelect([['1 h', HOUR], ['6 h', 6 * HOUR], ['24 h', 24 * HOUR]], secs, (v) => { secs = v; if (last) this.update(last).catch(() => {}); });
@@ -278,6 +281,10 @@ export function wanModal() {
     },
     async update(ctx) {
       last = ctx;
+      if (!WAN.instance) { // not configured: a neutral note, no charts (nothing would ever be drawn)
+        putIn(sum, tiles([{ label: 'WAN', value: undefined, kind: 'unknown', status: WAN_NOT_CONFIGURED }]));
+        return;
+      }
       const w = wanValues(ctx.snap.m);
       const down = pts(ctx.snap.sDown), up = pts(ctx.snap.sUp);
       const spark = (p, cls) => ({ series: [{ points: p, cls }], step: 15, t0: Date.now() / 1000 - 900, t1: Date.now() / 1000 });
@@ -291,7 +298,7 @@ export function wanModal() {
         { label: 'Errors', value: w.err, unit: '/min', kind: has(w.err) ? (w.err > 0 ? 'warn' : 'ok') : 'unknown', status: has(w.err) ? (w.err > 0 ? 'errors seen' : 'none') : 'unknown' },
         { label: 'Link speed', value: has(w.speed) ? String(w.speed) : undefined, unit: 'Mbps' },
       ]));
-      const sel = 'job="snmp",instance="rtx1300",ifName="lan2"';
+      const sel = wanSel();
       await Promise.all([
         drawRange(traffic, [{ q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↓ in' }, { q: `(rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↑ out' }], secs, 'Mbps', 'WAN throughput'),
         drawRange(util, [{ q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / (ifHighSpeed{${sel}} * 1e6) * 100) ${SNMP_UP}`, name: () => 'util ↓ %' },
@@ -369,7 +376,7 @@ export function wlanModal() {
   let dv, sum, rank;
   const chart = chartBlock();
   return {
-    title: 'Wireless clients (demo metric)', src: 'prom',
+    title: WLAN.unconfirmed ? 'Wireless clients (MIB unconfirmed)' : 'Wireless clients (demo metric)', src: 'prom',
     mount(body) {
       sum = el('div');
       const s1 = section('Clients per AP / SSID', 'stacked by band');
@@ -382,10 +389,17 @@ export function wlanModal() {
         title: r.ssid, sub: r.inst, badge: has(r.total) ? ['ok', 'LIVE'] : ['unknown', 'UNKNOWN'],
         fields: [['2.4 GHz', fixed(r.b24, 0)], ['5 GHz', fixed(r.b5, 0)], ['Total', fixed(r.total, 0)]],
       }), (r) => r.key);
-      body.append(el('p', 'v-p', 'demo_wlan_clients is a synthetic metric; real WLX MIB availability is unconfirmed.'), sum, grid2(s1, s2), listSection('All AP / SSID', '', dv).wrap);
+      body.append(el('p', 'v-p', WLAN.unconfirmed ? 'Client counts need a WLX private MIB that is not confirmed yet, so they are not collected: values stay unknown (—).'
+        : 'demo_wlan_clients is a synthetic metric; real WLX MIB availability is unconfirmed.'), sum, grid2(s1, s2), listSection('All AP / SSID', '', dv).wrap);
     },
     async update(ctx) {
       const rows = wlanRows(ctx.snap, ctx.seenWlan);
+      if (WLAN.unconfirmed && !rows.length) { // prod: nothing is collected, so every figure is unknown (not 0, not STALE)
+        putIn(sum, tiles(['Clients (total)', '2.4 GHz', '5 GHz', 'APs reporting'].map((label) => ({ label, value: undefined, kind: 'unknown', status: 'MIB unconfirmed' }))));
+        putIn(rank, el('p', 'na', 'MIB unconfirmed: client counts are not collected'));
+        dv.update([]);
+        return;
+      }
       const b24 = sumDef(rows.map((r) => r.b24)), b5 = sumDef(rows.map((r) => r.b5));
       const tot = has(b24) || has(b5) ? (b24 ?? 0) + (b5 ?? 0) : undefined;
       const aps = [...new Set(rows.map((r) => r.inst))];

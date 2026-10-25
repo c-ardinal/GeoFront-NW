@@ -26,7 +26,8 @@ schema_config:
         prefix: index_
         period: 24h
 
-# SYSLOG retention 30 days (spec). The compactor applies limits_config.retention_period.
+# SYSLOG retention: LOKI_RETENTION in .env (default 720h = 30 days, spec); Loki runs with -config.expand-env=true.
+# The compactor applies limits_config.retention_period.
 compactor:
   working_directory: /loki/compactor
   compaction_interval: 10m
@@ -35,7 +36,7 @@ compactor:
   delete_request_store: filesystem
 
 limits_config:
-  retention_period: 720h
+  retention_period: ${LOKI_RETENTION:-720h}
 
 analytics:
   reporting_enabled: false

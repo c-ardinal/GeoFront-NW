@@ -1,2 +1,7 @@
 .env
+.env.bak-*
 .claude/
+# real device inventory (only the example is tracked)
+inventory/*
+!inventory/devices.example.yaml
+backups/

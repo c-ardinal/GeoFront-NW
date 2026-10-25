@@ -1,0 +1,24 @@
+# SNMP credentials for snmp_exporter. The modules (if_mib, system) are the image's built-in, generated
+# snmp.yml (IF-MIB ifTable/ifXTable, SNMPv2-MIB system); no YAMAHA private MIB is used.
+#
+# Template: the tools container renders this file into the generated volume on every `up`
+# (`prod-setup`, or `docker compose run --rm tools targets`):
+#   - ${SNMP_V3_AUTH_PROTO} / ${SNMP_V3_PRIV_PROTO} are filled in from .env (snmp_exporter cannot expand them);
+#   - the SNMPv3 secrets (${SNMP_V3_USER}, ${SNMP_V3_AUTH_PASS}, ${SNMP_V3_PRIV_PASS}) stay references and are
+#     expanded by snmp_exporter itself at start (--config.expand-environment-variables);
+#   - ${SNMP_COMMUNITY} is written as its value (snmp_exporter does not expand community), only into the generated
+#     volume, file mode 0600;
+#   - an auth whose variables are empty in .env is left out.
+# inventory/devices.yaml picks one auth per device (snmp_auth).
+auths:
+  yamaha_v3:
+    version: 3
+    security_level: authPriv
+    username: ${SNMP_V3_USER}
+    auth_protocol: ${SNMP_V3_AUTH_PROTO}
+    password: ${SNMP_V3_AUTH_PASS}
+    priv_protocol: ${SNMP_V3_PRIV_PROTO}
+    priv_password: ${SNMP_V3_PRIV_PASS}
+  yamaha_v2c:
+    version: 2
+    community: ${SNMP_COMMUNITY}

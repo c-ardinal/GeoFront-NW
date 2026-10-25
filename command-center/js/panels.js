@@ -2,8 +2,68 @@
 import { $, el, cell, num, badge, row, head, bar, put, refocus, upState, has, fmtUptime, maskIp, maskText, cssVar, jstClock, SEV_KEYS, sevKey, sevName,
   WALLBOARD, LARGE, fitRows, uiZoom, setTicker, clearTicker, jstHm, fmtDur } from './util.js';
 
+// The demo's three devices; replaced in place by the inventory (/obs/config.json) in prod, before the first render.
 export const DEVICES = ['rtx1300', 'wlx413', 'wlx222'];
+const WLX = new Set(['wlx413', 'wlx222']); // devices with a wireless client column
+export function setDevices(list) {
+  DEVICES.splice(0, DEVICES.length, ...list.map((d) => d.name));
+  WLX.clear();
+  for (const d of list) if (d.kind === 'wlx') WLX.add(d.name);
+}
+export const isWlx = (name) => WLX.has(name); // by inventory kind (demo: its two APs), never by name
+// WAN interface: the demo's rtx1300 lan2; in prod the inventory's wan_interface (setWan). instance null = not configured.
 export const WAN = { instance: 'rtx1300', ifName: 'lan2' };
+// Exposure of the screens for the LAN indicator: a fresh exposure.json, else a fresh config.json (it carries OBS_BIND),
+// else the remembered answers, which can only raise the warning: a remembered LAN address is still shown as LAN, a
+// remembered loopback is not trusted (OBS_BIND may have changed since) -> "unknown". kind: local | lan | unknown.
+// Deployment config changes (first answer after a timeout, `tools targets` with a new inventory): the screen is set
+// up from config.json once at load, so a different config means reloading the page. Reloaded only while the wallboard
+// is showing; during an investigation it waits until the user is back on the wallboard (Esc / BACK TO LIVE / idle).
+const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object'
+  ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+export const configDigest = (cfg) => (cfg ? JSON.stringify(sortKeys(cfg)) : null);
+// The mode is re-read RELOAD_SETTLE_MS after the last notification: moving from a modal to a drawer briefly passes
+// through WALLBOARD (closeModal, then the drawer opens), which must not count as being back on the wallboard.
+const RELOAD_SETTLE_MS = 300;
+export function configWatcher(applied, { mode, reload, defer = (f) => setTimeout(f, RELOAD_SETTLE_MS), cancel = clearTimeout }) {
+  const appliedDigest = configDigest(applied);
+  let pending = false;
+  let timer = null;
+  const due = () => {
+    if (!pending) return;
+    if (timer !== null) cancel(timer);
+    timer = defer(() => {
+      timer = null;
+      if (pending && mode() === 'WALLBOARD') { pending = false; reload(); }
+    });
+  };
+  return {
+    offer(fresh) { // a freshly fetched config (never a remembered one)
+      if (fresh && configDigest(fresh) !== appliedDigest) { pending = true; due(); }
+    },
+    modeChanged: due,
+  };
+}
+const isLocalBind = (b) => /^127\./.test(b) || b === 'localhost' || b === '::1';
+export function exposureOf(freshExp, freshCfg, cachedExp, cachedCfg) {
+  const fresh = freshExp?.bind || freshCfg?.bind;
+  if (fresh) return { kind: isLocalBind(String(fresh)) ? 'local' : 'lan', bind: String(fresh), cached: false };
+  const old = cachedExp?.bind || cachedCfg?.bind;
+  if (old && !isLocalBind(String(old))) return { kind: 'lan', bind: String(old), cached: true };
+  return { kind: 'unknown', bind: old ? String(old) : '', cached: !!old };
+}
+export const WAN_NOT_CONFIGURED = 'WAN interface not configured';
+export function setWan(w) {
+  WAN.instance = typeof w?.device === 'string' && typeof w?.ifName === 'string' ? w.device : null;
+  WAN.ifName = WAN.instance ? w.ifName : null;
+}
+export const wanSel = () => `job="snmp",instance="${WAN.instance}",ifName="${WAN.ifName}"`;
+export const wanLabel = () => (WAN.instance ? `WAN · ${WAN.instance.toUpperCase()} ${WAN.ifName.toUpperCase()}` : 'WAN');
+// Wireless clients: demo_wlan_clients is synthetic; in prod the WLX MIB for client counts is unconfirmed (values unknown).
+export const WLAN = { unconfirmed: false };
+// Missing flow data: the flow source is DOWN (STALE), or no flow source is configured (prod before P3: neutral).
+// views-common.setNoFlowSource() switches the texts.
+export const FLOW_TEXT = { status: 'flow source DOWN', row: 'flow source DOWN · UNKNOWN', arcs: 'flow source DOWN · arcs UNKNOWN' };
 const DEST_TOP = 10;
 const SRC_TOP = 6;
 const UNKNOWN_TOP = 4;
@@ -67,9 +127,10 @@ function rankRows(groups, total, labelHead, maxRows, onOpen) {
 
 export function renderFlows(snap, nav) {
   if (!snap.flowsOk) { // flow source DOWN: say so instead of an empty ranking (which would read as 0 Mbps)
-    const msg = () => cell('flow source DOWN · UNKNOWN', 'sub');
-    put('dest', [head('COUNTRY', '', '#Mbps', '#SHARE %'), row([msg(), cell(''), num(undefined), num(undefined)])]);
-    put('src', [head('HOST', '', '#Mbps', '#SHARE %'), row([msg(), cell(''), num(undefined), num(undefined)])]);
+    const msg = () => cell(FLOW_TEXT.row, 'sub');
+    const wide = () => { const c = msg(); c.style.gridColumn = 'span 2'; return c; }; // label + bar columns: the text stays readable
+    put('dest', [head('COUNTRY', '', '#Mbps', '#SHARE %'), row([wide(), num(undefined), num(undefined)])]);
+    put('src', [head('HOST', '', '#Mbps', '#SHARE %'), row([wide(), num(undefined), num(undefined)])]);
     put('unknown', [head('DESTINATION (MASKED)', '#Mbps'), row([msg(), num(undefined)])]);
     return;
   }
@@ -106,10 +167,9 @@ export function renderDevices(m, nav) {
   for (const d of DEVICES) {
     const [kind, text] = upState(m.up.get(d));
     const ut = m.up.get(d) === 1 ? m.uptime.get(d) : undefined; // uptime of a DOWN/UNKNOWN target is not current
-    const isWlx = d.startsWith('wlx');
     rows.push(row([badge(kind, text), cell(d.toUpperCase(), 'name'),
       num(m.devIn.get(d)), num(m.devOut.get(d)), num(m.devErr.get(d)),
-      isWlx ? num(m.clients.get(d), 0) : cell('n/a', 'n sub', 'not applicable'),
+      isWlx(d) ? num(m.clients.get(d), 0) : cell('n/a', 'n sub', 'not applicable'),
       cell(has(ut) ? fmtUptime(ut) : '—', has(ut) ? 'n' : 'n na')], '', () => nav.device(d), `details for ${d}`));
   }
   put('devices', rows);
@@ -151,6 +211,16 @@ export function wanValues(m) {
 }
 
 export function renderWan(snap) {
+  if (!WAN.instance) { // nothing to measure: say so, never 0 and never STALE
+    $('wan-down').textContent = '—';
+    $('wan-up').textContent = '—';
+    drawSpark('spark-down', [], cssVar('--spark-1'), 15);
+    drawSpark('spark-up', [], cssVar('--spark-2'), 15);
+    const note = cell(WAN_NOT_CONFIGURED, 'sub');
+    note.style.gridColumn = '1 / -1'; // the whole foot row, not its first (label-width) column
+    put('wan-foot', [row([note])]);
+    return;
+  }
   const w = wanValues(snap.m);
   $('wan-down').textContent = has(w.down) ? Math.round(w.down) : '—';
   $('wan-up').textContent = has(w.up) ? Math.round(w.up) : '—';
@@ -202,6 +272,11 @@ export function renderWlan(snap, seen, nav) {
   const rows = [head('AP', 'SSID', '#2.4 GHz', '#5 GHz', '#TOTAL')];
   for (const r of wlanRows(snap, seen)) {
     rows.push(row([cell(r.inst, 'name'), cell(r.ssid), num(r.b24, 0), num(r.b5, 0), num(r.total, 0)], '', () => nav.device(r.inst), `details for ${r.inst}`));
+  }
+  if (rows.length === 1 && WLAN.unconfirmed) { // prod: one unknown row per access point, never 0 clients
+    for (const d of DEVICES.filter(isWlx)) {
+      rows.push(row([cell(d, 'name'), cell('MIB unconfirmed', 'sub'), num(undefined, 0), num(undefined, 0), num(undefined, 0)], '', () => nav.device(d), `details for ${d}`));
+    }
   }
   if (rows.length === 1) rows.push(row([cell('no data', 'sub')]));
   put('wlan', rows);

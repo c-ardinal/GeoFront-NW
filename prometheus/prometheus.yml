@@ -4,28 +4,31 @@ global:
 
 rule_files:
   - /etc/prometheus/rules.yml
+  - /etc/obs-generated/prometheus/wan-rules.yml  # WAN utilization alert for the configured WAN interface
 
 scrape_configs:
-  # Standard snmp_exporter pattern. demo-gen impersonates snmp_exporter;
-  # to use real devices, point the __address__ replacement at a real snmp_exporter.
+  # Standard snmp_exporter pattern. The targets file is written by the tools container for the active profile:
+  #   demo: rtx1300 / wlx413 / wlx222 via demo-gen (which impersonates snmp_exporter, module if_mib);
+  #   prod: inventory/devices.yaml via the real snmp-exporter (modules if_mib,system, auth per device).
+  # Each target carries __device (-> instance), __exporter (-> __address__) and the module / auth params.
   - job_name: snmp
     metrics_path: /snmp
-    params:
-      module: [if_mib]
-    static_configs:
-      - targets: [rtx1300, wlx413, wlx222]
+    scrape_timeout: 14s
+    file_sd_configs:
+      - files: [/etc/obs-generated/prometheus/snmp.json]
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
-      - source_labels: [__param_target]
+      - source_labels: [__device]
         target_label: instance
-      - target_label: __address__
-        replacement: demo-gen:9116
+      - source_labels: [__exporter]
+        target_label: __address__
 
+  # demo-gen's synthetic flows (demo only; empty in prod until real flow collection exists)
   - job_name: flows
     metrics_path: /flows
-    static_configs:
-      - targets: [demo-gen:9116]
+    file_sd_configs:
+      - files: [/etc/obs-generated/prometheus/flows.json]
 
   - job_name: prometheus
     static_configs:

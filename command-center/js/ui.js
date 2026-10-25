@@ -163,6 +163,10 @@ export function clearAll() {
 // When the bar does not fit on one row (title + banner at its min width + status), compaction steps are applied in
 // order until it does; no status item ever leaves the bar (the "⋯" menu holds settings only).
 const BAR_STEPS = ['bar-s-labels', 'bar-s-demo', 'bar-s-lead', 'bar-s-title', 'bar-s-tight', 'bar-s-notitle', 'bar-s-back'];
+let refit = () => {}; // set by initTopbar
+// For a bar item that appears, disappears or changes width after the first fit (the cached stages do not track it):
+// forget the cached stages and fit again from stage 0.
+export function refitTopbar() { refit(); }
 export function initTopbar() {
   const bar = document.querySelector('.bar-main');
   const status = document.querySelector('.status');
@@ -218,7 +222,8 @@ export function initTopbar() {
   for (const n of [bar, status, banner]) ro.observe(n);
   new MutationObserver(schedule).observe($('back-live'), { attributes: true, attributeFilter: ['hidden'] });
   new MutationObserver(schedule).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-  document.fonts?.addEventListener('loadingdone', () => { cache.clear(); lastKey = null; schedule(); });
+  refit = () => { cache.clear(); lastKey = null; schedule(); };
+  document.fonts?.addEventListener('loadingdone', refit);
   window.addEventListener('resize', () => { schedule(); closeMenu(); });
   btn.addEventListener('click', () => (menu.hidden ? openMenu() : closeMenu()));
   document.addEventListener('click', (e) => { if (!menu.hidden && !wrap.contains(e.target) && !menu.contains(e.target)) closeMenu(); });

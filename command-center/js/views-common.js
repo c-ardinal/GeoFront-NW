@@ -3,7 +3,7 @@
 // summary tiles -> charts -> detail list.
 import { el, clickable, lineChart, legend, chartColors, has, fixed, badge, refocus, jstHm, maskText, SEV_KEYS, SEV_LEVELS, SEV_BAD, sevKey } from './util.js';
 import { promRange, getJson } from './api.js';
-import { sevKind, totalBps } from './panels.js';
+import { sevKind, totalBps, FLOW_TEXT } from './panels.js';
 
 export function section(title, meta) {
   const wrap = el('section', 'v-sec');
@@ -59,7 +59,16 @@ const SCRAPE_S = 15;
 // gaps (rate() over a look-back window would otherwise keep drawing decaying values for a DOWN target).
 export const SNMP_UP = 'and on (instance) (up{job="snmp"} == 1)';
 export const FLOWS_UP = 'and on () (up{job="flows"} == 1)';
-export const FLOWS_DOWN = 'flow source DOWN: flow data UNKNOWN';
+export let FLOWS_DOWN = 'flow source DOWN: flow data UNKNOWN';
+const NO_FLOW_SOURCE = 'no flow source configured (P3)';
+export function setNoFlowSource() {
+  FLOWS_DOWN = NO_FLOW_SOURCE;
+  Object.assign(FLOW_TEXT, { status: 'no flow source (P3)', row: NO_FLOW_SOURCE, arcs: NO_FLOW_SOURCE });
+}
+// a view without flow data is STALE only when a flow source is configured (and DOWN); otherwise it just says so
+export function flowsMissing(snap) {
+  if (snap.flowsConfigured !== false) throw new Error(FLOWS_DOWN);
+}
 // queries: [{ q, name(metric) }] -> { series: [{ name, metric, qi, points }], step, win, t0, t1 }, or null when a newer
 // request on the same token (range switch / next poll) superseded this one.
 export async function fetchRange(token, queries, secs) {
