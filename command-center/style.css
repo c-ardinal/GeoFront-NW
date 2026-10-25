@@ -70,8 +70,7 @@ ul { list-style: none; }
 #alert-banner[hidden] { display: none; }
 /* ticker (banner): lead text static, items loop; the second item is an aria-hidden copy */
 .tk-lead { flex: none; margin-right: var(--s2); }
-.tk-view { min-width: 96px; }
-.tk-view { flex: 1; min-width: 0; overflow: hidden; }
+.tk-view { flex: 1; min-width: var(--tk-min, 160px); overflow: hidden; } /* readable part of the names; the bar fitter keeps it */
 .tk-track { display: inline-flex; }
 .tk-item { flex: none; }
 .ticking .tk-item { padding-right: 96px; } /* loop gap */
@@ -87,6 +86,27 @@ ul { list-style: none; }
 @keyframes tk-loop { to { transform: translateX(-50%); } }
 .status { margin-left: auto; display: flex; align-items: center; gap: var(--s4); white-space: nowrap; }
 #topbar:has(#alert-banner:not([hidden])) .status { gap: var(--s2); }
+/* priority fit (ui.js initTopbar): steps applied while the bar does not fit on one row; moved items live in #bar-menu */
+.bar-more[hidden], .bar-menu[hidden] { display: none; }
+#bar-more { min-width: 32px; height: 28px; font: 600 18px/1 var(--sans); color: var(--text); background: transparent; border: 1px solid var(--frame); cursor: pointer; }
+#bar-more:hover, #bar-more:focus-visible, #bar-more[aria-expanded="true"] { border-color: var(--accent); outline: none; }
+.bar-menu { position: fixed; z-index: 55; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s3);
+  min-width: min(220px, calc(100vw - 16px)); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; padding: var(--s3) var(--s4);
+  background: var(--topbar); border: 1px solid var(--accent); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); }
+.bar-menu > * { max-width: 100%; white-space: normal; overflow-wrap: anywhere; } /* e.g. several DOWN target names */
+.bar-menu-title { display: none; font: 600 var(--fs) var(--sans); color: var(--text); }
+#topbar.bar-s-notitle + .bar-menu .bar-menu-title { display: block; }
+#topbar.bar-s-demo .demo-label { font-size: 0; }
+#topbar.bar-s-demo .demo-label::after { content: 'DEMO'; font-size: var(--fs-s); }
+#topbar.bar-s-title .title { font-size: 0; letter-spacing: 0; }
+#topbar.bar-s-title .title-ja { display: inline; font: 600 18px var(--sans); letter-spacing: 0.06em; }
+#topbar.bar-s-notitle .title { display: none; }
+#topbar.bar-s-back .bl-text { display: none; }
+#topbar.bar-s-back #back-live { min-width: 32px; }
+#topbar.bar-s-lead :is(.tk-tag, .tk-total) { display: none; } /* banner keeps "N CRIT/WARN:" + the names; the total stays on the chip / list header */
+#topbar.bar-s-tight .status { gap: var(--s1); }
+#topbar.bar-s-tight .badge { padding-inline: var(--s2); letter-spacing: 0.04em; }
+#topbar.bar-s-tight .demo-label { padding-inline: var(--s1); }
 .kv { color: var(--text-2); }
 .kv b { color: var(--text); font-weight: 600; }
 #theme-toggle { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em; color: var(--text-2); background: transparent; border: 1px solid var(--frame); padding: 2px var(--s2); cursor: pointer; }
@@ -376,6 +396,7 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 #tabs, #kpis, .k-alerts { display: none; }
 
 @media (min-width: 2400px), (min-width: 1280px) and (min-height: 1400px) {
+  #p-devices, #p-unknown, #p-wan { flex-shrink: 0; } /* content-sized: never squeezed by the shared-height lists */
   #grid { grid-template-rows: 1fr minmax(220px, 26%); }
   /* firing alerts get a detail line (since / value / summary) and more air instead of a blank panel */
   #alerts .row { padding: var(--s1) 0; border-bottom: 1px solid var(--track); }
@@ -389,33 +410,34 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 
 /* ---- below the wallboard: content-sized panels, page scroll, touch sizes ---- */
 @media (max-width: 1279px) {
-  :root { --hdr: 50px; } /* >= 44 px tap height for the title button under the header rules */
+  :root { --hdr: 40px; }
   html, body { height: auto; overflow: visible; }
   body { min-height: 100dvh; }
   #topbar { position: sticky; top: 0; z-index: 30; }
   .bar-main { flex-wrap: wrap; row-gap: var(--s1); padding-block: var(--s1); }
-  .status { flex-wrap: wrap; justify-content: flex-end; row-gap: var(--s1); gap: var(--s3); }
-  /* compact bar: row 1 = title + DEMO + LIVE + alert count + theme (+ BACK TO LIVE), row 2 = banner ticker.
-     TARGETS / MODE / UPDATED / clock are not repeated here: targets live in COLLECTION HEALTH and DEVICE STATUS,
-     the mode shows as the BACK TO LIVE button, freshness as the LIVE / DEGRADED / STALE badge. */
-  .status > .kv { display: none; }
+  .status { flex-wrap: nowrap; gap: var(--s3); }
+  /* compact bar: row 1 = title + status on one line (what does not fit moves into the "⋯" menu, ui.js initTopbar),
+     row 2 = banner ticker */
   .demo-label { font-size: 0; }
   .demo-label::after { content: 'DEMO'; font-size: var(--fs-s); }
   .badge { min-width: 0; }
   .k-alerts { display: inline-flex; align-items: center; gap: var(--s1); min-width: 44px; justify-content: center; font: 600 var(--fs) var(--sans);
     color: var(--text); background: transparent; border: 1px solid var(--frame); padding: 0 var(--s2); cursor: pointer; }
   .k-alerts.crit { color: #fff; background: var(--banner); border-color: var(--crit); }
-  #alert-banner { order: 3; flex: 1 1 100%; min-width: 0; }
+  #alert-banner { order: 3; flex: 1 1 100%; min-width: 0; --tk-min: 64px; }
   #grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: none; }
   #grid > .col, #grid > .bottom { display: contents; }
   #p-globe { grid-area: auto; order: -1; } /* the named area does not exist here (it would open an implicit column) */
   .panel { scroll-margin-top: calc(var(--topbar-h, 56px) + var(--s2)); }
-  .row.clickable { height: auto; min-height: 44px; }
-  .log.clickable { min-height: 44px; align-items: center; }
+  /* rows are the tap target themselves: ~40 px, content centred, no padding stacked on top */
+  .row.clickable { height: auto; min-height: 40px; }
+  .log.clickable { min-height: 40px; align-items: center; }
   .panel > h2 .h-t.h-click, .panel > h2 .h-open { align-self: stretch; display: inline-flex; align-items: center; }
-  .h-open { min-width: 44px; justify-content: center; font-size: 18px; }
+  .h-open { position: relative; min-width: 44px; justify-content: center; font-size: 18px; }
+  .h-open::after { content: ''; position: absolute; inset: -6px 0; } /* >= 44 px hit area inside the 40 px header */
   .g-ctl button { width: 44px; height: 44px; }
-  #theme-toggle, #back-live, .k-alerts, .d-btn, .crumb { min-height: 44px; }
+  #theme-toggle, #back-live, .k-alerts, .d-btn, .crumb, #bar-more { min-height: 44px; }
+  #bar-more, #topbar.bar-s-back #back-live { min-width: 44px; }
   .d-btn { min-width: 44px; }
   #drawer { top: calc(var(--topbar-h, 56px) + var(--s2)); width: min(600px, calc(100vw - 2 * var(--s2))); }
   #modal { max-width: calc(100vw - 2 * var(--s2)); max-height: calc(100dvh - 2 * var(--s2)); }
@@ -443,7 +465,7 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 
 /* tablet portrait: globe on top (~44% of the height), every panel below in two columns (wide tables span both) */
 @media (min-width: 768px) and (max-width: 1279px) and (orientation: portrait) {
-  #grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; } /* paired cards keep their own height */
   #p-globe { grid-column: 1 / -1; height: 44vh; min-height: 360px; }
   #p-devices, #p-if, #p-logs { grid-column: 1 / -1; }
 }
@@ -458,6 +480,7 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 
 /* ---- phone ---- */
 @media (max-width: 767px) {
+  .st { letter-spacing: 0; } /* "UNKNOWN" keeps >= 4 px to the badge edges at 14 px */
   :root { --fs-s: 14px; }
   body { padding: var(--s2) var(--s2) calc(64px + env(safe-area-inset-bottom, 0px)); }
   .bar-main { gap: var(--s2); padding-inline: var(--s2); }

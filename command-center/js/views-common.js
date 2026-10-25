@@ -567,7 +567,7 @@ export function dataView(id, cols, initial, card, keyOf) {
       const h = el('div', 'card-h');
       if (m.badge) h.append(badge(m.badge[0], m.badge[1]));
       h.append(el('span', 'card-t', m.title));
-      if (m.sub) h.append(el('span', 'card-sub', m.sub));
+      if (m.sub) { const sub = el('span', 'card-sub', m.sub); sub.title = m.sub; h.append(sub); } // ellipsised on narrow cards
       const dl = el('dl', 'card-f');
       for (const [l, v, unit] of m.fields) {
         const g = el('div');

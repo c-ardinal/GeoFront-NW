@@ -236,6 +236,7 @@ function applyScale() {
   if ((Number(root.style.getPropertyValue('--ui-zoom')) || 1) === z) return;
   root.style.zoom = z === 1 ? '' : String(z);
   root.style.setProperty('--ui-zoom', String(z));
+  scheduleRefit(); // tier change: shared heights / stretched rows of the previous tier must be cleared now
 }
 // Layout-dependent rendering after any size change (window, orientation, banner/header height, tab switch):
 // globe canvas size, list row counts, sparkline backing stores, syslog line count.
@@ -251,11 +252,13 @@ function scheduleRefit() {
 function initLayout() {
   applyScale();
   window.addEventListener('resize', applyScale);
+  LARGE.addEventListener('change', scheduleRefit); // tier change without a zoom change (e.g. 2400 -> 2360 x 1080)
   new ResizeObserver(scheduleRefit).observe($('grid'));
   // sticky offsets / drawer top below the (wrapping) top bar on tablet and phone
   const bar = $('topbar');
   new ResizeObserver(() => document.documentElement.style.setProperty('--topbar-h', `${bar.offsetHeight}px`)).observe(bar);
   UI.initTabs(scheduleRefit);
+  UI.initTopbar();
 }
 
 // ---- boot sequence -----------------------------------------------------------------------------

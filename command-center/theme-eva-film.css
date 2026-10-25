@@ -76,6 +76,8 @@
   clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
   --banner-min: 380px; /* stripes + hex tag + count + first alert name over two lines */
 }
+/* Oswald sits ~1.5 px low in its 17 px line: lift the counts and names to the optical centre of the band */
+[data-theme="eva-film"] #alert-banner :is(.tk-lead, .tk-view) { position: relative; top: -1px; }
 [data-theme="eva-film"] #alert-banner::before {
   content: '\8B66\5831'; display: inline-block; flex: none; font: 800 16px/17px var(--ja); color: var(--warn); background: #000;
   padding: 0 14px; margin-right: var(--s3);
@@ -213,8 +215,9 @@
 [data-theme="eva-film"] body.red-alert #p-alerts::after {
   content: '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 '
            '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 ' / '';
-  position: absolute; left: var(--s3); bottom: 0; width: max-content; height: 44px; padding-top: 10px; z-index: 2; white-space: pre; pointer-events: none;
-  font: 800 22px/30px var(--ja); letter-spacing: 0.12em; color: #fff;
+  /* text centred in the red field under the 8 px hazard stripe (1 px bottom pad: the Mincho ink sits low in its box) */
+  position: absolute; left: var(--s3); bottom: 0; width: max-content; height: 36px; padding-bottom: 1px; display: flex; align-items: center; z-index: 2; white-space: pre; pointer-events: none;
+  font: 800 22px/1 var(--ja); letter-spacing: 0.12em; color: #fff;
   animation: film-scroll 18s linear infinite;
 }
 [data-theme="eva-film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
@@ -261,7 +264,7 @@
   [data-theme="eva-film"] .title { font-size: 0; column-gap: 0; }
   [data-theme="eva-film"] .title::after { display: none; }
   [data-theme="eva-film"] .title-ja { font-size: 20px; line-height: 22px; margin-top: 0; }
-  [data-theme="eva-film"] .st { font-size: 14px; }
+  [data-theme="eva-film"] .st { font-size: 14px; letter-spacing: 0.02em; }
   [data-theme="eva-film"] .panel > h2::before { display: none; } /* code IDs: no room on a phone header */
   [data-theme="eva-film"] .globe-wrap::before, [data-theme="eva-film"] .globe-wrap::after { display: none; } /* 300 px globe */
   [data-theme="eva-film"] .row .c.n { font-size: 15px; }
