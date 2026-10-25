@@ -1,6 +1,6 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
-import { $, vmap, scalar, jstClock, REDUCED_MOTION } from './util.js';
+import { $, el, vmap, scalar, jstClock, REDUCED_MOTION, LARGE } from './util.js';
 import { promQuery, promRange, promAlerts, lokiRange, lokiMetric, flattenStreams } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
@@ -15,16 +15,18 @@ const LOKI_PANELS = ['p-logs', 'p-sev'];
 const FLOW_PANELS = ['p-dest', 'p-src', 'p-unknown', 'p-globe'];
 const FLOW_MAX_AGE_S = 60; // 4 scrape intervals
 
-// ---- theme: default (v3), "eva" or "eva-film"; ?theme= overrides, choice persisted when storage is available ----
-const THEMES = ['default', 'eva', 'eva-film']; // toggle cycles in this order
-const THEME_LABEL = { default: 'THEME: STD', eva: 'THEME: EVA', 'eva-film': 'THEME: FILM' };
+// ---- theme: default (v3) or "eva-film"; ?theme= overrides, choice persisted when storage is available ----
+const THEMES = ['default', 'eva-film']; // toggle cycles in this order
+const THEME_LABEL = { default: 'THEME: STD', 'eva-film': 'THEME: FILM' };
+const THEME_ALIAS = { eva: 'eva-film' }; // the removed "eva" theme (stored or in old links) opens its successor
 function readStoredTheme() {
   try { return localStorage.getItem('cc-theme'); } catch { return null; }
 }
 function applyTheme(name, persist) {
-  const t = THEMES.includes(name) ? name : 'default';
+  const t = THEMES.includes(THEME_ALIAS[name] || name) ? THEME_ALIAS[name] || name : 'default';
   document.documentElement.dataset.theme = t;
-  $('theme-toggle').textContent = THEME_LABEL[t];
+  const [k, v] = THEME_LABEL[t].split(' ');
+  $('theme-toggle').replaceChildren(el('span', 'tt-k', `${k} `), v); // phone shows the value only
   if (persist) { try { localStorage.setItem('cc-theme', t); } catch { /* storage unavailable: theme not persisted */ } }
 }
 
@@ -158,15 +160,16 @@ async function pollProm() {
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx),
   };
   const s = state.snap;
+  P.renderDevices(m, nav); // before the flow rankings: they are fitted to the height the device list leaves
   P.renderFlows(s, nav);
   G.renderGlobe(s.flows);
   if (!flowsOk) $('arc-note').textContent = 'flow source DOWN · arcs UNKNOWN';
-  P.renderDevices(m, nav);
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
   P.renderWlan(s, state.seenWlan, nav);
   P.renderAlerts(alerts, nav);
   P.renderHealth(s, nav);
+  P.fitRightColumn();
 }
 
 async function pollLoki() {
@@ -185,6 +188,8 @@ async function poll() {
   if (p.status === 'fulfilled') { state.promOkAt = now; state.promErr = null; } else state.promErr = String(p.reason);
   if (l.status === 'fulfilled') { state.lokiOkAt = now; state.lokiErr = null; } else state.lokiErr = String(l.reason);
   updateHealth();
+  // header info slots may be cut to an ellipsis on narrow panels: the full text stays available as a tooltip
+  for (const h of document.querySelectorAll('.panel > h2 .h-r')) h.title = h.textContent;
   if (state.snap) UI.refreshViews(ctx());
 }
 const ctx = () => {
@@ -201,6 +206,7 @@ function updateHealth() {
   for (const id of PROM_PANELS) $(id).classList.toggle('stale', promStale || (flowStale && FLOW_PANELS.includes(id)));
   for (const id of LOKI_PANELS) $(id).classList.toggle('stale', lokiStale);
   $('k-targets').classList.toggle('stale', promStale);
+  $('kpis').classList.toggle('stale', promStale);
   const badgeEl = $('badge');
   let mode = 'LIVE';
   if (promStale) mode = 'STALE';
@@ -217,6 +223,41 @@ function tickClock() {
   updateHealth();
 }
 
+// ---- screen tiers --------------------------------------------------------------------------------
+// LARGE screens: the page is CSS-zoomed moderately (<= ZOOM_MAX) so it reads from a distance, while the zoomed layout
+// still has more room than 1920x1080, which the lists fill with extra rows. style.css counter-zooms the globe host so
+// WebGL renders at native resolution and pointer picking stays 1:1.
+const ZOOM_MAX = 1.5;
+const ZOOM_GAIN = 0.6; // share of the size ratio to 1920x1080 that goes into zoom (the rest becomes extra rows)
+function applyScale() {
+  const ratio = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const z = LARGE.matches ? Math.round(Math.min(ZOOM_MAX, Math.max(1, 1 + (ratio - 1) * ZOOM_GAIN)) * 100) / 100 : 1;
+  const root = document.documentElement;
+  if ((Number(root.style.getPropertyValue('--ui-zoom')) || 1) === z) return;
+  root.style.zoom = z === 1 ? '' : String(z);
+  root.style.setProperty('--ui-zoom', String(z));
+}
+// Layout-dependent rendering after any size change (window, orientation, banner/header height, tab switch):
+// globe canvas size, list row counts, sparkline backing stores, syslog line count.
+let refitTimer = 0;
+function scheduleRefit() {
+  clearTimeout(refitTimer);
+  refitTimer = setTimeout(() => {
+    G.fit();
+    if (state.snap) { P.renderFlows(state.snap, nav); P.renderWan(state.snap); P.fitRightColumn(); }
+    P.fitLogs();
+  }, 120);
+}
+function initLayout() {
+  applyScale();
+  window.addEventListener('resize', applyScale);
+  new ResizeObserver(scheduleRefit).observe($('grid'));
+  // sticky offsets / drawer top below the (wrapping) top bar on tablet and phone
+  const bar = $('topbar');
+  new ResizeObserver(() => document.documentElement.style.setProperty('--topbar-h', `${bar.offsetHeight}px`)).observe(bar);
+  UI.initTabs(scheduleRefit);
+}
+
 // ---- boot sequence -----------------------------------------------------------------------------
 function boot() {
   const lines = ['NETWORK OBSERVATORY // COMMAND CENTER', 'LINK prometheus ............ OK', 'LINK loki .................. OK',
@@ -229,6 +270,7 @@ function boot() {
 }
 
 applyTheme(new URLSearchParams(location.search).get('theme') || readStoredTheme(), false);
+initLayout();
 $('theme-toggle').addEventListener('click', () => {
   applyTheme(THEMES[(THEMES.indexOf(document.documentElement.dataset.theme) + 1) % THEMES.length], true);
   G.styleGlobe();

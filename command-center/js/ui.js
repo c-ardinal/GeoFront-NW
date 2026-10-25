@@ -1,6 +1,6 @@
 // View modes (WALLBOARD / INVESTIGATE), modal, detail drawer with breadcrumbs, idle auto-return.
 // A view is { title, src: 'prom'|'loki'|'both', mount(body), update(ctx) }; update() runs on open and after every poll.
-import { $, el } from './util.js';
+import { $, el, REDUCED_MOTION } from './util.js';
 
 const params = new URLSearchParams(location.search);
 // Auto-return to WALLBOARD after this much idle time. `?idle=<seconds>` shortens it for scripted tests only.
@@ -158,6 +158,37 @@ export function clearAll() {
   st.touched = false;
   hooks.onClear();
   updateMode();
+}
+
+// ---- panel groups as tabs (tablet landscape side column, phone bottom bar; CSS hides .tab-off only there) ----------
+// Buttons carrying data-tab (tab bar, phone summary cards, status-bar alert chip) select a group.
+export function initTabs(onChange) {
+  const tabsShown = () => getComputedStyle($('tabs')).display !== 'none';
+  const select = (name, scroll) => {
+    for (const p of document.querySelectorAll('.panel[data-group]')) p.classList.toggle('tab-off', p.dataset.group !== name);
+    for (const b of $('tabs').querySelectorAll('button')) b.setAttribute('aria-current', String(b.dataset.tab === name));
+    onChange();
+    if (!scroll) return;
+    const behavior = REDUCED_MOTION ? 'auto' : 'smooth';
+    if (tabsShown()) { // the group is now the only one shown: bring it to the top, focus stays on the tab
+      if (name === 'sum') window.scrollTo({ top: 0, behavior }); // summary cards + globe on top
+      else document.querySelector('.panel[data-group]:not(.tab-off)')?.scrollIntoView({ block: 'start', behavior });
+      return;
+    }
+    // no tab strip (tablet portrait: every group shown): go to the group's topmost panel and focus its heading
+    const panels = [...document.querySelectorAll(`.panel[data-group="${name}"]`)].filter((p) => p.offsetParent);
+    const target = panels.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+    if (!target) return;
+    target.scrollIntoView({ block: 'start', behavior });
+    const h = target.querySelector('h2');
+    h.tabIndex = -1;
+    h.focus({ preventScroll: true });
+  };
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (b) select(b.dataset.tab, true);
+  });
+  select('sum', false);
 }
 
 // ---- live refresh ----------------------------------------------------------------------------

@@ -58,16 +58,33 @@ ul { list-style: none; }
 
 /* ---- top bar: one status row ---- */
 #topbar { flex: 0 0 auto; background: var(--topbar); border: 1px solid var(--frame); border-top: 2px solid var(--accent); }
-.bar-main { height: 44px; display: flex; align-items: center; gap: var(--s4); padding: 0 var(--pad-x); }
+.bar-main { min-height: 44px; display: flex; align-items: center; gap: var(--s4); padding: 0 var(--pad-x); }
 .title { font: 600 18px var(--display); letter-spacing: 0.1em; white-space: nowrap; }
-/* banner: one line when it fits, otherwise wraps to a second line (clamped) so the count and the first alert
-   name always stay visible; min-width reserves room for them and the status row tightens its gaps meanwhile */
+/* banner: one line; the count stays put and the alert names scroll as a ticker when they do not all fit (util.js
+   setTicker), so no firing alert name is ever cut off. min-width reserves room; the status row tightens its gaps */
 #alert-banner {
   flex: 1; min-width: var(--banner-min, 240px); font: 600 var(--fs)/17px var(--sans); letter-spacing: 0.04em;
   color: #fff; background: var(--banner); padding: var(--s1) var(--s3);
-  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; display: flex; align-items: center; white-space: nowrap;
 }
 #alert-banner[hidden] { display: none; }
+/* ticker (banner): lead text static, items loop; the second item is an aria-hidden copy */
+.tk-lead { flex: none; margin-right: var(--s2); }
+.tk-view { min-width: 96px; }
+.tk-view { flex: 1; min-width: 0; overflow: hidden; }
+.tk-track { display: inline-flex; }
+.tk-item { flex: none; }
+.ticking .tk-item { padding-right: 96px; } /* loop gap */
+/* rests 2 s at the start (first name readable) before it starts to loop */
+.ticking .tk-track { animation: tk-loop var(--tk-dur, 20s) linear 2s infinite; will-change: transform; }
+.ticking:is(:hover, :focus, :focus-within) .tk-track { animation-play-state: paused; }
+.ticking:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+/* reduced motion: all names wrap onto further lines instead of scrolling; the banner grows with them */
+/* (one paragraph: tag, counts and names flow over the full banner width; id selector beats the banner's nowrap/flex) */
+#alert-banner.tk-wrap { display: block; white-space: normal; }
+.tk-wrap :is(.tk-lead, .tk-view, .tk-track, .tk-item) { display: inline; overflow: visible; }
+.tk-wrap .tk-item { overflow-wrap: anywhere; }
+@keyframes tk-loop { to { transform: translateX(-50%); } }
 .status { margin-left: auto; display: flex; align-items: center; gap: var(--s4); white-space: nowrap; }
 #topbar:has(#alert-banner:not([hidden])) .status { gap: var(--s2); }
 .kv { color: var(--text-2); }
@@ -105,7 +122,8 @@ ul { list-style: none; }
 #col-left { grid-area: left; }
 #col-right { grid-area: right; }
 #p-globe { grid-area: globe; }
-.col { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+/* #grid-scoped so generic ".col" rules elsewhere (e.g. chart columns in views.css) cannot restyle the wallboard columns */
+#grid > .col { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; background: none; }
 .bottom { grid-area: bottom; display: grid; gap: var(--gap); grid-template-columns: 1fr 280px 480px; min-height: 0; }
 
 /* ---- panel ---- */
@@ -125,6 +143,9 @@ ul { list-style: none; }
 .h-t { font: 600 var(--fs) var(--display); letter-spacing: 0.06em; color: var(--accent); }
 .h-ja, .title-ja { display: none; }
 .h-r { margin-left: auto; font: var(--fs-s) var(--sans); color: var(--text-2); }
+/* on narrow headers the info slot gives way (ellipsis, full text as tooltip) so title and STALE tag are never clipped */
+.panel > h2 .h-r { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.panel > h2 > :not(.h-r), .panel > h2::after { flex-shrink: 0; }
 .panel.stale { border: 1px dashed var(--crit); }
 .panel.stale > h2::after {
   content: 'STALE'; font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em;
@@ -162,6 +183,10 @@ ul { list-style: none; }
 #ifaces { --cols: var(--st) 1fr 56px 56px 52px 48px; }
 #wlan { --cols: 64px 1fr 56px 56px 56px; }
 #alerts { --cols: var(--st) 1fr auto; }
+/* firing alerts are must-see: long names wrap onto a second line instead of an ellipsis */
+#alerts .row { height: auto; min-height: var(--row); }
+#alerts .row .c { white-space: normal; overflow-wrap: anywhere; }
+.al-detail { display: none; }
 #health { --cols: var(--st) 1fr 54px 76px 60px; }
 #unknown { --cols: 1fr 64px; }
 #dest, #src { --cols: 92px 1fr 60px 64px; }
@@ -173,14 +198,16 @@ ul { list-style: none; }
 .bar::after { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--w, 0%); background: var(--accent); }
 .row.unknown-row .c.name { color: var(--unknown); }
 .row.unknown-row .bar::after { background: repeating-linear-gradient(135deg, var(--unknown) 0 4px, #6c7680 4px 8px); }
-.sev-error .c.name, .sev-critical .c.name { color: var(--crit); }
+.sev-error .c.name, .sev-critical .c.name, .sev-emergency .c.name, .sev-alert .c.name { color: var(--crit); }
+.sev-debug .c.name, .sev-other .c.name { color: var(--text-2); }
 .sev-warning .c.name { color: var(--warn); }
 .sev-notice .c.name { color: var(--ok); }
 .sev-informational .c.name { color: var(--text); }
 
 /* ---- globe (rendering unchanged) ---- */
 .globe-wrap { position: relative; flex: 1; min-height: 0; background: #000; }
-#globe { position: absolute; inset: 0; }
+#globe { position: absolute; inset: 0; zoom: calc(1 / var(--ui-zoom, 1)); } /* native-resolution WebGL on zoomed pages */
+.gtip, .glabel span { zoom: var(--ui-zoom, 1); }
 .globe-error { position: absolute; inset: 0; display: grid; place-items: center; color: var(--crit); font: 600 16px var(--sans); }
 .caption { flex: 0 0 auto; padding: var(--pad-y) var(--pad-x); border-top: 1px solid var(--frame); font-size: var(--fs-s); color: var(--text-2); }
 .legend { margin-left: var(--s3); color: var(--text); white-space: nowrap; }
@@ -216,6 +243,7 @@ ul { list-style: none; }
 .th-btn:focus-visible, .seg-btn:focus-visible, .crumb:focus-visible, .g-ctl button:focus-visible, .filters :is(select, input):focus-visible {
   outline: 2px solid var(--accent); outline-offset: -2px;
 }
+.panel > h2:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; } /* focused by the alert chip / tabs */
 .h-click { cursor: pointer; }
 .h-click:hover { text-decoration: underline; text-underline-offset: 3px; }
 .h-open { font: 600 var(--fs) var(--sans); color: var(--text-2); background: transparent; border: 0; padding: 0 var(--s1); cursor: pointer; line-height: 1; }
@@ -226,6 +254,14 @@ ul { list-style: none; }
 .gtip { font: 13px/1.4 var(--sans); color: var(--text); background: var(--overlay); border: 1px solid var(--accent); padding: var(--s1) var(--s2); }
 .gtip i { color: var(--text-2); font-style: normal; }
 .float-tooltip-kap { padding: 0 !important; background: transparent !important; border-radius: 0 !important; }
+/* touch: first tap on a destination shows this card (no hover tooltip on touch), second tap / OPEN opens the drawer */
+.gcard { position: absolute; left: var(--s2); bottom: var(--s2); z-index: 4; max-width: calc(100% - 72px); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  background: var(--overlay); border: 1px solid var(--accent); padding-right: var(--s2); }
+.gcard[hidden] { display: none; }
+.gcard .gtip { border: 0; font-size: var(--fs); flex: 1 1 100%; }
+.gcard button { min-height: 44px; min-width: 44px; font: 600 var(--fs) var(--sans); color: var(--text); background: var(--hover); border: 1px solid var(--accent); padding: 0 var(--s3); cursor: pointer; }
+.gcard .gcard-open { margin: 0 0 var(--s2) var(--s2); }
+.gcard .gcard-close { position: absolute; right: 0; top: 0; border-width: 0 0 1px 1px; }
 
 /* ---- detail drawer (right side; leaves most of the globe visible) ---- */
 #drawer {
@@ -325,4 +361,158 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ====================================================================================================================
+   Screen tiers (spec ch.04). Desktop 1280-2399 is the layout above and is not changed below.
+   - LARGE (>= 2400 wide, or >= 1400 tall): main.js zooms the page (<= 1.5x); lists and the syslog fill the extra
+     room with rows; ultrawide (>= 21:10) adds a 4th column for syslog / severity / health. No page scroll.
+   - TABLET (768-1279): landscape = globe + side column with the panel groups as tabs; portrait = globe on top, panels
+     in two columns. Page scrolls. Tap targets >= 44 px.
+   - PHONE (< 768): status bar, summary cards, 300 px globe, one panel group at a time, bottom tab bar, drawer as a
+     bottom sheet, modal full screen.
+   The JS tiers (util.js WALLBOARD / LARGE) use the same queries.
+   ==================================================================================================================== */
+#tabs, #kpis, .k-alerts { display: none; }
+
+@media (min-width: 2400px), (min-width: 1280px) and (min-height: 1400px) {
+  #grid { grid-template-rows: 1fr minmax(220px, 26%); }
+  /* firing alerts get a detail line (since / value / summary) and more air instead of a blank panel */
+  #alerts .row { padding: var(--s1) 0; border-bottom: 1px solid var(--track); }
+  #alerts .al-detail { display: block; grid-column: 2 / -1; font-size: var(--fs-s); }
+}
+@media (min-width: 2400px) and (min-aspect-ratio: 21/10) {
+  #grid { grid-template-columns: 440px 1fr 440px 640px; grid-template-rows: 1fr; grid-template-areas: "left globe right bottom"; }
+  #grid > .bottom { display: flex; flex-direction: column; }
+  #p-logs { flex: 1; }
+}
+
+/* ---- below the wallboard: content-sized panels, page scroll, touch sizes ---- */
+@media (max-width: 1279px) {
+  :root { --hdr: 50px; } /* >= 44 px tap height for the title button under the header rules */
+  html, body { height: auto; overflow: visible; }
+  body { min-height: 100dvh; }
+  #topbar { position: sticky; top: 0; z-index: 30; }
+  .bar-main { flex-wrap: wrap; row-gap: var(--s1); padding-block: var(--s1); }
+  .status { flex-wrap: wrap; justify-content: flex-end; row-gap: var(--s1); gap: var(--s3); }
+  /* compact bar: row 1 = title + DEMO + LIVE + alert count + theme (+ BACK TO LIVE), row 2 = banner ticker.
+     TARGETS / MODE / UPDATED / clock are not repeated here: targets live in COLLECTION HEALTH and DEVICE STATUS,
+     the mode shows as the BACK TO LIVE button, freshness as the LIVE / DEGRADED / STALE badge. */
+  .status > .kv { display: none; }
+  .demo-label { font-size: 0; }
+  .demo-label::after { content: 'DEMO'; font-size: var(--fs-s); }
+  .badge { min-width: 0; }
+  .k-alerts { display: inline-flex; align-items: center; gap: var(--s1); min-width: 44px; justify-content: center; font: 600 var(--fs) var(--sans);
+    color: var(--text); background: transparent; border: 1px solid var(--frame); padding: 0 var(--s2); cursor: pointer; }
+  .k-alerts.crit { color: #fff; background: var(--banner); border-color: var(--crit); }
+  #alert-banner { order: 3; flex: 1 1 100%; min-width: 0; }
+  #grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: none; }
+  #grid > .col, #grid > .bottom { display: contents; }
+  #p-globe { grid-area: auto; order: -1; } /* the named area does not exist here (it would open an implicit column) */
+  .panel { scroll-margin-top: calc(var(--topbar-h, 56px) + var(--s2)); }
+  .row.clickable { height: auto; min-height: 44px; }
+  .log.clickable { min-height: 44px; align-items: center; }
+  .panel > h2 .h-t.h-click, .panel > h2 .h-open { align-self: stretch; display: inline-flex; align-items: center; }
+  .h-open { min-width: 44px; justify-content: center; font-size: 18px; }
+  .g-ctl button { width: 44px; height: 44px; }
+  #theme-toggle, #back-live, .k-alerts, .d-btn, .crumb { min-height: 44px; }
+  .d-btn { min-width: 44px; }
+  #drawer { top: calc(var(--topbar-h, 56px) + var(--s2)); width: min(600px, calc(100vw - 2 * var(--s2))); }
+  #modal { max-width: calc(100vw - 2 * var(--s2)); max-height: calc(100dvh - 2 * var(--s2)); }
+  #boot pre { min-width: 0; padding: 0 var(--s4); white-space: pre-wrap; font-size: 15px; }
+  /* tab bar look (shown by the tablet-landscape / phone blocks) */
+  #tabs { gap: var(--s1); }
+  #tabs button { flex: 1; min-height: 44px; font: 600 15px var(--sans); letter-spacing: 0.06em; color: var(--text-2);
+    background: var(--panel); border: 1px solid var(--frame); cursor: pointer; }
+  #tabs button[aria-current="true"] { color: var(--text); border-color: var(--accent); box-shadow: inset 0 -3px 0 var(--accent); }
+  #tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #tabs b:not(:empty) { margin-left: var(--s1); padding: 0 var(--s1); color: #111; background: var(--warn); }
+  body.red-alert #tabs b:not(:empty) { color: #fff; background: var(--banner); }
+}
+
+/* tablet landscape (and phones held sideways): globe left (sticky), side column = tab strip + the selected group */
+@media (min-width: 768px) and (max-width: 1279px) and (orientation: landscape) {
+  #grid { grid-template-columns: minmax(0, 1fr) minmax(360px, 42%); grid-template-rows: auto auto auto auto 1fr; align-items: start; }
+  #tabs { display: flex; grid-column: 2; grid-row: 1; }
+  #grid .panel { grid-column: 2; }
+  /* spans the trailing 1fr row, so its height never stretches the side column's rows */
+  #grid #p-globe { grid-column: 1; grid-row: 1 / -1; position: sticky; top: calc(var(--topbar-h, 56px) + var(--s2));
+    height: calc(100dvh - var(--topbar-h, 56px) - 3 * var(--s2)); min-height: 320px; }
+  .panel.tab-off { display: none; }
+}
+
+/* tablet portrait: globe on top (~44% of the height), every panel below in two columns (wide tables span both) */
+@media (min-width: 768px) and (max-width: 1279px) and (orientation: portrait) {
+  #grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #p-globe { grid-column: 1 / -1; height: 44vh; min-height: 360px; }
+  #p-devices, #p-if, #p-logs { grid-column: 1 / -1; }
+}
+
+/* narrow lists (tablet side column, phone): the least important columns move to the drawer / modal */
+@media (max-width: 767px), (max-width: 1279px) and (orientation: landscape) {
+  #devices { --cols: var(--st) 1fr 52px 52px 60px; }
+  #devices .row > :is(:nth-child(5), :nth-child(6)) { display: none; }
+  #ifaces { --cols: var(--st) 1fr 56px 56px 52px; }
+  #ifaces .row > :nth-child(6) { display: none; }
+}
+
+/* ---- phone ---- */
+@media (max-width: 767px) {
+  :root { --fs-s: 14px; }
+  body { padding: var(--s2) var(--s2) calc(64px + env(safe-area-inset-bottom, 0px)); }
+  .bar-main { gap: var(--s2); padding-inline: var(--s2); }
+  .title { font-size: 0; letter-spacing: 0; }
+  .title-ja { display: inline; font: 600 18px var(--sans); letter-spacing: 0.06em; }
+  .status { gap: var(--s2); }
+  .tt-k { display: none; }
+  /* "ALERT ■" is said by the red banner itself and the total by the status chip / ALERTS card: room for the names */
+  .tk-tag, .tk-total { display: none; }
+  /* summary cards */
+  #kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); }
+  .kpi { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: var(--s2); align-items: baseline; min-height: 64px;
+    padding: var(--s2) var(--s3); text-align: left; font: var(--fs) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--frame); cursor: pointer; }
+  .kpi-l { grid-column: 1 / -1; font-size: var(--fs-s); color: var(--text-2); letter-spacing: 0.04em; }
+  .kpi b { font: 600 26px var(--sans); }
+  .kpi .u { margin-left: 0; overflow-wrap: anywhere; }
+  .kpi.crit { border-color: var(--crit); background: var(--crit-tint); }
+  .kpi.crit b { color: var(--crit); }
+  .kpi:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #kpis.stale { border: 1px dashed var(--crit); }
+  #kpis.stale b { color: var(--text-2) !important; }
+  #kpis.stale::before { content: 'STALE'; grid-column: 1 / -1; font: 600 var(--fs-s) var(--sans); color: #fff; background: var(--stale-tag); padding: 0 var(--s2); }
+  /* globe ~300 px, then the selected group */
+  #p-globe { height: auto; }
+  .globe-wrap { flex: none; height: 300px; }
+  #p-wan { order: -1; }
+  .gtip { font-size: 14px; }
+  #tabs { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 35; padding: var(--s1) var(--s1) calc(var(--s1) + env(safe-area-inset-bottom, 0px));
+    background: var(--topbar); border-top: 1px solid var(--frame); }
+  #tabs button { min-height: 52px; }
+  .panel.tab-off { display: none; }
+  /* lists: rows grow instead of cutting text; fewer columns */
+  .row { height: auto; min-height: var(--row); }
+  .row .c.name, .row .c.sub { white-space: normal; overflow-wrap: anywhere; }
+  #devices { --cols: var(--st) 1fr 56px 56px; }
+  #devices .row > :nth-child(7) { display: none; }
+  #ifaces { --cols: var(--st) 1fr 56px 56px; }
+  #ifaces .row > :nth-child(5) { display: none; }
+  #wlan { --cols: 64px 1fr 56px; }
+  #wlan .row > :is(:nth-child(3), :nth-child(4)) { display: none; }
+  #health { --cols: var(--st) 1fr 40px 48px; }
+  #health .row > :nth-child(4) { display: none; } /* scrape time: in the job drawer */
+  #health .row:has(> .st-none) { grid-template-columns: 1fr 64px 60px; }
+  #health .row:has(> .st-none) > :is(.st-none, :nth-child(3)) { display: none; }
+  #health .row:has(> .st-none) > :nth-child(4) { display: block; }
+  #wan-foot { --cols: 1fr auto; }
+  #wan-foot .row > :nth-child(3) { display: none; }
+  .wan-row { grid-template-columns: 64px 56px 40px 1fr; }
+  #logs .log { grid-template-columns: auto auto 1fr; row-gap: 0; padding: var(--s1) 0; white-space: normal; border-bottom: 1px solid var(--track); }
+  #logs .log-m { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
+  /* drawer = bottom sheet, modal = full screen */
+  #drawer { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-height: 90dvh; border-width: 2px 0 0; box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.6);
+    padding-bottom: env(safe-area-inset-bottom, 0px); }
+  #drawer-close, #modal-close { min-width: 56px; min-height: 48px; font-size: 20px; }
+  #modal { width: 100vw; height: 100dvh; max-width: none; max-height: none; border-width: 0; }
+  #modal-root { place-items: stretch; }
+  #boot pre { font-size: 14px; }
 }

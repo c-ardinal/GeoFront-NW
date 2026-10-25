@@ -22,13 +22,21 @@ export const promAlerts = () => getJson('/prom/api/v1/alerts').then((d) => d.ale
 export const promRules = () => getJson('/prom/api/v1/rules').then((d) => d.groups.flatMap((g) => g.rules));
 
 // Loki log query; start/end in ns (strings ok). Returns streams.
-export function lokiLogs(q, { startNs, endNs, limit = 200, direction = 'backward' }) {
-  return getJson(`/loki/loki/api/v1/query_range?query=${encodeURIComponent(q)}&start=${startNs}&end=${endNs}&limit=${limit}&direction=${direction}`)
-    .then((d) => d.result);
+const lokiLogData = (q, { startNs, endNs, limit = 200, direction = 'backward' }) =>
+  getJson(`/loki/loki/api/v1/query_range?query=${encodeURIComponent(q)}&start=${startNs}&end=${endNs}&limit=${limit}&direction=${direction}`);
+// Log lines (flattened, oldest first). A line-filtered query is scanned by mask-api, which may stop early: then it
+// returns fewer than `limit` lines plus data.warnings and data.scanned_until (ns). scannedUntil !== null means the
+// result is PARTIAL; continue with end=scannedUntil (backward) or start=scannedUntil+1 (forward).
+export function lokiLogs(q, opts) {
+  return lokiLogData(q, opts).then((d) => ({
+    entries: flattenStreams(d.result),
+    warnings: Array.isArray(d.warnings) ? d.warnings.map(String) : [],
+    scannedUntil: d.scanned_until === undefined || d.scanned_until === null ? null : String(d.scanned_until),
+  }));
 }
-export function lokiRange(q, seconds, limit) {
+export function lokiRange(q, seconds, limit) { // raw streams (wallboard feed; unfiltered selector, never partial)
   const end = BigInt(Date.now()) * 1000000n;
-  return lokiLogs(q, { startNs: String(end - BigInt(seconds) * 1000000000n), endNs: String(end), limit });
+  return lokiLogData(q, { startNs: String(end - BigInt(seconds) * 1000000000n), endNs: String(end), limit }).then((d) => d.result);
 }
 // Loki metric query through the allowed query_range path; returns the last point per series.
 export function lokiMetric(q) {

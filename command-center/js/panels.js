@@ -1,11 +1,44 @@
 // Wallboard panel renderers. Rows open related detail through the `nav` callbacks (drawer views).
-import { $, el, cell, num, badge, row, head, bar, put, refocus, upState, has, fmtUptime, maskIp, maskText, cssVar, jstClock, SEV_SHORT, SEVERITIES } from './util.js';
+import { $, el, cell, num, badge, row, head, bar, put, refocus, upState, has, fmtUptime, maskIp, maskText, cssVar, jstClock, SEV_KEYS, sevKey, sevName,
+  WALLBOARD, LARGE, fitRows, uiZoom, setTicker, clearTicker, jstHm, fmtDur } from './util.js';
 
 export const DEVICES = ['rtx1300', 'wlx413', 'wlx222'];
 export const WAN = { instance: 'rtx1300', ifName: 'lan2' };
 const DEST_TOP = 10;
 const SRC_TOP = 6;
+const UNKNOWN_TOP = 4;
 const LOG_LINES = 8;
+const ROW_PX = 22; // --row
+const LOG_PX = 20; // #logs line-height
+
+// Wallboard panels have a layout-defined height: a list shows as many rows as fit there (never more, so nothing is cut
+// off; on large screens at least the desktop count, so extra height fills with rows). Tablet/phone panels grow with
+// their content and use the base count.
+function capacity(box, base, rowPx) {
+  if (!WALLBOARD.matches) return base;
+  const fit = fitRows(box, rowPx);
+  return LARGE.matches ? Math.max(base, fit) : Math.min(base, fit);
+}
+// LARGE: the listed panels of a column keep their natural height (flex-basis) and share the column's spare height in
+// proportion to it (flex-grow); their rows then grow (up to ROW_MAX_PX) into it, so short lists do not leave one blank
+// block at the bottom of a column. Only `shrink` panels (scrolling alerts, capacity-fitted ranking) give height back
+// when the column is too short. items: [panelId, listId, shrink, naturalPx?]; elsewhere the CSS layout applies.
+const ROW_MAX_PX = 33;
+function shareHeight(items) {
+  for (const [pid, bid] of items) {
+    $(bid).style.removeProperty('--row');
+    $(pid).style.flex = LARGE.matches ? '0 0 auto' : '';
+  }
+  if (!LARGE.matches) return;
+  const need = items.map(([pid, , , px]) => px ?? $(pid).offsetHeight);
+  items.forEach(([pid, , shrink], i) => { $(pid).style.flex = `${need[i]} ${shrink ? 1 : 0} ${need[i]}px`; });
+}
+function stretchRows(box) {
+  const n = box.children.length;
+  box.style.removeProperty('--row');
+  if (!LARGE.matches || !n) return;
+  box.style.setProperty('--row', `${Math.min(ROW_MAX_PX, Math.max(ROW_PX, Math.floor(fitRows(box, 1) / n)))}px`);
+}
 
 // ---- flows aggregation (shared with modal/drawer views) ------------------------------
 export function byKey(flows, keyFn) {
@@ -21,11 +54,12 @@ export function byKey(flows, keyFn) {
 }
 export const totalBps = (flows) => flows.reduce((a, f) => a + f.bps, 0);
 
-// Ranking list: label | bar | Mbps | share (share keeps Unknown in the denominator).
-function rankRows(groups, total, labelHead, top, onOpen) {
+// Ranking list: label | bar | Mbps | share (share keeps Unknown in the denominator). maxRows counts the head row and
+// the "+N others" row.
+function rankRows(groups, total, labelHead, maxRows, onOpen) {
   const sorted = [...groups].sort((a, b) => b.bps - a.bps);
-  const shown = sorted.slice(0, top);
-  const rest = sorted.slice(top);
+  const shown = sorted.slice(0, Math.max(1, maxRows - 2));
+  const rest = sorted.slice(shown.length);
   const max = shown.length ? shown[0].bps : 1;
   const rows = [head(labelHead, '', '#Mbps', '#SHARE %')];
   for (const g of shown) {
@@ -51,15 +85,34 @@ export function renderFlows(snap, nav) {
   }
   const total = totalBps(snap.flows);
   const byCountry = [...byKey(snap.flows, (f) => f.cc).values()].map((g) => ({ ...g, label: g.key }));
-  put('dest', rankRows(byCountry, total, 'COUNTRY', DEST_TOP, (g) => nav.dest({ cc: g.key })));
-  const bySrc = [...byKey(snap.flows, (f) => f.src).values()].map((g) => ({ ...g, label: g.key }));
-  put('src', rankRows(bySrc, total, 'HOST', SRC_TOP, (g) => nav.src(g.key)));
-
-  const unk = [...byKey(snap.flows.filter((f) => f.lat === null), (f) => f.ip).values()];
+  // content-sized panel: capped so a long list cannot squeeze the panels above it; the rest is summed (full list in the modal)
+  const unk = [...byKey(snap.flows.filter((f) => f.lat === null), (f) => f.ip).values()].sort((a, b) => b.bps - a.bps);
+  const unkShown = unk.length > UNKNOWN_TOP + 1 ? unk.slice(0, UNKNOWN_TOP) : unk;
   const unkRows = [head('DESTINATION (MASKED)', '#Mbps')];
-  for (const g of unk) unkRows.push(row([cell(maskIp(g.key), 'name'), num(g.bps / 1e6)], '', () => nav.dest({ cc: 'Unknown', ip: g.key }), `details for ${maskIp(g.key)}`));
+  for (const g of unkShown) unkRows.push(row([cell(maskIp(g.key), 'name'), num(g.bps / 1e6)], '', () => nav.dest({ cc: 'Unknown', ip: g.key }), `details for ${maskIp(g.key)}`));
+  if (unkShown.length < unk.length) {
+    const rest = unk.slice(unkShown.length);
+    unkRows.push(row([cell(`+${rest.length} others`, 'sub'), num(rest.reduce((a, g) => a + g.bps, 0) / 1e6)], 'sep'));
+  }
   if (!unk.length) unkRows.push(row([cell('none', 'sub'), cell('')]));
   put('unknown', unkRows);
+  // after the content-sized panels below it, so the ranking is measured against its final height
+  const bySrc = [...byKey(snap.flows, (f) => f.src).values()].map((g) => ({ ...g, label: g.key }));
+  // dest wants every country (+ head); its rows beyond the panel are summed into "+N others" by capacity()
+  const destBox = $('dest');
+  const destNeed = destBox.offsetTop + 2 * parseFloat(getComputedStyle(destBox).paddingTop) + 2 + (byCountry.length + 1) * ROW_PX;
+  put('src', rankRows(bySrc, total, 'HOST', SRC_TOP + 2, (g) => nav.src(g.key))); // content-sized: measured below
+  shareHeight([['p-dest', 'dest', true, destNeed], ['p-src', 'src', false]]);
+  put('dest', rankRows(byCountry, total, 'COUNTRY', capacity($('dest'), DEST_TOP + 2, ROW_PX), (g) => nav.dest({ cc: g.key })));
+  stretchRows($('dest'));
+  stretchRows($('src'));
+}
+
+// right column on LARGE screens: interfaces / wireless / alerts share the height
+export function fitRightColumn() {
+  shareHeight([['p-if', 'ifaces', false], ['p-wlan', 'wlan', false], ['p-alerts', 'alerts', true]]);
+  stretchRows($('ifaces'));
+  stretchRows($('wlan'));
 }
 
 export function renderDevices(m, nav) {
@@ -79,12 +132,18 @@ export function renderDevices(m, nav) {
   const hr = $('dev-online');
   hr.textContent = known ? `${online} / ${DEVICES.length} online` : `— / ${DEVICES.length} online`;
   hr.classList.toggle('crit', known > 0 && online < DEVICES.length);
+  // phone summary card
+  const down = DEVICES.filter((d) => m.up.get(d) === 0);
+  $('kpi-dev').textContent = known ? `${online}/${DEVICES.length}` : '—';
+  $('kpi-dev-sub').textContent = down.length ? `DOWN: ${down.join(', ')}` : 'online';
+  $('kpi-dev-card').classList.toggle('crit', known > 0 && online < DEVICES.length);
 }
 
 export function drawSpark(id, series, color, stepS) {
   const c = $(id);
-  const w = (c.width = c.clientWidth * devicePixelRatio);
-  const h = (c.height = c.clientHeight * devicePixelRatio);
+  const px = devicePixelRatio * uiZoom();
+  const w = (c.width = c.clientWidth * px);
+  const h = (c.height = c.clientHeight * px);
   const ctx = c.getContext('2d');
   ctx.clearRect(0, 0, w, h);
   const pts = series.length ? series[0].values.map(([t, v]) => [Number(t), Number(v)]) : [];
@@ -94,7 +153,7 @@ export function drawSpark(id, series, color, stepS) {
   const x = (t) => ((t - t0) / (t1 - t0)) * w;
   const y = (v) => h - (v / vmax) * h;
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.lineWidth = 2 * px;
   ctx.beginPath();
   pts.forEach(([t, v], i) => {
     const gap = i === 0 || t - pts[i - 1][0] > stepS * 2; // missing samples = gap, never 0
@@ -112,8 +171,8 @@ export function wanValues(m) {
 
 export function renderWan(snap) {
   const w = wanValues(snap.m);
-  $('wan-down').textContent = has(w.down) ? Math.round(w.down) : '—';
-  $('wan-up').textContent = has(w.up) ? Math.round(w.up) : '—';
+  $('wan-down').textContent = $('kpi-down').textContent = has(w.down) ? Math.round(w.down) : '—';
+  $('wan-up').textContent = $('kpi-up').textContent = has(w.up) ? Math.round(w.up) : '—';
   drawSpark('spark-down', snap.sDown, cssVar('--spark-1'), 15);
   drawSpark('spark-up', snap.sUp, cssVar('--spark-2'), 15);
   put('wan-foot', [
@@ -174,7 +233,12 @@ export function renderAlerts(alerts, nav) {
   const rows = firing.map((a) => {
     const [kind, text] = sevKind(a.labels.severity);
     const where = [a.labels.instance, a.labels.ifName].filter(Boolean).join(' ');
-    return row([badge(kind, text), cell(a.labels.alertname, 'name', a.annotations.summary), cell(where, 'n sub')], '', () => nav.alert(a), `details for ${a.labels.alertname} ${where}`);
+    // detail line (since / value / summary) is shown on large screens only (style.css), where the panel has room
+    const since = Date.parse(a.activeAt);
+    const detail = [Number.isFinite(since) && `since ${jstHm.format(new Date(since))} (${fmtDur((Date.now() - since) / 1000)})`,
+      a.value !== undefined && `value ${Number(a.value).toPrecision(3)}`, a.annotations.summary].filter(Boolean).join(' · ');
+    return row([badge(kind, text), cell(a.labels.alertname, 'name', a.annotations.summary), cell(where, 'n sub'), cell(detail, 'al-detail sub')],
+      '', () => nav.alert(a), `details for ${a.labels.alertname} ${where}`);
   });
   if (!firing.length) rows.push(row([badge('none', ''), cell('no firing alerts', 'sub')]));
   put('alerts', rows);
@@ -187,8 +251,21 @@ export function renderAlerts(alerts, nav) {
   document.body.classList.toggle('red-alert', alarming.length > 0);
   banner.hidden = alarming.length === 0;
   const names = [...new Set(alarming.map((a) => `${a.labels.alertname}${a.labels.instance ? ` (${a.labels.instance})` : ''}`))];
-  banner.textContent = alarming.length ? `ALERT ■ ${alarming.length} FIRING: ${names.join(' · ')}` : '';
-  banner.title = banner.textContent;
+  // Counts: the banner counts the alarming (critical + warning) alerts it names and adds the total when info alerts
+  // also fire; every other counter (list header, status chip, summary card, tab) is the total of firing alerts.
+  // Every alarming name stays readable: the banner scrolls (ticker) when they do not fit on one line.
+  const total = firing.length > alarming.length ? ` · ${firing.length} total` : '';
+  const lead = [el('span', 'tk-tag', 'ALERT ■ '), `${alarming.length} CRIT/WARN`, el('span', 'tk-total', total), ':'];
+  if (alarming.length) setTicker(banner, lead, names.join(' · ')); else clearTicker(banner);
+  banner.title = alarming.length ? `ALERT ■ ${alarming.length} CRIT/WARN${total}: ${names.join(' · ')}` : '';
+  const sub = `firing · ${alarming.length} crit/warn`;
+  for (const id of ['kpi-alert-card', 'k-alerts']) $(id).classList.toggle('crit', alarming.length > 0);
+  $('kpi-alert').textContent = firing.length;
+  $('kpi-alert-sub').textContent = sub;
+  $('k-alerts').querySelector('b').textContent = firing.length;
+  $('k-alerts').title = `${firing.length} ${sub} (opens the alerts tab)`;
+  $('k-alerts').setAttribute('aria-label', `${firing.length} ${sub}: open the alerts tab`);
+  $('tab-alert-n').textContent = firing.length || '';
 }
 
 export function renderHealth(snap, nav) {
@@ -215,15 +292,36 @@ export function renderHealth(snap, nav) {
   $('k-fresh').title = `${fresh} for up targets${snap.down.length ? `; down: ${snap.down.join(', ')}` : ''}`;
 }
 
-export function renderSeverity(result, nav) {
-  const by = new Map(result.map((r) => [r.metric.severity, Number(r.value[1])]));
+// The five usual levels are always listed; emergency / alert / debug / unrecognised ("other") only when they have
+// lines, so the rows always add up to TOTAL. When the panel is too short for them, they collapse into one
+// "other levels" row, and as a last resort the column head row is dropped.
+const SEV_MAIN = ['critical', 'error', 'warning', 'notice', 'informational'];
+const SIDE_COLUMN = window.matchMedia('(min-width: 2400px) and (min-aspect-ratio: 21/10)'); // style.css ultrawide block
+export function sevRows(result) {
+  const by = new Map();
   // Query succeeded: a severity absent from the result had 0 events in the window (a known 0, not missing data).
-  const total = [...by.values()].reduce((a, b) => a + b, 0);
-  const max = Math.max(1, ...by.values());
-  const rows = [head('LEVEL', '', '#COUNT')];
-  for (const s of SEVERITIES) {
-    const v = by.get(s) || 0;
-    rows.push(row([cell(SEV_SHORT[s], 'name'), bar((100 * v) / max), num(v, 0)], `sev-${s}`, () => nav.logs({ sev: s }), `syslog lines with severity ${s}`));
+  for (const r of result) { const k = sevKey(r.metric.severity); by.set(k, (by.get(k) || 0) + Number(r.value[1])); }
+  const levels = SEV_KEYS.filter((x) => SEV_MAIN.includes(x.k) || by.get(x.k) > 0).map((x) => ({ ...x, v: by.get(x.k) || 0 }));
+  return { levels, extras: levels.filter((x) => !SEV_MAIN.includes(x.k)), total: [...by.values()].reduce((a, b) => a + b, 0) };
+}
+export function renderSeverity(result, nav) {
+  const { levels, extras, total } = sevRows(result);
+  // rows that fit incl. head and TOTAL; unbounded where the panel is content-sized (below 1280, ultrawide side column)
+  const room = WALLBOARD.matches && !SIDE_COLUMN.matches ? fitRows($('sev'), ROW_PX) : Infinity;
+  const collapse = extras.length > 1 && levels.length + 2 > room;
+  const shown = collapse ? levels.filter((x) => SEV_MAIN.includes(x.k)) : levels;
+  const n = shown.length + (collapse ? 1 : 0) + 1;
+  const max = Math.max(1, ...levels.map((x) => x.v));
+  const rows = n + 1 <= room ? [head('LEVEL', '', '#COUNT')] : [];
+  for (const x of shown) {
+    const open = x.k === 'other' ? () => nav.logs({}) : () => nav.logs({ sev: x.k });
+    rows.push(row([cell(x.name, 'name'), bar((100 * x.v) / max), num(x.v, 0)], `sev-${x.k}`, open, `syslog lines with severity ${x.k}`));
+  }
+  if (collapse) {
+    const v = extras.reduce((a, x) => a + x.v, 0);
+    const names = extras.map((x) => x.name).join(' / ');
+    rows.push(row([cell(`other levels (${names})`, 'name', `${names}: ${extras.map((x) => x.v).join(' / ')}`), bar((100 * v) / max), num(v, 0)],
+      'sev-other', () => nav.logs({}), `syslog lines with severity ${names}`));
   }
   rows.push(row([cell('TOTAL', 'sub'), cell(''), num(total, 0)], 'sep'));
   put('sev', rows);
@@ -234,7 +332,7 @@ export function logRow(e, onOpen) {
   const masked = maskText(e.line);
   const r = el('div', `log sev-${e.sev}`);
   r.title = `${time} ${e.host} ${e.sev} ${masked}`;
-  r.append(el('span', 'log-t', time), el('span', 'log-h', e.host), el('span', 'log-s', SEV_SHORT[e.sev] || e.sev.toUpperCase()), el('span', 'log-m', masked));
+  r.append(el('span', 'log-t', time), el('span', 'log-h', e.host), el('span', 'log-s', sevName(e.sev)), el('span', 'log-m', masked));
   if (onOpen) {
     r.classList.add('clickable');
     r.tabIndex = 0;
@@ -247,15 +345,34 @@ export function logRow(e, onOpen) {
   return r;
 }
 
+// The feed shows the newest lines that fit; a bounded buffer of recent lines (separate from the rendered rows, which
+// seenLogs keeps from being re-added) lets the visible slice be rebuilt when the capacity changes in either direction.
+const LOG_BUF = 500;
+let logBuf = [];
+let logNav = null;
 export function renderLogs(entries, seenLogs, nav) {
+  logNav = nav;
   const box = $('logs');
   refocus(box, () => {
-  for (const e of entries) {
-    const key = `${e.ts}|${e.host}|${e.line}`;
-    if (seenLogs.has(key)) continue;
-    seenLogs.add(key);
-    box.appendChild(logRow(e, nav.logline));
-  }
-  while (box.children.length > LOG_LINES) box.removeChild(box.firstChild);
+    for (const e of entries) {
+      const key = `${e.ts}|${e.host}|${e.line}`;
+      if (seenLogs.has(key)) continue;
+      seenLogs.add(key);
+      logBuf.push(e);
+      box.appendChild(logRow(e, nav.logline));
+    }
+    if (logBuf.length > LOG_BUF) logBuf = logBuf.slice(-LOG_BUF);
+    fitLogRows(box);
   });
 }
+// rendered rows are always the tail of logBuf, in order
+function fitLogRows(box) {
+  const max = capacity(box, LOG_LINES, LOG_PX);
+  while (box.children.length > max) box.removeChild(box.firstChild);
+  for (let i = logBuf.length - box.children.length - 1; box.children.length < max && i >= 0; i--) {
+    const r = logRow(logBuf[i], logNav.logline);
+    r.style.animation = 'none'; // older lines coming back into view, not new arrivals
+    box.prepend(r);
+  }
+}
+export const fitLogs = () => { if (logNav) refocus($('logs'), () => fitLogRows($('logs'))); };

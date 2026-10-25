@@ -1,4 +1,4 @@
-// Globe: rendering (default photo style / eva tactical style), selection highlight, zoom, click & hover.
+// Globe: rendering (default photo style / eva-film tactical style), selection highlight, zoom, click & hover.
 import { $, el, esc, fmtBps, maskIp, distKm, REDUCED_MOTION } from './util.js';
 
 export const ORIGIN = { lat: 35.68, lng: 139.77, label: 'HOME' }; // logical origin: coarse home region, NOT an address
@@ -11,9 +11,6 @@ const FLY_MS = 900;
 // Per-theme palette. The default entries are exactly the original constants.
 const STYLES = {
   default: { out: ['rgba(255,176,0,0.25)', '#ffb000'], in: ['rgba(0,229,255,0.25)', '#00e5ff'], dim: 'rgba(150,170,180,0.10)', ring: '0,229,255', atmo: '#33d6ff', atmoAlt: 0.22 },
-  eva: { out: ['rgba(255,154,31,0.25)', '#ff9a1f'], in: ['rgba(79,224,176,0.25)', '#4fe0b0'], dim: 'rgba(140,100,40,0.12)', ring: '255,154,31', atmo: '#ff9a1f', atmoAlt: 0.12,
-    hex: 'rgba(255,154,31,0.5)', grid: { step: 30, color: 'rgba(255,154,31,0.22)' },
-    ranges: [5, 10].map((deg) => ({ deg, color: 'rgba(255,194,46,0.6)', dash: 0.02, gap: 0.015 })) },
   // film: green graticule, solid orange hex land, green range rings around HOME plus two slow radar sweeps
   'eva-film': { out: ['rgba(255,140,0,0.3)', '#ff8c00'], in: ['rgba(61,242,154,0.3)', '#3df29a'], dim: 'rgba(140,80,0,0.14)', ring: '255,140,0', atmo: '#ff8c00', atmoAlt: 0.07,
     hex: 'rgba(255,140,0,0.75)', grid: { step: 15, color: 'rgba(61,242,154,0.2)' },
@@ -24,7 +21,7 @@ const STYLES = {
     ] },
 };
 const theme = () => document.documentElement.dataset.theme;
-const isEva = () => theme() === 'eva' || theme() === 'eva-film'; // tactical (non-photo) globe
+const isEva = () => theme() === 'eva-film'; // tactical (non-photo) globe
 const style = () => STYLES[theme()] || STYLES.default;
 
 // Country outlines for the eva globe (Natural Earth 110m, fetched with SRI).
@@ -59,7 +56,7 @@ export function initGlobe(h) {
     .arcDashAnimateTime(REDUCED_MOTION ? 0 : 2200)
     .arcLabel((d) => { const c = cityUnderPointer(); return c ? cityTip(c) : tooltip(d.city, d.cc, d.asn, `${d.dir} ${fmtBps(d.bps)}`, d.srcs.size, d.ip); })
     // a click on an arc that lies over another destination's point selects that destination (points win)
-    .onArcClick((d, ev, c) => hooks.onDest(pointAt(c) || d.key))
+    .onArcClick((d, ev, c) => pick(pointAt(c) || d.key))
     .onArcHover((d) => { host.style.cursor = d ? 'pointer' : ''; })
     .ringMaxRadius((d) => d.r).ringPropagationSpeed(2.2)
     .ringRepeatPeriod(REDUCED_MOTION ? 0 : 1400)
@@ -67,14 +64,14 @@ export function initGlobe(h) {
     .labelColor((d) => d.color).labelResolution(2).labelAltitude(0.006)
     // city labels are 3D text that sits over the destination point; route their hover/click to the destination
     .labelLabel((d) => { const c = cityUnderPointer() || (d.key ? d : null); return c ? cityTip(c) : ''; })
-    .onLabelClick((d, ev, c) => { const u = cityUnderPointer(); const k = u?.key || pointAt(c) || d.key; if (k) hooks.onDest(k); }) // a label may overlap a neighbouring point: the point wins
+    .onLabelClick((d, ev, c) => { const u = cityUnderPointer(); const k = u?.key || pointAt(c) || d.key; if (k) pick(k); }) // a label may overlap a neighbouring point: the point wins
     .onLabelHover((d) => { host.style.cursor = d?.key ? 'pointer' : ''; })
     // invisible hit targets at each destination for hover tooltip + click
     .pointLat((d) => d.lat).pointLng((d) => d.lng).pointAltitude(0.004).pointRadius(2)
     .pointColor(() => 'rgba(255,255,255,0.01)').pointsMerge(false)
     .pointLabel(cityTip)
-    .onPointClick((d) => hooks.onDest(d.key))
-    .onGlobeClick((c) => { const k = pointAt(c); if (k) hooks.onDest(k); }) // near-miss on a small point still selects it
+    .onPointClick((d) => pick(d.key))
+    .onGlobeClick((c) => { const k = pointAt(c); if (k) pick(k); else hideCard(); }) // near-miss on a small point still selects it
     .onPointHover((d) => { host.style.cursor = d ? 'pointer' : ''; })
     .pointOfView(DEFAULT_POV, 0)
     // eva-only layers (empty in the default theme)
@@ -134,15 +131,42 @@ function cityUnderPointer() {
   const key = pointAt(globe.toGlobeCoords(pointer.x, pointer.y));
   return key ? (last.cities || []).find((c) => c.key === key) : null;
 }
-function cityTip(d) {
-  return tooltip(d.city, d.cc, d.asn, `in ${fmtBps(d.inBps)} / out ${fmtBps(d.outBps)}`, d.srcs.size, d.ips[0]);
+function cityTip(d, hint) {
+  return tooltip(d.city, d.cc, d.asn, `in ${fmtBps(d.inBps)} / out ${fmtBps(d.outBps)}`, d.srcs.size, d.ips[0], hint);
 }
-function tooltip(city, cc, asn, traffic, srcCount, ip) {
+function tooltip(city, cc, asn, traffic, srcCount, ip, hint = 'click for details') {
   return `<div class="gtip"><b>${esc(city || 'Unknown')}</b> · ${esc(cc)}<br>ASN ${esc(asn || '—')} · ${esc(maskIp(ip))}<br>`
-    + `${esc(traffic)}<br>${srcCount} source host${srcCount === 1 ? '' : 's'} · GeoIP estimate<br><i>click for details</i></div>`;
+    + `${esc(traffic)}<br>${srcCount} source host${srcCount === 1 ? '' : 's'} · GeoIP estimate<br><i>${esc(hint)}</i></div>`;
 }
 
-function fit() {
+// Touch screens have no hover, so the tooltip never shows: the first tap on a destination shows the same summary as
+// a card; a second tap on it (or the card's button) opens the detail drawer. With a mouse a click opens it directly.
+const NO_HOVER = window.matchMedia('(hover: none)');
+let armed = null;
+function pick(key) {
+  const c = (last.cities || []).find((x) => x.key === key);
+  if (!NO_HOVER.matches || armed === key || !c) { hideCard(); hooks.onDest(key); return; }
+  armed = key;
+  const card = $('gcard');
+  card.innerHTML = cityTip(c, 'tap again or OPEN for details'); // all values escaped in tooltip()
+  const open = el('button', 'gcard-open', 'OPEN DETAILS');
+  open.type = 'button';
+  open.addEventListener('click', () => pick(key));
+  const close = el('button', 'gcard-close', '✕');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close summary');
+  close.addEventListener('click', hideCard);
+  card.append(open, close);
+  card.hidden = false;
+}
+export function hideCard() {
+  armed = null;
+  const card = $('gcard');
+  card.hidden = true;
+  card.replaceChildren();
+}
+
+export function fit() {
   const host = $('globe');
   if (globe && (globe.width() !== host.clientWidth || globe.height() !== host.clientHeight)) {
     globe.width(host.clientWidth).height(host.clientHeight);
@@ -162,6 +186,7 @@ function initZoomButtons() {
 }
 
 export function resetView() {
+  hideCard();
   if (!globe) return;
   moveCamera(DEFAULT_POV, REDUCED_MOTION ? 0 : 800);
   globe.controls().autoRotate = !REDUCED_MOTION;
@@ -234,7 +259,6 @@ export function styleGlobe() {
   const s = style();
   globe.atmosphereColor(s.atmo).atmosphereAltitude(s.atmoAlt);
   if (isEva()) {
-    // fresh array: the hex colour is re-read when switching between the two tactical themes
     globe.pathsData(evaPaths(s)).hexPolygonsData(geo.land ? [geo.land] : []);
     darken();
     loadCountries();
@@ -369,4 +393,5 @@ export function screenOf(lat, lng) {
   return globe ? globe.getScreenCoords(lat, lng, 0.004) : null;
 }
 export const testSelection = () => selection;
-export const testInfo = () => ({ pov: globe?.pointOfView(), cities: (last.cities || []).map((c) => ({ key: c.key, lat: c.lat, lng: c.lng })) });
+export const testInfo = () => ({ pov: globe?.pointOfView(), cities: (last.cities || []).map((c) => ({ key: c.key, lat: c.lat, lng: c.lng })),
+  gl: globe && { ...globe.renderer().info.memory, programs: globe.renderer().info.programs.length, w: globe.width(), h: globe.height() } });

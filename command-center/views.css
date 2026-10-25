@@ -1,0 +1,175 @@
+/* Modal / drawer content: summary tiles, charts and table / card lists.
+   Every rule is scoped to #modal / #drawer (nothing here may reach the wallboard), and own classes carry a vw- prefix
+   where a plain name already exists in style.css (.col = wallboard column, .seg = segmented control).
+   Reuses the style.css tokens (spacing --s1..--s4, --row, --st, colours) so every theme supplies its own palette.
+   Order inside a view: tiles -> charts -> list. Colour is never the only carrier: tiles print icon + text,
+   charts have text alternatives (aria-label / titles) and legends. */
+
+/* ---- status text colours (tiles, kv values) ---- */
+:is(#modal, #drawer) .st-text-ok { color: var(--ok); }
+:is(#modal, #drawer) .st-text-warn { color: var(--warn); }
+:is(#modal, #drawer) .st-text-crit { color: var(--crit); }
+:is(#modal, #drawer) .st-text-unknown { color: var(--unknown); }
+:is(#modal, #drawer) .st-text-info { color: var(--accent); }
+:is(#modal, #drawer) .st-text-none { color: var(--text-2); }
+
+/* ---- stat tiles ---- */
+:is(#modal, #drawer) .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s2); margin: var(--s2) 0 var(--s3); }
+#drawer .tiles { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+:is(#modal, #drawer) .chart-wrap[hidden] { display: none; }
+:is(#modal, #drawer) .tile { position: relative; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  padding: var(--s2) var(--s3); border: 1px solid var(--frame); border-left: 3px solid var(--frame); }
+:is(#modal, #drawer) .tile-ok { border-left-color: var(--ok); }
+:is(#modal, #drawer) .tile-warn { border-left-color: var(--warn); background: var(--warn-tint); }
+:is(#modal, #drawer) .tile-crit { border-left-color: var(--crit); background: var(--crit-tint); }
+:is(#modal, #drawer) .tile-unknown { border-left-color: var(--unknown); border-left-style: dashed; }
+:is(#modal, #drawer) .tile-info { border-left-color: var(--accent); }
+:is(#modal, #drawer) .tile-l { font-size: var(--fs-s); color: var(--text-2); letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tile-v { font: 600 22px/1.2 var(--sans); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tile-st { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.02em; overflow-wrap: anywhere; }
+:is(#modal, #drawer) .tile-s { font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .tile .spark { height: 28px; margin-top: var(--s1); }
+[data-theme="eva-film"] :is(#modal, #drawer) .tile-v { font-family: var(--display); font-weight: 700; font-size: 24px; letter-spacing: 0.02em; }
+[data-theme="eva-film"] :is(#modal, #drawer) .tile { border-left-width: 4px; }
+
+/* ---- SVG sparklines / small multiples ---- */
+:is(#modal, #drawer) .spark { display: block; width: 100%; height: 36px; overflow: visible; }
+:is(#modal, #drawer) .spark path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+:is(#modal, #drawer) .sp-1 { stroke: var(--spark-1); }
+:is(#modal, #drawer) .sp-2 { stroke: var(--spark-2); }
+:is(#modal, #drawer) .multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--s2); }
+#drawer .multiples { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+:is(#modal, #drawer) .mult { position: relative; min-width: 0; padding: var(--s2); border: 1px solid var(--frame); display: flex; flex-direction: column; gap: var(--s1); }
+:is(#modal, #drawer) .mult .spark { height: 44px; border-bottom: 1px solid var(--track); }
+:is(#modal, #drawer) .mult-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+:is(#modal, #drawer) .mult-h .st { flex: 0 0 auto; }
+:is(#modal, #drawer) .mult-t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .mult-vals { display: flex; flex-wrap: wrap; gap: 0 var(--s3); font-size: var(--fs-s); color: var(--text); }
+:is(#modal, #drawer) .mult-nd { position: absolute; left: var(--s2); bottom: var(--s3); font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) :is(.mult-sel, .card-sel) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* ---- two charts side by side when there is room ---- */
+:is(#modal, #drawer) .v-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); column-gap: var(--s4); }
+
+/* ---- horizontal bar ranking (label | bar | value | share) ---- */
+:is(#modal, #drawer) .rank { --rank-l: minmax(96px, 32%); }
+#drawer .rank { --rank-l: minmax(96px, 40%); }
+:is(#modal, #drawer) .rank-row { display: grid; grid-template-columns: var(--rank-l) 1fr 64px 72px; column-gap: var(--s2); align-items: center; min-height: var(--row); padding: 0 var(--s1); }
+:is(#modal, #drawer) .rank-head { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .rank-head :is(.rank-v, .rank-x) { font-size: var(--fs-s); font-weight: 400; color: var(--text-2); }
+:is(#modal, #drawer) .rank-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) :is(.rank-v, .rank-x) { text-align: right; white-space: nowrap; }
+:is(#modal, #drawer) .rank-v { font-weight: 600; }
+:is(#modal, #drawer) .rank-x { color: var(--text-2); font-size: var(--fs-s); }
+:is(#modal, #drawer) :is(.rank-bar, .stack) { display: flex; height: 10px; background: var(--track); overflow: hidden; }
+:is(#modal, #drawer) :is(.rank-bar, .stack) .vw-seg { height: 100%; flex: 0 0 auto; }
+:is(#modal, #drawer) :is(.rank-bar, .stack) .vw-seg + .vw-seg { box-shadow: inset 1px 0 0 var(--panel); } /* 1px separator between stacked parts */
+:is(#modal, #drawer) :is(.seg-1, .sw-1) { background: var(--spark-1); }
+:is(#modal, #drawer) :is(.seg-2, .sw-2) { background: var(--spark-2); }
+:is(#modal, #drawer) .rank-sub .rank-l { color: var(--text-2); }
+:is(#modal, #drawer) .rank-sub .vw-seg { background: var(--text-2); }
+:is(#modal, #drawer) .rank-unknown .rank-l { color: var(--unknown); }
+:is(#modal, #drawer) :is(.rank-unknown .vw-seg, .sw-unknown) { background: repeating-linear-gradient(135deg, var(--unknown) 0 4px, #6c7680 4px 8px); }
+:is(#modal, #drawer) :is(.rank-ok .vw-seg, .sw-ok) { background: var(--ok); }
+:is(#modal, #drawer) :is(.rank-crit .vw-seg, .sw-crit) { background: var(--crit); }
+:is(#modal, #drawer) .rank-crit .rank-l { color: var(--crit); }
+
+/* severity palette (segments, columns and legend swatches) */
+:is(#modal, #drawer) .sv-emergency { background: repeating-linear-gradient(90deg, var(--crit) 0 2px, var(--crit-tint) 2px 4px); }
+:is(#modal, #drawer) .sv-alert { background: repeating-linear-gradient(45deg, var(--crit) 0 3px, var(--crit-tint) 3px 6px); }
+:is(#modal, #drawer) .sv-critical { background: var(--crit); }
+:is(#modal, #drawer) .sv-error { background: repeating-linear-gradient(135deg, var(--crit) 0 3px, var(--crit-tint) 3px 6px); }
+:is(#modal, #drawer) .sv-warning { background: var(--warn); }
+:is(#modal, #drawer) .sv-notice { background: var(--ok); }
+:is(#modal, #drawer) .sv-informational { background: var(--text-2); }
+:is(#modal, #drawer) .sv-debug { background: repeating-linear-gradient(135deg, var(--text-2) 0 2px, transparent 2px 5px); outline: 1px solid var(--text-2); outline-offset: -1px; }
+:is(#modal, #drawer) .sv-other { background: repeating-linear-gradient(90deg, var(--unknown) 0 2px, transparent 2px 4px); }
+
+/* legend swatches for HTML charts */
+:is(#modal, #drawer) .legend-row .lg i.sw { width: 12px; height: 12px; vertical-align: -1px; }
+
+/* ---- timeline (alerts) and shared time axis ---- */
+:is(#modal, #drawer) .tl-row { display: grid; grid-template-columns: minmax(140px, 32%) 1fr; column-gap: var(--s2); align-items: center; min-height: var(--row); padding: 0 var(--s1); }
+:is(#modal, #drawer) .tl-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tl-track { position: relative; height: 14px; background: var(--track); }
+:is(#modal, #drawer) .tl-span { position: absolute; top: 0; bottom: 0; }
+:is(#modal, #drawer) .tl-crit { background: var(--crit); }
+:is(#modal, #drawer) .tl-warn { background: var(--warn); }
+:is(#modal, #drawer) .tl-info { background: var(--accent); }
+:is(#modal, #drawer) .tl-pending { background: repeating-linear-gradient(135deg, var(--text-2) 0 3px, transparent 3px 6px); outline: 1px solid var(--text-2); outline-offset: -1px; }
+:is(#modal, #drawer) .tl-axis { position: relative; height: 18px; font-size: var(--fs-s); color: var(--text-2); border-top: 1px solid var(--frame); }
+:is(#modal, #drawer) .tl-axis span { position: absolute; top: 2px; transform: translateX(-50%); white-space: nowrap; }
+:is(#modal, #drawer) .tl-axis span:first-child { transform: none; }
+:is(#modal, #drawer) .tl-axis span:last-child { transform: translateX(-100%); }
+
+/* ---- stacked columns over time (syslog volume) ---- */
+:is(#modal, #drawer) .cols-chart { margin: var(--s1) 0 var(--s2); }
+:is(#modal, #drawer) .cols-y { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .cols { position: relative; display: flex; align-items: stretch; gap: 1px; height: 120px; border-bottom: 1px solid var(--frame);
+  background: linear-gradient(var(--track), var(--track)) 0 50% / 100% 1px no-repeat; }
+#drawer .cols { height: 96px; }
+:is(#modal, #drawer) .vw-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column-reverse; }
+:is(#modal, #drawer) .vw-col .vw-seg { flex: 0 0 auto; width: 100%; }
+:is(#modal, #drawer) .vw-col:hover { background: var(--hover); }
+:is(#modal, #drawer) .cols-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); z-index: 1; pointer-events: none; }
+:is(#modal, #drawer) .cols-chart .legend-row { margin-top: var(--s1); }
+
+/* ---- table / card list ---- */
+:is(#modal, #drawer) :is(.dv > [hidden], .dv-sort[hidden]) { display: none !important; }
+:is(#modal, #drawer) .v-h .dv-toggle { margin-left: auto; }
+:is(#modal, #drawer) .v-h .seg + .seg { margin-left: var(--s2); }
+:is(#modal, #drawer) .dv-sort { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+:is(#modal, #drawer) .fld-inline { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .fld-inline select { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 2px var(--s2); margin-left: var(--s1); }
+:is(#modal, #drawer) .fld-inline select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+:is(#modal, #drawer) .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: var(--s2); }
+:is(#modal, #drawer) .card { min-width: 0; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid var(--frame); background: var(--panel); }
+:is(#modal, #drawer) .card-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+:is(#modal, #drawer) .card-h .st { flex: 0 0 auto; }
+:is(#modal, #drawer) .card-t { flex: 1 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .card-sub { flex: 0 10 auto; max-width: 55%; min-width: 0; font-size: var(--fs-s); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .card-f { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); }
+:is(#modal, #drawer) .card-f dt { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .card-f dd { font-weight: 600; color: var(--text); }
+:is(#modal, #drawer) .card-bar { height: 6px; }
+:is(#modal, #drawer) .card-note { font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .card-unknown { border-style: dashed; }
+:is(#modal, #drawer) .card-pending { border-style: dashed; border-color: var(--warn); }
+
+/* hover for every new clickable item (focus outline comes from style.css .clickable:focus-visible) */
+:is(#modal, #drawer) :is(.rank-row, .tl-row, .card, .mult).clickable:hover { background: var(--hover); }
+:is(#modal, #drawer) :is(.card, .mult).clickable:hover { border-color: var(--accent); }
+
+/* ---- STALE: figures fade to secondary text, chart marks lose their colour ---- */
+:is(#modal, #drawer).stale :is(.tile-v, .tile-st, .rank-v, .card dd, .mult-vals, .tl-l, .rank-l) { color: var(--text-2) !important; }
+:is(#modal, #drawer).stale :is(.rank-bar, .stack, .spark, .cols, .tl-track, .card-bar, .chart) { filter: grayscale(1); opacity: 0.6; }
+:is(#modal, #drawer).stale .tile { background: transparent; border-left-color: var(--text-2); }
+/* one block of a view STALE on its own (e.g. syslog volume after a failed refresh of the same filter) */
+:is(#modal, #drawer) .vw-stale :is(.tile-v, .tile-st) { color: var(--text-2) !important; }
+:is(#modal, #drawer) .vw-stale :is(.cols, .stack) { filter: grayscale(1); opacity: 0.6; }
+:is(#modal, #drawer) .vw-stale .tile { background: transparent; border-left-color: var(--text-2); border-style: dashed; }
+:is(#modal, #drawer) .v-h .view-stale[hidden] { display: none; }
+
+/* ---- touch widths (tablet / phone, below the wallboard tier): every control in a view is a >= 44 x 44 px target ---- */
+@media (max-width: 1279px) {
+  :is(#modal, #drawer) :is(.seg-btn, .link-btn, .th-btn, .cell-btn, .fld-inline select, .filters select, .filters input[type="search"]) {
+    min-height: 44px; min-width: 44px;
+  }
+  :is(#modal, #drawer) .cell-btn { display: inline-flex; align-items: center; }
+  :is(#modal, #drawer) .fld.chk { min-height: 44px; }
+  :is(#modal, #drawer) .fld.chk input { width: 20px; height: 20px; }
+  :is(#modal, #drawer) :is(.rank-row, .tl-row, .link-list li, .log).clickable { min-height: 44px; }
+  :is(#modal, #drawer) .link-list li.clickable { line-height: 44px; }
+  :is(#modal, #drawer) .v-logs .log.clickable { align-items: center; }
+}
+
+/* ---- narrow widths (drawer as bottom sheet / full-screen modal) ---- */
+@media (max-width: 767px) {
+  :is(#modal, #drawer) .tiles, #drawer .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :is(#modal, #drawer) .tile-v { font-size: 18px; }
+  :is(#modal, #drawer) .rank, #drawer .rank { --rank-l: minmax(80px, 38%); }
+  :is(#modal, #drawer) .rank-row { grid-template-columns: var(--rank-l) 1fr 56px 56px; column-gap: var(--s1); }
+  :is(#modal, #drawer) .tl-row { grid-template-columns: minmax(96px, 36%) 1fr; }
+  :is(#modal, #drawer) .cards { grid-template-columns: 1fr; }
+  :is(#modal, #drawer) .multiples, #drawer .multiples { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}

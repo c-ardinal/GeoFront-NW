@@ -4,6 +4,73 @@ export const $ = (id) => document.getElementById(id);
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 export const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// ---- screen tiers (keep in sync with the @media blocks in style.css) ---------------------
+// WALLBOARD: >= 1280 px wide, fixed-height panels, no page scroll. LARGE: wallboard on big screens, page is zoomed.
+export const WALLBOARD = window.matchMedia('(min-width: 1280px)');
+export const LARGE = window.matchMedia('(min-width: 2400px), (min-width: 1280px) and (min-height: 1400px)');
+// CSS zoom of the page (set by main.js on LARGE screens); canvases multiply their backing store by it to stay sharp
+export const uiZoom = () => Number(document.documentElement.style.getPropertyValue('--ui-zoom')) || 1;
+// How many rows of height rowH fit in the free height of a list that is the last block of a fixed-height panel.
+export function fitRows(box, rowH) {
+  const panel = box.closest('.panel');
+  const cs = getComputedStyle(box);
+  const free = panel.clientHeight - box.offsetTop - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  return Math.max(0, Math.floor(free / rowH));
+}
+
+// ---- ticker: must-see text on one line, never silently cut --------------------------------
+// Static when the text fits. When it overflows, two copies scroll as a seamless loop (the copy is aria-hidden, so a
+// live region announces the text once, not per loop; hover/focus pauses it). Reduced motion: the text wraps instead.
+const TICKER_PX_S = 60;
+const tickerRO = new ResizeObserver((entries) => entries.forEach((e) => fitTicker(e.target)));
+// lead: strings / nodes shown fixed before the scrolling text (e.g. the counts)
+export function setTicker(box, lead, text) {
+  const leadEl = el('span', 'tk-lead');
+  leadEl.append(...lead);
+  if (box.dataset.tk === `${leadEl.textContent} ${text}`) return;
+  box.dataset.tk = `${leadEl.textContent} ${text}`;
+  const track = el('span', 'tk-track');
+  track.appendChild(el('span', 'tk-item', text));
+  const view = el('span', 'tk-view');
+  view.appendChild(track);
+  box.replaceChildren(leadEl, view);
+  box.classList.add('ticker');
+  box.classList.remove('ticking', 'tk-wrap');
+  tickerRO.observe(box);
+  fitTicker(box);
+}
+export function clearTicker(box) {
+  tickerRO.unobserve(box);
+  delete box.dataset.tk;
+  box.classList.remove('ticker', 'ticking', 'tk-wrap');
+  box.removeAttribute('tabindex');
+  box.replaceChildren();
+}
+function fitTicker(box) {
+  const view = box.querySelector('.tk-view');
+  if (!view || box.hidden || box.classList.contains('tk-wrap')) return;
+  const track = view.firstChild;
+  const item = track.firstChild;
+  const ticking = box.classList.contains('ticking');
+  // measured without toggling classes: re-adding the animation would restart (jump) the loop on every resize
+  const textW = item.offsetWidth - (ticking ? parseFloat(getComputedStyle(item).paddingRight) : 0);
+  const over = textW > view.clientWidth;
+  if (over === ticking) return;
+  if (!over) {
+    box.classList.remove('ticking');
+    track.replaceChildren(item);
+    box.removeAttribute('tabindex');
+    return;
+  }
+  if (REDUCED_MOTION) { box.classList.add('tk-wrap'); return; } // stays wrapped until the text changes
+  box.classList.add('ticking');
+  const copy = item.cloneNode(true);
+  copy.setAttribute('aria-hidden', 'true');
+  track.appendChild(copy);
+  box.style.setProperty('--tk-dur', `${(item.offsetWidth / TICKER_PX_S).toFixed(1)}s`); // one item incl. loop gap
+  box.tabIndex = 0; // keyboard users can pause it by focusing
+}
+
 export function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -37,8 +104,18 @@ export function fmtDur(s) {
 }
 export const has = (v) => v !== undefined && v !== null && Number.isFinite(v);
 export const fixed = (v, d = 1) => (has(v) ? v.toFixed(d) : '—');
-export const SEV_SHORT = { informational: 'INFO', notice: 'NOTICE', warning: 'WARN', error: 'ERROR', critical: 'CRIT', alert: 'ALERT', emergency: 'EMERG', debug: 'DEBUG' };
-export const SEVERITIES = ['critical', 'error', 'warning', 'notice', 'informational'];
+// All eight syslog severities (RFC 5424 order, worst first), plus "other" for a label outside that set, so every
+// returned line is counted somewhere. Each level has its own fill pattern and always a text label (legend / titles).
+export const SEV_KEYS = [
+  { k: 'emergency', cls: 'sv-emergency', name: 'EMERG' }, { k: 'alert', cls: 'sv-alert', name: 'ALERT' },
+  { k: 'critical', cls: 'sv-critical', name: 'CRIT' }, { k: 'error', cls: 'sv-error', name: 'ERROR' }, { k: 'warning', cls: 'sv-warning', name: 'WARN' },
+  { k: 'notice', cls: 'sv-notice', name: 'NOTICE' }, { k: 'informational', cls: 'sv-informational', name: 'INFO' }, { k: 'debug', cls: 'sv-debug', name: 'DEBUG' },
+  { k: 'other', cls: 'sv-other', name: 'OTHER' },
+];
+export const SEV_LEVELS = SEV_KEYS.filter((x) => x.k !== 'other'); // selectable in filters
+export const SEV_BAD = ['emergency', 'alert', 'critical', 'error'];
+export const sevKey = (s) => (SEV_LEVELS.some((x) => x.k === s) ? s : 'other');
+export const sevName = (s) => SEV_LEVELS.find((x) => x.k === s)?.name || String(s).toUpperCase();
 
 // NFR-09: never show full IPs / MACs (no auth layer yet; unmasking needs SEC-03).
 export function maskIp(ip) {
@@ -124,7 +201,12 @@ export const scalar = (result) => (result.length ? Number(result[0].value[1]) : 
 
 // ---- sortable table (modals/drawers) -------------------------------------------------
 // cols: [{ key, label, num, fmt(v,row), title(row) }]; rows: plain objects; onRow(row) opens detail.
-export function sortTable(cols, initial) {
+// keyOf(row): stable identity of a row, the focus key of its button across live refreshes (never a metric or a status
+// that can change). Default: the row's non-numeric, non-status columns joined.
+const STATUS_COL = /oper|state|status|sev/i;
+export function sortTable(cols, initial, keyOf) {
+  const idCols = cols.filter((c) => !c.num && !STATUS_COL.test(c.key));
+  const rowKey = (r) => String(keyOf ? keyOf(r) : (idCols.length ? idCols : cols.slice(0, 1)).map((c) => r[c.key]).join('|'));
   const st = { key: initial?.key ?? cols[0].key, desc: initial?.desc ?? false, rows: [], onRow: null };
   const table = el('table', 'tbl');
   const thead = el('thead');
@@ -175,6 +257,7 @@ export function sortTable(cols, initial) {
         const b = el('button', 'cell-btn', first.textContent);
         b.type = 'button';
         b.setAttribute('aria-label', `details for ${cols.map((c) => tr.children[cols.indexOf(c)].textContent).slice(0, 3).join(' ')}`);
+        b.dataset.fkey = `row ${rowKey(r)}`;
         b.addEventListener('click', (e) => { e.stopPropagation(); open(); });
         first.replaceChildren(b);
       }
@@ -188,9 +271,9 @@ export function sortTable(cols, initial) {
       trs.push(tr);
     }
     // live refresh must not steal keyboard focus from a row button
-    const focused = tbody.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : null;
+    const focused = tbody.contains(document.activeElement) ? document.activeElement.dataset.fkey : null;
     tbody.replaceChildren(...trs);
-    if (focused) [...tbody.querySelectorAll('.cell-btn')].find((b) => b.getAttribute('aria-label') === focused)?.focus();
+    if (focused) [...tbody.querySelectorAll('.cell-btn')].find((b) => b.dataset.fkey === focused)?.focus();
   }
   return {
     el: table,
@@ -201,7 +284,7 @@ export function sortTable(cols, initial) {
 // ---- line chart -----------------------------------------------------------------------
 // series: [{ name, color, points: [[tSec, v], ...] }]; gaps (> 2 steps) are drawn as breaks, never as 0.
 export function lineChart(canvas, series, { t0, t1, step, unit = '' }) {
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = (window.devicePixelRatio || 1) * uiZoom();
   const w = (canvas.width = canvas.clientWidth * dpr);
   const h = (canvas.height = canvas.clientHeight * dpr);
   const ctx = canvas.getContext('2d');

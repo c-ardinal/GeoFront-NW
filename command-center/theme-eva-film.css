@@ -1,9 +1,9 @@
-/* Optional "eva-film" theme (?theme=eva-film or the THEME toggle: STD -> EVA -> FILM).
-   Started as a copy of theme-eva.css and pushed toward the language of anime command-room displays:
+/* Optional "eva-film" theme (?theme=eva-film or the THEME toggle: STD <-> FILM).
+   Styled after the language of anime command-room displays:
    heavy elongated Mincho kanji on solid signal-orange blocks, pure black ground, green for normal,
    deep red for emergency, hex status cells, segmented gauges, tick scales, vertical edge labels, code IDs.
    All wording and art are original; no logos, emblems, organisation or character names, no copied assets.
-   Same layout, panels and data as the other themes; only tokens and decoration change.
+   Same layout, panels and data as the default theme; only tokens and decoration change.
    Text contrast of every token is measured in the hand-off (>= 4.5:1, large >= 3:1). */
 :root[data-theme="eva-film"] {
   --bg: #000;
@@ -77,7 +77,7 @@
   --banner-min: 380px; /* stripes + hex tag + count + first alert name over two lines */
 }
 [data-theme="eva-film"] #alert-banner::before {
-  content: '\8B66\5831'; display: inline-block; font: 800 16px/17px var(--ja); color: var(--warn); background: #000;
+  content: '\8B66\5831'; display: inline-block; flex: none; font: 800 16px/17px var(--ja); color: var(--warn); background: #000;
   padding: 0 14px; margin-right: var(--s3);
   clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 8px 100%, 0 50%);
 }
@@ -110,9 +110,6 @@
   clip-path: polygon(0 0, 100% 0, 100% 70%, calc(100% - 6px) 100%, 0 100%);
 }
 [data-theme="eva-film"] .h-t { font: 700 15px var(--display); letter-spacing: 0.08em; color: var(--text); }
-/* on narrow headers the info slot gives way (ellipsis, full text in DOM) so a STALE tag is never clipped */
-[data-theme="eva-film"] .panel > h2 .h-r { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-[data-theme="eva-film"] .panel > h2 > :not(.h-r), [data-theme="eva-film"] .panel > h2::after { flex-shrink: 0; }
 /* small code IDs at the right end of the header (omitted where the header is already full) */
 [data-theme="eva-film"] .panel > h2::before { order: 9; font: 500 13px var(--display); letter-spacing: 0.08em; color: var(--accent); }
 [data-theme="eva-film"] .panel.stale > h2::before { display: none; } /* the STALE tag needs the room */
@@ -179,7 +176,20 @@
     linear-gradient(var(--frame) 0 1px, transparent 1px) right 0 top 0 / 5px 16px repeat-y;
 }
 
-/* globe HTML labels (shared .glabel rules live in theme-eva.css): black chip, orange code bar */
+/* globe HTML labels (only the tactical globe of this theme creates them; globe.js thins them in screen space) */
+.glabel { pointer-events: none; transition: opacity 0.2s; }
+.glabel-hidden { visibility: hidden; }
+.glabel span {
+  position: relative; left: 10px; display: inline-block; white-space: nowrap;
+  font: 600 13px/16px var(--display); letter-spacing: 0.08em;
+  color: var(--warn); background: rgba(0, 0, 0, 0.85); padding: 0 var(--s1);
+  border-left: 2px solid var(--accent);
+}
+.glabel::before { content: ''; position: absolute; left: -3px; top: 5px; width: 6px; height: 6px; background: var(--accent); }
+.glabel-home span { color: var(--text); border-left-color: var(--warn); font-size: 14px; }
+.glabel-home::before { background: var(--warn); }
+@media (prefers-reduced-motion: reduce) { .glabel { transition: none; } }
+/* black chip, orange code bar */
 [data-theme="eva-film"] .glabel span { color: var(--text); border-left: 3px solid var(--accent); letter-spacing: 0.1em; }
 [data-theme="eva-film"] .glabel-home span { color: #000; background: var(--warn); border-left-color: #000; }
 
@@ -193,14 +203,23 @@
 [data-theme="eva-film"] body.red-alert #p-alerts { box-shadow: inset 0 3px 0 var(--crit-fill), inset 0 0 0 3px #000, inset 0 0 0 4px var(--crit-fill); }
 [data-theme="eva-film"] body.red-alert #p-alerts .h-ja { background: var(--crit-fill); color: #fff; }
 [data-theme="eva-film"] body.red-alert #p-alerts .rows.scroll { margin-bottom: 46px; }
-[data-theme="eva-film"] body.red-alert #p-alerts::after {
-  content: '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT';
-  position: absolute; left: 0; right: 0; bottom: 0; height: 44px; padding: 10px var(--s3) 0; overflow: hidden; white-space: nowrap;
-  font: 800 22px/30px var(--ja); letter-spacing: 0.12em; color: #fff;
+/* band = ::before (static red field, slow pulse); text = ::after, two identical halves scrolling as a seamless loop
+   (transform only, ~65 px/s; paused on hover/focus; static under reduced motion). Decorative: empty alt text. */
+[data-theme="eva-film"] body.red-alert #p-alerts::before {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 44px; z-index: 1;
   background: repeating-linear-gradient(-45deg, #000 0 8px, var(--crit-fill) 8px 16px) 0 0 / 100% 8px no-repeat, var(--banner);
   animation: film-band 3s ease-in-out infinite;
 }
+[data-theme="eva-film"] body.red-alert #p-alerts::after {
+  content: '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 '
+           '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 ' / '';
+  position: absolute; left: var(--s3); bottom: 0; width: max-content; height: 44px; padding-top: 10px; z-index: 2; white-space: pre; pointer-events: none;
+  font: 800 22px/30px var(--ja); letter-spacing: 0.12em; color: #fff;
+  animation: film-scroll 18s linear infinite;
+}
+[data-theme="eva-film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
 @keyframes film-band { 50% { background-color: #7a0804; } }
+@keyframes film-scroll { to { transform: translateX(-50%); } }
 
 [data-theme="eva-film"] #theme-toggle { border-color: var(--accent); color: var(--text); font-family: var(--display); }
 
@@ -222,3 +241,30 @@
 [data-theme="eva-film"] .v-h { font-family: var(--display); letter-spacing: 0.1em; border-bottom: 3px double var(--frame); }
 [data-theme="eva-film"] .v-h::before { content: ''; width: 10px; height: 10px; background: var(--accent); flex: 0 0 auto; }
 [data-theme="eva-film"] .gtip { border-width: 2px; }
+
+/* ---- tablet / phone ---- */
+[data-theme="eva-film"] #tabs button { font: 800 17px var(--ja); letter-spacing: 0.1em; color: var(--accent); background: #000; border-color: var(--frame); }
+[data-theme="eva-film"] #tabs button[aria-current="true"] { color: #000; background: var(--accent); border-color: var(--accent); box-shadow: none; }
+[data-theme="eva-film"] #tabs b:not(:empty) { font-family: var(--display); }
+[data-theme="eva-film"] .kpi { border-color: var(--frame); box-shadow: inset 0 3px 0 var(--accent); }
+[data-theme="eva-film"] .kpi b { font: 700 30px var(--display); }
+[data-theme="eva-film"] .kpi-l { font-family: var(--display); letter-spacing: 0.1em; }
+[data-theme="eva-film"] .k-alerts { font-family: var(--display); }
+/* the latitude scale needs a tall globe (top 196 px + 400 px) */
+@media (max-width: 1279px) {
+  [data-theme="eva-film"] #p-globe::after { display: none; }
+  /* compact bar: while investigating the kanji title alone identifies the screen (room for BACK TO LIVE) */
+  [data-theme="eva-film"] #topbar:has(#back-live:not([hidden])) .title { font-size: 0; column-gap: 0; }
+  [data-theme="eva-film"] #topbar:has(#back-live:not([hidden])) .title::after { display: none; }
+}
+@media (max-width: 767px) {
+  [data-theme="eva-film"] .title { font-size: 0; column-gap: 0; }
+  [data-theme="eva-film"] .title::after { display: none; }
+  [data-theme="eva-film"] .title-ja { font-size: 20px; line-height: 22px; margin-top: 0; }
+  [data-theme="eva-film"] .st { font-size: 14px; }
+  [data-theme="eva-film"] .panel > h2::before { display: none; } /* code IDs: no room on a phone header */
+  [data-theme="eva-film"] .globe-wrap::before, [data-theme="eva-film"] .globe-wrap::after { display: none; } /* 300 px globe */
+  [data-theme="eva-film"] .row .c.n { font-size: 15px; }
+  [data-theme="eva-film"] #alert-banner { padding-left: 30px; background-size: 22px 100%; }
+  [data-theme="eva-film"] #alert-banner::before { padding: 0 10px; margin-right: var(--s2); }
+}
