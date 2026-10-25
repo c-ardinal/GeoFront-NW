@@ -2,7 +2,14 @@
 import { el, has, fixed, fmtUptime, fmtBytes, fmtDur, maskIp, jstFull, SEV_SHORT, SEVERITIES, sortTable, upState } from './util.js';
 import { promQuery, lokiLogs, lokiMetric, flattenStreams, logqlString } from './api.js';
 import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow } from './panels.js';
-import { section, kv, chartBlock, drawRange, rangeSelect, mbps, lv, linkBtn } from './views-common.js';
+import { section, kv, chartBlock, drawRange, rangeSelect, mbps, lv, linkBtn, SNMP_UP, FLOWS_DOWN } from './views-common.js';
+
+// flow source DOWN: drop the rows (an empty source would read as 0 Mbps / 0 destinations) and mark the view stale
+function needFlows(ctx, t) {
+  if (ctx.snap.flowsOk) return;
+  t.update([], () => {});
+  throw new Error(FLOWS_DOWN);
+}
 
 const fmtN = (d) => (v) => fixed(v, d);
 const HOUR = 3600;
@@ -60,6 +67,7 @@ export function destModal() {
       body.append(t.el);
     },
     async update(ctx) {
+      needFlows(ctx, t);
       const bytes = await promQuery('sum by (dst_ip) (increase(demo_flow_bytes_total[15m]))');
       const bmap = new Map(bytes.map((r) => [r.metric.dst_ip, Number(r.value[1])]));
       const all = totalBps(ctx.snap.flows);
@@ -85,6 +93,7 @@ export function srcModal() {
       body.append(t.el);
     },
     async update(ctx) {
+      needFlows(ctx, t);
       const all = totalBps(ctx.snap.flows);
       t.update([...byKey(ctx.snap.flows, (f) => f.src).values()].map((g) => ({
         host: g.key, mbps: mbps(g.bps), out: mbps(totalBps(g.flows.filter((f) => f.dir === 'outbound'))), in: mbps(totalBps(g.flows.filter((f) => f.dir === 'inbound'))),
@@ -105,6 +114,7 @@ export function unknownModal() {
       body.append(t.el);
     },
     async update(ctx) {
+      needFlows(ctx, t);
       t.update([...byKey(ctx.snap.flows.filter((f) => f.lat === null), (f) => f.ip).values()].map((g) => ({
         ip: maskIp(g.key), rawIp: g.key, mbps: mbps(g.bps), srcs: new Set(g.flows.filter((f) => f.bps > 0).map((f) => f.src)).size,
       })), (r) => ctx.nav.dest({ cc: 'Unknown', ip: r.rawIp }));
@@ -133,10 +143,10 @@ export function wanModal() {
         ['Errors', fixed(w.err), '/min'], ['Link speed', has(w.speed) ? String(w.speed) : undefined, 'Mbps']]));
       const sel = 'job="snmp",instance="rtx1300",ifName="lan2"';
       await Promise.all([
-        drawRange(traffic, [{ q: `rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↓ in' }, { q: `rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↑ out' }], secs, ''),
-        drawRange(util, [{ q: `rate(ifHCInOctets{${sel}}[$RATE]) * 8 / (ifHighSpeed{${sel}} * 1e6) * 100`, name: () => 'util ↓ %' },
-          { q: `rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / (ifHighSpeed{${sel}} * 1e6) * 100`, name: () => 'util ↑ %' }], secs, ''),
-        drawRange(errs, [{ q: `(rate(ifInErrors{${sel}}[$RATE]) + rate(ifOutErrors{${sel}}[$RATE])) * 60`, name: () => 'errors /min' }], secs, ''),
+        drawRange(traffic, [{ q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↓ in' }, { q: `(rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↑ out' }], secs, ''),
+        drawRange(util, [{ q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / (ifHighSpeed{${sel}} * 1e6) * 100) ${SNMP_UP}`, name: () => 'util ↓ %' },
+          { q: `(rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / (ifHighSpeed{${sel}} * 1e6) * 100) ${SNMP_UP}`, name: () => 'util ↑ %' }], secs, ''),
+        drawRange(errs, [{ q: `((rate(ifInErrors{${sel}}[$RATE]) + rate(ifOutErrors{${sel}}[$RATE])) * 60) ${SNMP_UP}`, name: () => 'errors /min' }], secs, ''),
       ]);
     },
   };
@@ -166,7 +176,7 @@ export function ifacesModal() {
       chartSec.head.firstChild.textContent = `${inst} ${ifName}, last 1 h `;
       openBtn.hidden = false;
       const sel = `instance=${lv(inst)},ifName=${lv(ifName)},job="snmp"`;
-      await drawRange(chart, [{ q: `rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↓ in Mbps' }, { q: `rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↑ out Mbps' }], HOUR, '');
+      await drawRange(chart, [{ q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↓ in Mbps' }, { q: `(rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↑ out Mbps' }], HOUR, '');
     },
   };
 }
@@ -219,7 +229,8 @@ export function alertsModal() {
 const PAGE = 200;
 export function logsModal(init = {}) {
   const f = { host: init.host || '', sev: init.sev || '', text: init.text || '', win: init.win || 900, follow: true };
-  let list, count, more, entries = [], oldestNs = null, ctxRef, seq = 0;
+  let list, count, more, entries = [], oldestNs = null, ctxRef, seq = 0, shown = null;
+  const filterKey = () => `${query()}|${f.win}`; // which filter the lines on screen belong to
   const query = () => {
     const m = [`job="syslog"`];
     if (f.host) m.push(`host=${lv(f.host)}`);
@@ -231,8 +242,31 @@ export function logsModal(init = {}) {
     const startNs = BigInt(Date.now() - f.win * 1000) * 1000000n;
     if (endNs <= startNs) { more.disabled = true; return; }
     const my = ++seq; // a newer filter change supersedes slower, older responses
-    const got = flattenStreams(await lokiLogs(query(), { startNs: String(startNs), endNs: String(endNs), limit: PAGE }));
+    let got;
+    try {
+      got = flattenStreams(await lokiLogs(query(), { startNs: String(startNs), endNs: String(endNs), limit: PAGE }));
+    } catch (e) {
+      if (my !== seq) throw e;
+      if (e.rejected) {
+        entries = [];
+        shown = null;
+        more.disabled = true;
+        list.replaceChildren(el('div', 'na', 'この条件は検索できません: 完全なアドレス / 部分アドレス (例 113.50) は指定できません。伏せた形 (例 203.0.113.x) で指定してください。'));
+        count.textContent = 'filter rejected by server (NFR-09)';
+        return;
+      }
+      if (reset && shown !== filterKey()) {
+        // lines on screen belong to another filter: never leave them looking like this filter's result
+        entries = [];
+        shown = null;
+        more.disabled = true;
+        list.replaceChildren(el('div', 'na', 'load failed: results for this filter are not available (previous results cleared). Retrying on the next refresh.'));
+        count.textContent = 'load failed · no results shown for the current filter';
+      } else count.textContent = `${count.textContent.replace(/ · load failed.*$/, '')} · load failed, showing last loaded lines`;
+      throw e;
+    }
     if (my !== seq) return;
+    shown = filterKey();
     entries = reset ? got : [...got, ...entries];
     if (got.length) oldestNs = BigInt(got[0].ts);
     more.disabled = got.length < PAGE;

@@ -42,6 +42,13 @@ function rankRows(groups, total, labelHead, top, onOpen) {
 }
 
 export function renderFlows(snap, nav) {
+  if (!snap.flowsOk) { // flow source DOWN: say so instead of an empty ranking (which would read as 0 Mbps)
+    const msg = () => cell('flow source DOWN · UNKNOWN', 'sub');
+    put('dest', [head('COUNTRY', '', '#Mbps', '#SHARE %'), row([msg(), cell(''), num(undefined), num(undefined)])]);
+    put('src', [head('HOST', '', '#Mbps', '#SHARE %'), row([msg(), cell(''), num(undefined), num(undefined)])]);
+    put('unknown', [head('DESTINATION (MASKED)', '#Mbps'), row([msg(), num(undefined)])]);
+    return;
+  }
   const total = totalBps(snap.flows);
   const byCountry = [...byKey(snap.flows, (f) => f.cc).values()].map((g) => ({ ...g, label: g.key }));
   put('dest', rankRows(byCountry, total, 'COUNTRY', DEST_TOP, (g) => nav.dest({ cc: g.key })));

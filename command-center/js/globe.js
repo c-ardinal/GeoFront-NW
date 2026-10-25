@@ -11,15 +11,26 @@ const FLY_MS = 900;
 // Per-theme palette. The default entries are exactly the original constants.
 const STYLES = {
   default: { out: ['rgba(255,176,0,0.25)', '#ffb000'], in: ['rgba(0,229,255,0.25)', '#00e5ff'], dim: 'rgba(150,170,180,0.10)', ring: '0,229,255', atmo: '#33d6ff', atmoAlt: 0.22 },
-  eva: { out: ['rgba(255,154,31,0.25)', '#ff9a1f'], in: ['rgba(79,224,176,0.25)', '#4fe0b0'], dim: 'rgba(140,100,40,0.12)', ring: '255,154,31', atmo: '#ff9a1f', atmoAlt: 0.12 },
+  eva: { out: ['rgba(255,154,31,0.25)', '#ff9a1f'], in: ['rgba(79,224,176,0.25)', '#4fe0b0'], dim: 'rgba(140,100,40,0.12)', ring: '255,154,31', atmo: '#ff9a1f', atmoAlt: 0.12,
+    hex: 'rgba(255,154,31,0.5)', grid: { step: 30, color: 'rgba(255,154,31,0.22)' },
+    ranges: [5, 10].map((deg) => ({ deg, color: 'rgba(255,194,46,0.6)', dash: 0.02, gap: 0.015 })) },
+  // film: green graticule, solid orange hex land, green range rings around HOME plus two slow radar sweeps
+  'eva-film': { out: ['rgba(255,140,0,0.3)', '#ff8c00'], in: ['rgba(61,242,154,0.3)', '#3df29a'], dim: 'rgba(140,80,0,0.14)', ring: '255,140,0', atmo: '#ff8c00', atmoAlt: 0.07,
+    hex: 'rgba(255,140,0,0.75)', grid: { step: 15, color: 'rgba(61,242,154,0.2)' },
+    ranges: [
+      ...[4, 8, 12].map((deg) => ({ deg, color: 'rgba(61,242,154,0.55)', dash: 0.01, gap: 0.01 })),
+      { deg: 16, color: 'rgba(61,242,154,0.8)', dash: 1, gap: 0 },
+      ...[8, 16].map((deg) => ({ deg, color: 'rgba(255,212,0,0.95)', dash: 0.08, gap: 0.92, anim: REDUCED_MOTION ? 0 : 5000 })),
+    ] },
 };
-const isEva = () => document.documentElement.dataset.theme === 'eva';
-const style = () => (isEva() ? STYLES.eva : STYLES.default);
+const theme = () => document.documentElement.dataset.theme;
+const isEva = () => theme() === 'eva' || theme() === 'eva-film'; // tactical (non-photo) globe
+const style = () => STYLES[theme()] || STYLES.default;
 
 // Country outlines for the eva globe (Natural Earth 110m, fetched with SRI).
 const COUNTRIES_URL = 'https://cdn.jsdelivr.net/npm/globe.gl@2.46.2/example/datasets/ne_110m_admin_0_countries.geojson';
 const COUNTRIES_SRI = 'sha384-hAVr+/g2HDlVDeHrAVqTIQV3tH1JE5AbtuvCSCcoeG+ZDteCU2XGaE5yLDiLP9m5';
-const geo = { countries: null, failed: false, loading: false };
+const geo = { land: null, failed: false, loading: false };
 
 let globe = null;
 let hooks = { onDest: () => {}, onInteract: () => {} };
@@ -35,9 +46,6 @@ export function initGlobe(h) {
   }
   globe = Globe()(host)
     .backgroundColor('rgba(0,0,0,0)')
-    .globeImageUrl(`${TEXTURE}earth-night.jpg`)
-    .bumpImageUrl(`${TEXTURE}earth-topology.png`)
-    .backgroundImageUrl(`${TEXTURE}night-sky.png`)
     .showAtmosphere(true).atmosphereColor('#33d6ff').atmosphereAltitude(0.22)
     .arcStartLat((d) => d.from.lat).arcStartLng((d) => d.from.lng)
     .arcEndLat((d) => d.to.lat).arcEndLng((d) => d.to.lng)
@@ -71,13 +79,13 @@ export function initGlobe(h) {
     .pointOfView(DEFAULT_POV, 0)
     // eva-only layers (empty in the default theme)
     .pathPoints((d) => d.pts).pathPointLat((p) => p[0]).pathPointLng((p) => p[1]).pathPointAlt(0.002)
-    .pathColor((d) => (d.kind === 'range' ? 'rgba(255,194,46,0.6)' : 'rgba(255,154,31,0.22)'))
-    .pathDashLength((d) => (d.kind === 'range' ? 0.02 : 1)).pathDashGap((d) => (d.kind === 'range' ? 0.015 : 0))
+    .pathColor((d) => d.color).pathDashLength((d) => d.dash).pathDashGap((d) => d.gap).pathDashAnimateTime((d) => d.anim)
     .pathTransitionDuration(0)
     .hexPolygonResolution(3).hexPolygonMargin(0.35).hexPolygonAltitude(0.004)
-    .hexPolygonColor(() => 'rgba(255,154,31,0.5)').hexPolygonsTransitionDuration(0)
+    .hexPolygonColor(() => style().hex).hexPolygonsTransitionDuration(0)
     .htmlElement((d) => {
       const outer = el('div', `glabel${d.home ? ' glabel-home' : ''}${d.sel ? ' glabel-sel' : ''}`);
+      outer.dataset.prio = d.prio;
       outer.appendChild(el('span', '', d.text));
       return outer;
     })
@@ -89,10 +97,33 @@ export function initGlobe(h) {
   controls.autoRotateSpeed = 0.35;
   controls.enableZoom = true;
   controls.addEventListener('start', () => { controls.autoRotate = false; hooks.onInteract(); });
+  controls.addEventListener('change', scheduleDeclutter);
   new ResizeObserver(fit).observe(host);
   fit();
   styleGlobe();
   initZoomButtons();
+}
+
+// Screen-space thinning of the HTML labels (eva themes): the 500 km rule is zoom-independent, so at a wide view two
+// labels can still overlap; a lower-priority label whose box hits an already-shown one is hidden. Runs at most
+// every DECLUTTER_MS while the camera moves (a layout read, no per-frame DOM work) and after each data update.
+const DECLUTTER_MS = 250;
+const LABEL_PAD = 3;
+let declutterTimer = 0;
+function scheduleDeclutter() {
+  if (!declutterTimer) declutterTimer = setTimeout(() => { declutterTimer = 0; declutter(); }, DECLUTTER_MS);
+}
+function declutter() {
+  if (!isEva()) return;
+  const shown = [];
+  const labels = [...$('globe').querySelectorAll('.glabel')].sort((a, b) => a.dataset.prio - b.dataset.prio);
+  for (const lab of labels) {
+    const front = lab.style.opacity !== '0'; // the visibility modifier fades labels on the far side to 0
+    const r = lab.firstChild.getBoundingClientRect();
+    const hit = front && shown.some((s) => r.left - LABEL_PAD < s.right && r.right + LABEL_PAD > s.left && r.top - LABEL_PAD < s.bottom && r.bottom + LABEL_PAD > s.top);
+    if (lab.classList.contains('glabel-hidden') !== hit) lab.classList.toggle('glabel-hidden', hit);
+    if (front && !hit) shown.push(r);
+  }
 }
 
 // Arcs leaving HOME pass over nearby destinations; when the pointer is over a destination point, that point wins
@@ -122,7 +153,7 @@ function initZoomButtons() {
   const zoom = (f) => {
     const p = globe.pointOfView();
     globe.controls().autoRotate = false;
-    globe.pointOfView({ ...p, altitude: Math.min(4, Math.max(0.4, p.altitude * f)) }, REDUCED_MOTION ? 0 : 400);
+    moveCamera({ ...p, altitude: Math.min(4, Math.max(0.4, p.altitude * f)) }, REDUCED_MOTION ? 0 : 400);
     hooks.onInteract();
   };
   $('g-zoom-in').addEventListener('click', () => zoom(0.75));
@@ -132,14 +163,19 @@ function initZoomButtons() {
 
 export function resetView() {
   if (!globe) return;
-  globe.pointOfView(DEFAULT_POV, REDUCED_MOTION ? 0 : 800);
+  moveCamera(DEFAULT_POV, REDUCED_MOTION ? 0 : 800);
   globe.controls().autoRotate = !REDUCED_MOTION;
 }
 
 export function flyTo(lat, lng) {
   if (!globe) return;
   globe.controls().autoRotate = false;
-  globe.pointOfView({ lat, lng, altitude: 1.5 }, REDUCED_MOTION ? 0 : FLY_MS);
+  moveCamera({ lat, lng, altitude: 1.5 }, REDUCED_MOTION ? 0 : FLY_MS);
+}
+// animated camera moves do not emit controls 'change', so re-thin the labels once the move has landed
+function moveCamera(pov, ms) {
+  globe.pointOfView(pov, ms);
+  setTimeout(scheduleDeclutter, ms + 50);
 }
 
 const POINT_HIT_KM = 250;
@@ -158,41 +194,56 @@ export function setSelection(sel) {
   if (globe) applyData();
 }
 
-function evaPaths() {
+function evaPaths({ grid, ranges }) {
+  const g = { color: grid.color, dash: 1, gap: 0, anim: 0 };
   const paths = [];
-  for (let lng = -180; lng < 180; lng += 30) paths.push({ pts: Array.from({ length: 37 }, (_, i) => [-90 + i * 5, lng]), kind: 'grid' });
-  for (let lat = -60; lat <= 60; lat += 30) paths.push({ pts: Array.from({ length: 73 }, (_, i) => [lat, -180 + i * 5]), kind: 'grid' });
-  for (const deg of [5, 10]) {
-    paths.push({ kind: 'range', pts: Array.from({ length: 73 }, (_, i) => {
+  for (let lng = -180; lng < 180; lng += grid.step) paths.push({ ...g, pts: Array.from({ length: 37 }, (_, i) => [-90 + i * 5, lng]) });
+  for (let lat = -90 + grid.step; lat < 90; lat += grid.step) paths.push({ ...g, pts: Array.from({ length: 73 }, (_, i) => [lat, -180 + i * 5]) });
+  for (const r of ranges) {
+    paths.push({ anim: 0, ...r, pts: Array.from({ length: 73 }, (_, i) => {
       const a = (i * 5 * Math.PI) / 180;
-      return [ORIGIN.lat + deg * Math.sin(a), ORIGIN.lng + (deg * Math.cos(a)) / Math.cos((ORIGIN.lat * Math.PI) / 180)];
+      return [ORIGIN.lat + r.deg * Math.sin(a), ORIGIN.lng + (r.deg * Math.cos(a)) / Math.cos((ORIGIN.lat * Math.PI) / 180)];
     }) });
   }
   return paths;
 }
 function loadCountries() {
-  if (geo.loading || geo.countries || geo.failed) return;
+  if (geo.loading || geo.land || geo.failed) return;
   geo.loading = true;
   fetch(COUNTRIES_URL, { integrity: COUNTRIES_SRI })
     .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-    .then((j) => { geo.countries = j.features.filter((f) => f.properties.ISO_A2 !== 'AQ'); styleGlobe(); })
+    .then((j) => { geo.land = landFeature(j.features.filter((f) => f.properties.ISO_A2 !== 'AQ')); styleGlobe(); })
     .catch(() => { geo.failed = true; styleGlobe(); }) // graticule-only fallback, noted in the panel header
     .finally(() => { geo.loading = false; });
 }
 export const geoOutlineFailed = () => isEva() && geo.failed;
+// All countries as ONE MultiPolygon: three-globe builds one mesh + material per hex-polygon datum, and ~170
+// separate country meshes cost ~170 draw calls and program look-ups every frame (most of the eva CPU time).
+function landFeature(features) {
+  const coordinates = features.flatMap((f) => (f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates));
+  return { type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates } };
+}
 
-// Theme switch never reloads textures: the default-theme textures are loaded once and kept; the eva look
-// detaches them from the material (kept for reuse, not disposed) and hides the sky sphere.
+// Theme switch never reloads textures: the default-theme textures are loaded once (on first default use, so a
+// page opened in a tactical theme never flashes the photo globe when they land late) and kept; the eva looks
+// detach them from the material (kept for reuse, not disposed) and hide the sky sphere.
 const saved = { map: null, bump: null };
+let texturesRequested = false;
 export function styleGlobe() {
   if (!globe) return;
   const s = style();
   globe.atmosphereColor(s.atmo).atmosphereAltitude(s.atmoAlt);
   if (isEva()) {
-    globe.pathsData(evaPaths()).hexPolygonsData(geo.countries || []);
+    // fresh array: the hex colour is re-read when switching between the two tactical themes
+    globe.pathsData(evaPaths(s)).hexPolygonsData(geo.land ? [geo.land] : []);
     darken();
     loadCountries();
   } else {
+    if (!texturesRequested) {
+      // first default-theme use: request the photo textures (three-globe sets map + clears the colour on load)
+      texturesRequested = true;
+      globe.globeImageUrl(`${TEXTURE}earth-night.jpg`).bumpImageUrl(`${TEXTURE}earth-topology.png`).backgroundImageUrl(`${TEXTURE}night-sky.png`);
+    }
     const mat = globe.globeMaterial();
     if (saved.map) { mat.map = saved.map; mat.color = null; }
     if (saved.bump) mat.bumpMap = saved.bump;
@@ -294,7 +345,15 @@ function applyData() {
   if (isEva()) {
     darken();
     globe.labelsData([]);
-    globe.htmlElementsData([...labelled.map((c) => ({ ...c, sel: isSelCity(c) })), { ...ORIGIN, text: ORIGIN.label, home: true }]);
+    // prio for screen-space thinning: selected destination, then HOME, then by bps (labelled is already in that order)
+    const sel = labelled.filter((c) => isSelCity(c));
+    const rest = labelled.filter((c) => !isSelCity(c));
+    globe.htmlElementsData([
+      ...sel.map((c, i) => ({ ...c, sel: 1, prio: i })),
+      { ...ORIGIN, text: ORIGIN.label, home: true, prio: sel.length },
+      ...rest.map((c, i) => ({ ...c, sel: 0, prio: sel.length + 1 + i })),
+    ]);
+    scheduleDeclutter();
     return;
   }
   globe.labelsData([

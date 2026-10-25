@@ -12,16 +12,19 @@ const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
 const PROM_PANELS = ['p-devices', 'p-dest', 'p-src', 'p-unknown', 'p-globe', 'p-wan', 'p-if', 'p-wlan', 'p-alerts', 'p-health'];
 const LOKI_PANELS = ['p-logs', 'p-sev'];
+const FLOW_PANELS = ['p-dest', 'p-src', 'p-unknown', 'p-globe'];
+const FLOW_MAX_AGE_S = 60; // 4 scrape intervals
 
-// ---- theme: default (v3) or "eva"; ?theme= overrides, choice persisted when storage is available ----
-const THEMES = ['default', 'eva'];
+// ---- theme: default (v3), "eva" or "eva-film"; ?theme= overrides, choice persisted when storage is available ----
+const THEMES = ['default', 'eva', 'eva-film']; // toggle cycles in this order
+const THEME_LABEL = { default: 'THEME: STD', eva: 'THEME: EVA', 'eva-film': 'THEME: FILM' };
 function readStoredTheme() {
   try { return localStorage.getItem('cc-theme'); } catch { return null; }
 }
 function applyTheme(name, persist) {
   const t = THEMES.includes(name) ? name : 'default';
   document.documentElement.dataset.theme = t;
-  $('theme-toggle').textContent = t === 'eva' ? 'THEME: EVA' : 'THEME: STD';
+  $('theme-toggle').textContent = THEME_LABEL[t];
   if (persist) { try { localStorage.setItem('cc-theme', t); } catch { /* storage unavailable: theme not persisted */ } }
 }
 
@@ -84,7 +87,8 @@ const gate = (expr) => `(${expr}) and ${UP}`;
 const ERR_EXPR = '(rate(ifInErrors{job="snmp"}[2m]) + rate(ifOutErrors{job="snmp"}[2m])) * 60';
 const WAN_SEL = `job="snmp",instance="${P.WAN.instance}",ifName="${P.WAN.ifName}"`;
 const Q = {
-  flows: 'sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(demo_flow_bytes_total[2m])) * 8',
+  // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
+  flows: '(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(demo_flow_bytes_total[2m])) * 8) and on () (up{job="flows"} == 1)',
   up: 'up{job="snmp"}',
   uptime: gate('sysUpTime{job="snmp"} / 100'),
   devIn: gate('sum by (instance) (rate(ifHCInOctets{job="snmp"}[1m])) * 8 / 1e6'),
@@ -146,14 +150,17 @@ async function pollProm() {
     jobs.dur.set(t.job, Math.max(jobs.dur.get(t.job) || 0, t.dur ?? 0));
     jobs.age.set(t.job, Math.max(jobs.age.get(t.job) || 0, t.age ?? 0));
   }
+  // flow source freshness: its scrape target must exist, be up and have a recent sample (else flow data is UNKNOWN)
+  const flowsOk = targets.some((t) => t.job === 'flows' && t.up === 1 && t.age < FLOW_MAX_AGE_S);
   state.snap = {
-    at: Date.now(), m, flows: normFlows(res.flows), wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
+    at: Date.now(), m, flowsOk, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
     freshUp: scalar(res.freshUp), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx),
   };
   const s = state.snap;
   P.renderFlows(s, nav);
   G.renderGlobe(s.flows);
+  if (!flowsOk) $('arc-note').textContent = 'flow source DOWN · arcs UNKNOWN';
   P.renderDevices(m, nav);
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
@@ -190,16 +197,17 @@ function updateHealth() {
   const now = Date.now();
   const promStale = now - state.promOkAt > STALE_AFTER_MS;
   const lokiStale = now - state.lokiOkAt > STALE_AFTER_MS;
-  for (const id of PROM_PANELS) $(id).classList.toggle('stale', promStale);
+  const flowStale = state.snap ? !state.snap.flowsOk : false;
+  for (const id of PROM_PANELS) $(id).classList.toggle('stale', promStale || (flowStale && FLOW_PANELS.includes(id)));
   for (const id of LOKI_PANELS) $(id).classList.toggle('stale', lokiStale);
   $('k-targets').classList.toggle('stale', promStale);
   const badgeEl = $('badge');
   let mode = 'LIVE';
   if (promStale) mode = 'STALE';
-  else if (lokiStale || state.promErr || state.lokiErr) mode = 'DEGRADED';
+  else if (lokiStale || state.promErr || state.lokiErr || flowStale) mode = 'DEGRADED';
   badgeEl.textContent = mode;
   badgeEl.className = `badge badge-${mode.toLowerCase()}`;
-  badgeEl.title = [state.promErr, state.lokiErr].filter(Boolean).join(' / ') || 'all sources OK';
+  badgeEl.title = [state.promErr, state.lokiErr, flowStale && 'flow source DOWN'].filter(Boolean).join(' / ') || 'all sources OK';
   const last = Math.min(state.promOkAt || 0, state.lokiOkAt || 0);
   $('age').textContent = last ? `${Math.round((now - last) / 1000)}s AGO` : 'NEVER';
 }
@@ -222,7 +230,7 @@ function boot() {
 
 applyTheme(new URLSearchParams(location.search).get('theme') || readStoredTheme(), false);
 $('theme-toggle').addEventListener('click', () => {
-  applyTheme(document.documentElement.dataset.theme === 'eva' ? 'default' : 'eva', true);
+  applyTheme(THEMES[(THEMES.indexOf(document.documentElement.dataset.theme) + 1) % THEMES.length], true);
   G.styleGlobe();
   poll();
 });

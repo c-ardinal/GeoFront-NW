@@ -54,12 +54,17 @@ export function chartBlock(cls = '') {
 }
 const stepFor = (secs) => Math.max(15, Math.round(secs / 240 / 15) * 15);
 // queries: [{ q, name(metric) }]; draws all series; empty result -> "no data in window" note (no zero line).
-// `$RATE` in a query becomes the rate window: at least one step (so long ranges average every sample instead of
-// sampling 1 min out of each step) and at least 4 scrape intervals.
+// `$RATE` in a query becomes the rate window, Grafana $__rate_interval style: max(step + 1 scrape, 4 scrapes), so
+// consecutive windows overlap by one scrape and no counter increase falls between two evaluation points.
 const SCRAPE_S = 15;
+// Scrape gates: `and` is evaluated per step of a range query, so points where the source's latest scrape failed become
+// gaps (rate() over a look-back window would otherwise keep drawing decaying values for a DOWN target).
+export const SNMP_UP = 'and on (instance) (up{job="snmp"} == 1)';
+export const FLOWS_UP = 'and on () (up{job="flows"} == 1)';
+export const FLOWS_DOWN = 'flow source DOWN: flow data UNKNOWN';
 export async function drawRange(block, queries, secs, unit) {
   const step = stepFor(secs);
-  const win = `${Math.max(step, 4 * SCRAPE_S)}s`;
+  const win = `${Math.max(step + SCRAPE_S, 4 * SCRAPE_S)}s`;
   const my = (block.seq = (block.seq || 0) + 1); // a newer request (range switch / next poll) supersedes this one
   const results = await Promise.all(queries.map((x) => promRange(x.q.replaceAll('$RATE', win), secs, step)));
   if (my !== block.seq) return;
@@ -73,7 +78,7 @@ export async function drawRange(block, queries, secs, unit) {
   const t1 = Date.now() / 1000;
   lineChart(block.canvas, series, { t0: t1 - secs, t1, step, unit });
   block.leg.replaceChildren(legend(series));
-  block.note.textContent = series.length ? `step ${step} s · rate window ${win} \u00B7 gaps = no samples (not zero)` : 'no data in window';
+  block.note.textContent = series.length ? `step ${step} s · rate window ${win} \u00B7 gaps = no samples / source DOWN (not 0)` : 'no data in window';
 }
 export function rangeSelect(options, initial, onChange) {
   const g = el('div', 'seg');

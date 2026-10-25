@@ -2,7 +2,7 @@
 import { el, has, fixed, fmtUptime, fmtDur, maskIp, jstFull, upState } from './util.js';
 import { lokiLogs, flattenStreams, promRules } from './api.js';
 import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind } from './panels.js';
-import { section, kv, linkList, chartBlock, drawRange, mbps, lv } from './views-common.js';
+import { section, kv, linkList, chartBlock, drawRange, mbps, lv, SNMP_UP, FLOWS_UP, FLOWS_DOWN } from './views-common.js';
 
 const HOUR = 3600;
 const nsOf = (ms) => BigInt(Math.round(ms)) * 1000000n;
@@ -47,8 +47,8 @@ export function deviceView(name) {
       const sel = `instance=${lv(name)},job="snmp"`;
       const [, streams] = await Promise.all([
         drawRange(chart, [
-          { q: `sum(rate(ifHCInOctets{${sel}}[$RATE])) * 8 / 1e6`, name: () => '↓ in Mbps' },
-          { q: `sum(rate(ifHCOutOctets{${sel}}[$RATE])) * 8 / 1e6`, name: () => '↑ out Mbps' },
+          { q: `sum(rate(ifHCInOctets{${sel}}[$RATE]) ${SNMP_UP}) * 8 / 1e6`, name: () => '↓ in Mbps' },
+          { q: `sum(rate(ifHCOutOctets{${sel}}[$RATE]) ${SNMP_UP}) * 8 / 1e6`, name: () => '↑ out Mbps' },
         ], HOUR, ''),
         lokiLogs(`{job="syslog",host=${lv(name)}}`, { startNs: String(nsOf(Date.now() - HOUR * 1000)), endNs: String(nsOf(Date.now())), limit: 50 }),
       ]);
@@ -80,12 +80,12 @@ export function ifaceView(key) {
       const sel = `instance=${lv(inst)},ifName=${lv(ifName)},job="snmp"`;
       await Promise.all([
         drawRange(traffic, [
-          { q: `rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↓ in' },
-          { q: `rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6`, name: () => '↑ out' },
+          { q: `(rate(ifHCInOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↓ in' },
+          { q: `(rate(ifHCOutOctets{${sel}}[$RATE]) * 8 / 1e6) ${SNMP_UP}`, name: () => '↑ out' },
         ], HOUR, ''),
         drawRange(errs, [
-          { q: `rate(ifInErrors{${sel}}[$RATE]) * 60`, name: () => 'in errors' },
-          { q: `rate(ifOutErrors{${sel}}[$RATE]) * 60`, name: () => 'out errors' },
+          { q: `(rate(ifInErrors{${sel}}[$RATE]) * 60) ${SNMP_UP}`, name: () => 'in errors' },
+          { q: `(rate(ifOutErrors{${sel}}[$RATE]) * 60) ${SNMP_UP}`, name: () => 'out errors' },
         ], HOUR, ''),
       ]);
     },
@@ -107,10 +107,11 @@ export function destView(d) {
       body.append(s.sum.wrap, s.src.wrap, s.ips.wrap, s.t.wrap, s.note.wrap);
     },
     async update(ctx) {
+      const ok = ctx.snap.flowsOk; // flow source DOWN: every figure is unknown ("—"), never 0
       const fl = ctx.snap.flows.filter(match);
       const all = totalBps(ctx.snap.flows);
-      const bps = totalBps(fl);
-      const out = totalBps(fl.filter((f) => f.dir === 'outbound'));
+      const bps = ok ? totalBps(fl) : undefined;
+      const out = ok ? totalBps(fl.filter((f) => f.dir === 'outbound')) : undefined;
       s.sum.body.replaceChildren(kv([
         ['Country', d.cc], ['Cities', [...new Set(fl.map((f) => f.city).filter(Boolean))].join(', ') || undefined],
         ['ASN', [...new Set(fl.map((f) => f.asn).filter(Boolean))].join(', ') || undefined],
@@ -118,15 +119,16 @@ export function destView(d) {
         ['Share of all flow bytes', all ? fixed((100 * bps) / all) : undefined, '%'],
       ]));
       const srcs = [...byKey(fl, (f) => f.src).values()].sort((a, b) => b.bps - a.bps);
-      s.src.body.replaceChildren(linkList(srcs.map((g) => [`${g.key}  ${fixed(mbps(g.bps))} Mbps`, () => ctx.nav.src(g.key)])));
+      s.src.body.replaceChildren(ok ? linkList(srcs.map((g) => [`${g.key}  ${fixed(mbps(g.bps))} Mbps`, () => ctx.nav.src(g.key)])) : el('p', 'na', FLOWS_DOWN));
       const ips = [...byKey(fl, (f) => f.ip).values()].sort((a, b) => b.bps - a.bps);
-      s.ips.body.replaceChildren(linkList(ips.map((g) => [`${maskIp(g.key)}  ${g.flows[0].city || '(no GeoIP)'}  ${fixed(mbps(g.bps))} Mbps`,
-        () => ctx.nav.dest(g.flows[0].lat === null ? { cc: 'Unknown', ip: g.key } : { cc: g.flows[0].cc, city: g.flows[0].city })])));
+      s.ips.body.replaceChildren(ok ? linkList(ips.map((g) => [`${maskIp(g.key)}  ${g.flows[0].city || '(no GeoIP)'}  ${fixed(mbps(g.bps))} Mbps`,
+        () => ctx.nav.dest(g.flows[0].lat === null ? { cc: 'Unknown', ip: g.key } : { cc: g.flows[0].cc, city: g.flows[0].city })])) : el('p', 'na', FLOWS_DOWN));
       s.note.body.replaceChildren(el('p', 'v-p', d.cc === 'Unknown'
         ? 'No GeoIP result: counted as Unknown (kept in totals and shares); no location is estimated or drawn (TC-007).'
         : 'Location is a GeoIP estimate of the destination (synthetic in this demo). Arcs show a logical relation, not a physical route.'));
       const sel = d.ip ? `dst_ip=${lv(d.ip)}` : `dst_country=${lv(d.cc)}${d.city ? `,dst_city=${lv(d.city)}` : ''}`;
-      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{${sel}}[$RATE])) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, '');
+      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{${sel}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, '');
+      if (!ok) throw new Error(FLOWS_DOWN);
     },
   };
 }
@@ -143,20 +145,22 @@ export function srcView(host) {
       body.append(s.sum.wrap, s.dst.wrap, s.t.wrap);
     },
     async update(ctx) {
+      const ok = ctx.snap.flowsOk; // flow source DOWN: every figure is unknown ("—"), never 0
       const fl = ctx.snap.flows.filter((f) => f.src === host);
-      const bps = totalBps(fl);
+      const bps = ok ? totalBps(fl) : undefined;
       const all = totalBps(ctx.snap.flows);
       s.sum.body.replaceChildren(kv([
         ['Total', fixed(mbps(bps)), 'Mbps'], ['Share of all flow bytes', all ? fixed((100 * bps) / all) : undefined, '%'],
-        ['Destinations', String(new Set(fl.filter((f) => f.bps > 0).map((f) => f.ip)).size)],
+        ['Destinations', ok ? String(new Set(fl.filter((f) => f.bps > 0).map((f) => f.ip)).size) : undefined],
       ]));
       const dst = [...byKey(fl, (f) => f.ip).values()].sort((a, b) => b.bps - a.bps);
-      s.dst.body.replaceChildren(linkList(dst.map((g) => {
+      s.dst.body.replaceChildren(ok ? linkList(dst.map((g) => {
         const f = g.flows[0];
         return [`${f.cc.padEnd(8)} ${(f.city || '(no GeoIP)').padEnd(12)} ${maskIp(g.key)}  ${fixed(mbps(g.bps))} Mbps`,
           () => ctx.nav.dest(f.lat === null ? { cc: 'Unknown', ip: g.key } : { cc: f.cc, city: f.city })];
-      })));
-      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{src_host=${lv(host)}}[$RATE])) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, '');
+      })) : el('p', 'na', FLOWS_DOWN));
+      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{src_host=${lv(host)}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, '');
+      if (!ok) throw new Error(FLOWS_DOWN);
     },
   };
 }
@@ -204,7 +208,7 @@ export function alertView(alert0) {
 // ---- syslog line context -------------------------------------------------------------------
 export function loglineView(e) {
   let s;
-  let done = false;
+  let around = null; // historical context does not change: fetched once, re-rendered on every mount (back / breadcrumb)
   return {
     title: `Syslog ${e.host}`, src: 'loki',
     mount(body) {
@@ -212,16 +216,18 @@ export function loglineView(e) {
       body.append(s.sum.wrap, s.ctx.wrap);
     },
     async update(ctx) {
-      if (done) return; // historical context does not change
+      if (s.ctx.body.childElementCount) return; // already rendered into the current mount
       s.sum.body.replaceChildren(kv([['Time (JST)', jstFull.format(new Date(Number(e.ts.slice(0, 13))))], ['Host', e.host], ['Severity', e.sev]]),
         logList(e.host, [e], ctx.nav, e.ts), el('div', 'v-links'));
       s.sum.body.lastChild.append(linkList(DEVICES.includes(e.host) ? [[`Device ${e.host.toUpperCase()}`, () => ctx.nav.device(e.host)]] : []));
-      const t = BigInt(e.ts);
-      const streams = await lokiLogs(`{job="syslog",host=${lv(e.host)}}`, { startNs: String(t - 600000000000n), endNs: String(t + 600000000000n), limit: 1000, direction: 'forward' });
-      const all = flattenStreams(streams);
-      const i = Math.max(0, all.findIndex((x) => x.ts === e.ts && x.line === e.line));
-      s.ctx.body.replaceChildren(logList(e.host, all.slice(Math.max(0, i - 20), i + 21), ctx.nav, e.ts));
-      done = true;
+      if (!around) {
+        const t = BigInt(e.ts);
+        const streams = await lokiLogs(`{job="syslog",host=${lv(e.host)}}`, { startNs: String(t - 600000000000n), endNs: String(t + 600000000000n), limit: 1000, direction: 'forward' });
+        const all = flattenStreams(streams);
+        const i = Math.max(0, all.findIndex((x) => x.ts === e.ts && x.line === e.line));
+        around = all.slice(Math.max(0, i - 20), i + 21);
+      }
+      s.ctx.body.replaceChildren(logList(e.host, around, ctx.nav, e.ts));
     },
   };
 }

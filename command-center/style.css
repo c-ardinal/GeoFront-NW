@@ -60,12 +60,16 @@ ul { list-style: none; }
 #topbar { flex: 0 0 auto; background: var(--topbar); border: 1px solid var(--frame); border-top: 2px solid var(--accent); }
 .bar-main { height: 44px; display: flex; align-items: center; gap: var(--s4); padding: 0 var(--pad-x); }
 .title { font: 600 18px var(--display); letter-spacing: 0.1em; white-space: nowrap; }
+/* banner: one line when it fits, otherwise wraps to a second line (clamped) so the count and the first alert
+   name always stay visible; min-width reserves room for them and the status row tightens its gaps meanwhile */
 #alert-banner {
-  flex: 1; min-width: 0; font: 600 var(--fs) var(--sans); letter-spacing: 0.04em;
+  flex: 1; min-width: var(--banner-min, 240px); font: 600 var(--fs)/17px var(--sans); letter-spacing: 0.04em;
   color: #fff; background: var(--banner); padding: var(--s1) var(--s3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
 }
+#alert-banner[hidden] { display: none; }
 .status { margin-left: auto; display: flex; align-items: center; gap: var(--s4); white-space: nowrap; }
+#topbar:has(#alert-banner:not([hidden])) .status { gap: var(--s2); }
 .kv { color: var(--text-2); }
 .kv b { color: var(--text); font-weight: 600; }
 #theme-toggle { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em; color: var(--text-2); background: transparent; border: 1px solid var(--frame); padding: 2px var(--s2); cursor: pointer; }

@@ -42,6 +42,8 @@
 [data-theme="eva"] #topbar { border-top: 3px solid var(--accent); clip-path: polygon(0 0, 100% 0, 100% 100%, var(--chamfer) 100%, 0 calc(100% - var(--chamfer))); }
 [data-theme="eva"] .title { font: 700 22px var(--display); letter-spacing: 0.08em; display: flex; align-items: baseline; gap: var(--s3); }
 [data-theme="eva"] .title-ja { display: inline; font: 900 22px var(--ja); color: var(--accent); letter-spacing: 0.04em; }
+/* alert + INVESTIGATE: the kanji title alone identifies the screen, its EN text gives its width to the banner */
+[data-theme="eva"] #topbar:has(#alert-banner:not([hidden])):has(#back-live:not([hidden])) .title { font-size: 0; gap: 0; }
 [data-theme="eva"] .k-v, [data-theme="eva"] .w-v, [data-theme="eva"] .badge { font-family: var(--display); }
 [data-theme="eva"] .k-v { font-size: 24px; font-weight: 700; }
 [data-theme="eva"] .w-v { font-size: 26px; font-weight: 700; }
@@ -55,9 +57,10 @@
   background-size: 56px 100%; background-repeat: no-repeat;
   padding-left: 68px; font-family: var(--display); font-size: 16px; letter-spacing: 0.06em;
   clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  --banner-min: 380px; /* stripes + tag + count + first alert name over two lines */
 }
 [data-theme="eva"] #alert-banner::before {
-  content: '\8B66\544A'; font: 900 16px var(--ja); color: var(--warn); background: #000;
+  content: '\8B66\544A'; font: 900 16px/17px var(--ja); color: var(--warn); background: #000;
   padding: 0 var(--s2); margin-right: var(--s3);
 }
 
@@ -85,6 +88,9 @@
 }
 [data-theme="eva"] .h-ja { display: inline; font: 900 15px var(--ja); color: var(--accent); letter-spacing: 0.04em; }
 [data-theme="eva"] .h-t { font: 700 15px var(--display); letter-spacing: 0.08em; color: var(--text); }
+/* on narrow headers the info slot gives way (ellipsis, full text in DOM) so a STALE tag is never clipped */
+[data-theme="eva"] .panel > h2 .h-r { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+[data-theme="eva"] .panel > h2 > :not(.h-r), [data-theme="eva"] .panel > h2::after { flex-shrink: 0; }
 
 /* status badges: chamfered tags */
 [data-theme="eva"] .st { clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%); letter-spacing: 0.08em; }
@@ -100,6 +106,7 @@
 [data-theme="eva"] .lg-in { background: #4fe0b0; }
 [data-theme="eva"] .globe-wrap { background: #000; }
 .glabel { pointer-events: none; transition: opacity 0.2s; }
+.glabel-hidden { visibility: hidden; } /* screen-space label thinning in globe.js */
 .glabel span {
   position: relative; left: 10px; display: inline-block; white-space: nowrap;
   font: 600 13px/16px var(--display); letter-spacing: 0.08em;
