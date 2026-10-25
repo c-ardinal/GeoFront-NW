@@ -1,6 +1,6 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
-import { $, el, vmap, scalar, jstClock, REDUCED_MOTION, LARGE } from './util.js';
+import { $, el, vmap, scalar, jstClock, REDUCED_MOTION, LARGE, WALLBOARD } from './util.js';
 import { promQuery, promRange, promAlerts, lokiRange, lokiMetric, flattenStreams } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
@@ -32,7 +32,7 @@ function applyTheme(name, persist) {
 
 // ---- state ----------------------------------------------------------------------------------
 // seen* keep rows that disappear from Prometheus (target down) visible as UNKNOWN instead of vanishing.
-const state = { promOkAt: 0, lokiOkAt: 0, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
+const state = { promOkAt: -Infinity, lokiOkAt: -Infinity, promOkWall: 0, dataAgeAtOk: 0, waitFresh: false, saidMode: null, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
 
 // ---- navigation: every "open related data" action goes through here ------------------------------
 // Each drawer view carries its own globe selection; it is (re)applied whenever that view is shown,
@@ -110,7 +110,8 @@ const Q = {
   tDur: 'scrape_duration_seconds',
   tAge: 'time() - timestamp(up)',
   // timestamp() must wrap the raw selector to get sample times; `and up == 1` keeps UP targets only
-  freshUp: 'max(time() - (timestamp(up) and up == 1))',
+  // newest successful scrape: the age of the freshest data on screen, measured by Prometheus (no browser clock involved)
+  freshMin: 'min(time() - (timestamp(up) and up == 1))',
   alloyRx: 'sum(rate(loki_source_syslog_entries_total[1m]))',
   lokiRx: 'sum(rate(loki_distributor_lines_received_total[1m]))',
 };
@@ -156,7 +157,7 @@ async function pollProm() {
   const flowsOk = targets.some((t) => t.job === 'flows' && t.up === 1 && t.age < FLOW_MAX_AGE_S);
   state.snap = {
     at: Date.now(), m, flowsOk, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
-    freshUp: scalar(res.freshUp), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
+    freshMin: scalar(res.freshMin), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx),
   };
   const s = state.snap;
@@ -184,8 +185,14 @@ async function pollLoki() {
 
 async function poll() {
   const [p, l] = await Promise.allSettled([pollProm(), pollLoki()]);
-  const now = Date.now();
-  if (p.status === 'fulfilled') { state.promOkAt = now; state.promErr = null; } else state.promErr = String(p.reason);
+  const now = mono();
+  if (p.status === 'fulfilled') {
+    state.promOkAt = now; state.promOkWall = Date.now(); state.promErr = null;
+    // data age at this success, measured by Prometheus itself (no browser/host clock skew): newest sample of any UP target
+    state.dataAgeAtOk = Math.max(0, Number.isFinite(state.snap?.freshMin) ? state.snap.freshMin : 0);
+    armDeadman();
+    state.waitFresh = false; // only a successful metrics update ends the resume guard
+  } else state.promErr = String(p.reason);
   if (l.status === 'fulfilled') { state.lokiOkAt = now; state.lokiErr = null; } else state.lokiErr = String(l.reason);
   updateHealth();
   // header info slots may be cut to an ellipsis on narrow panels: the full text stays available as a tooltip
@@ -193,35 +200,69 @@ async function poll() {
   if (state.snap) UI.refreshViews(ctx());
 }
 const ctx = () => {
-  const now = Date.now();
+  const now = mono();
   return { snap: state.snap, nav, seenIf: state.seenIf, seenWlan: state.seenWlan,
     promStale: now - state.promOkAt > STALE_AFTER_MS || !!state.promErr, lokiStale: now - state.lokiOkAt > STALE_AFTER_MS || !!state.lokiErr };
 };
 
+// ---- freshness (NFR-05 / NFR-10) -----------------------------------------------------------------
+// One badge: state word + icon + colour, and the data age. LIVE: last successful metrics update at most one poll cycle
+// late; DEGRADED: one cycle late, or some source failing (logs, flows, a DOWN target); STALE: two cycles without success.
+// Times are monotonic (performance.now) and the age adds Prometheus' own sample age, so clock skew cannot distort it.
+// Dead-man switch: every successful update restarts a CSS animation that reveals a STALE overlay after two cycles +
+// margin; it runs on the compositor, so a stalled / throttled / frozen script can never leave "LIVE" on screen.
+const mono = () => performance.now();
+const DEGRADED_AFTER_MS = POLL_MS + 3000; // one cycle + request latency
+const DEADMAN_MS = STALE_AFTER_MS + 5000;
+function armDeadman() {
+  const b = $('badge');
+  b.style.setProperty('--deadman', `${DEADMAN_MS}ms`);
+  b.dataset.arm = b.dataset.arm === 'a' ? 'b' : 'a'; // switching between two identical keyframes restarts the timer
+}
 function updateHealth() {
-  const now = Date.now();
-  const promStale = now - state.promOkAt > STALE_AFTER_MS;
+  const now = mono();
+  const promLate = now - state.promOkAt;
+  const promStale = promLate > STALE_AFTER_MS;
   const lokiStale = now - state.lokiOkAt > STALE_AFTER_MS;
   const flowStale = state.snap ? !state.snap.flowsOk : false;
   for (const id of PROM_PANELS) $(id).classList.toggle('stale', promStale || (flowStale && FLOW_PANELS.includes(id)));
   for (const id of LOKI_PANELS) $(id).classList.toggle('stale', lokiStale);
-  $('k-targets').classList.toggle('stale', promStale);
-  $('kpis').classList.toggle('stale', promStale);
-  const badgeEl = $('badge');
-  let mode = 'LIVE';
-  if (promStale) mode = 'STALE';
-  else if (lokiStale || state.promErr || state.lokiErr || flowStale) mode = 'DEGRADED';
-  badgeEl.textContent = mode;
-  badgeEl.className = `badge badge-${mode.toLowerCase()}`;
-  badgeEl.title = [state.promErr, state.lokiErr, flowStale && 'flow source DOWN'].filter(Boolean).join(' / ') || 'all sources OK';
-  const last = Math.min(state.promOkAt || 0, state.lokiOkAt || 0);
-  $('age').textContent = last ? `${Math.round((now - last) / 1000)}s AGO` : 'NEVER';
+  const s = state.snap;
+  const reasons = [
+    state.promErr && `metrics: ${state.promErr}`, promStale ? 'metrics: no update for 2 cycles' : promLate > DEGRADED_AFTER_MS && 'metrics: update late',
+    state.lokiErr && `logs: ${state.lokiErr}`, lokiStale && !state.lokiErr && 'logs: no update for 2 cycles',
+    flowStale && 'flow source DOWN', s?.down.length && `targets DOWN: ${s.down.join(', ')}`,
+  ].filter(Boolean);
+  const mode = promStale || state.waitFresh ? 'STALE' : reasons.length ? 'DEGRADED' : 'LIVE';
+  const age = Number.isFinite(state.promOkAt) ? Math.max(0, promLate / 1000 + state.dataAgeAtOk) : null;
+  const b = $('badge');
+  b.classList.remove('badge-live', 'badge-degraded', 'badge-stale');
+  b.classList.add(`badge-${mode.toLowerCase()}`);
+  b.querySelector('.b-long').textContent = mode;
+  b.querySelector('.b-short').textContent = BADGE_SHORT[mode];
+  b.querySelector('.b-age').textContent = age === null ? '—' : fmtAge(age);
+  b.title = [`data age ${age === null ? 'unknown' : fmtAge(age)}`,
+    state.promOkWall ? `last metrics update ${jstClock.format(new Date(state.promOkWall))} JST` : 'no successful update yet',
+    ...(reasons.length ? reasons : ['all sources OK'])].join(' · ');
+  // screen readers hear state changes only (with their reasons), never the ticking age
+  const said = reasons.length && mode !== 'STALE' ? `${mode}: ${reasons.join('; ')}` : mode;
+  if ($('badge-sr').textContent !== said && mode !== state.saidMode) { $('badge-sr').textContent = said; state.saidMode = mode; }
 }
+const BADGE_SHORT = { LIVE: 'LIVE', DEGRADED: 'DEGR', STALE: 'STALE' };
+const fmtAge = (sec) => (sec < 60 ? `${Math.floor(sec)}s` : sec < 3600 ? `${Math.floor(sec / 60)}m` : `${Math.min(99, Math.floor(sec / 3600))}h`);
 
 function tickClock() {
+  if (document.hidden) return; // nothing to tick for a hidden tab (the dead-man switch keeps its own time)
   $('clock').textContent = jstClock.format(new Date());
   updateHealth();
 }
+// back from hidden / frozen: the values on screen may be old: STALE until the first fresh fetch, which starts now
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  state.waitFresh = true;
+  tickClock();
+  poll();
+});
 
 // ---- screen tiers --------------------------------------------------------------------------------
 // LARGE screens: the page is CSS-zoomed moderately (<= ZOOM_MAX) so it reads from a distance, while the zoomed layout
@@ -280,6 +321,10 @@ $('theme-toggle').addEventListener('click', () => {
   poll();
 });
 UI.initUi({ onClear: () => { G.setSelection(null); G.resetView(); }, onView: applyViewSelection });
+// the alert banner is the way into the firing alerts: their full list on the wallboard, the alerts tab / panel below it
+const openAlerts = () => (WALLBOARD.matches ? UI.openModal(M.alertsModal()) : UI.selectTab('alert'));
+$('alert-banner').addEventListener('click', openAlerts);
+$('alert-banner').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAlerts(); } });
 G.initGlobe({ onDest: (key) => { const [cc, city] = key.split('|'); nav.dest({ cc, city }); }, onInteract: () => UI.touched() });
 wirePanelTitles();
 boot();

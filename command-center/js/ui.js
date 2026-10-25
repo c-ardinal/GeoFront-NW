@@ -1,6 +1,6 @@
 // View modes (WALLBOARD / INVESTIGATE), modal, detail drawer with breadcrumbs, idle auto-return.
 // A view is { title, src: 'prom'|'loki'|'both', mount(body), update(ctx) }; update() runs on open and after every poll.
-import { $, el, REDUCED_MOTION, uiZoom } from './util.js';
+import { $, el, REDUCED_MOTION, uiZoom, WALLBOARD } from './util.js';
 
 const params = new URLSearchParams(location.search);
 // Auto-return to WALLBOARD after this much idle time. `?idle=<seconds>` shortens it for scripted tests only.
@@ -25,8 +25,6 @@ export function initUi(h) {
 export const mode = () => (st.modal || st.stack.length || st.selection || st.touched ? 'INVESTIGATE' : 'WALLBOARD');
 function updateMode() {
   const m = mode();
-  $('mode').textContent = m;
-  $('mode').className = `mode mode-${m.toLowerCase()}`;
   $('back-live').hidden = m === 'WALLBOARD';
   document.body.dataset.mode = m.toLowerCase();
   hooks.onModeChange(m);
@@ -162,11 +160,9 @@ export function clearAll() {
 }
 
 // ---- top bar: priority fit ---------------------------------------------------------------------------
-// When the bar does not fit on one row (title + banner at its min width + status), steps are applied in order until it
-// does: low-priority items move into the "⋯" menu (still readable / usable there), labels get shorter. Never applied:
-// DEMO, LIVE/STALE badge, alert count, BACK TO LIVE (only shortened to its icon, with label + tooltip).
-const BAR_STEPS = [['move', 'k-clock'], ['move', 'k-age'], ['move', 'k-targets'], ['cls', 'bar-s-demo'], ['move', 'k-mode'], ['cls', 'bar-s-lead'],
-  ['cls', 'bar-s-title'], ['move', 'theme-toggle'], ['cls', 'bar-s-notitle'], ['cls', 'bar-s-back'], ['cls', 'bar-s-tight']];
+// When the bar does not fit on one row (title + banner at its min width + status), compaction steps are applied in
+// order until it does; no status item ever leaves the bar (the "⋯" menu holds settings only).
+const BAR_STEPS = ['bar-s-labels', 'bar-s-demo', 'bar-s-lead', 'bar-s-title', 'bar-s-tight', 'bar-s-notitle', 'bar-s-back'];
 export function initTopbar() {
   const bar = document.querySelector('.bar-main');
   const status = document.querySelector('.status');
@@ -174,62 +170,55 @@ export function initTopbar() {
   const wrap = document.querySelector('.bar-more');
   const menu = $('bar-menu');
   const btn = $('bar-more');
-  const homes = new Map(); // id -> placeholder comment at the item's place in the bar
-  for (const [kind, id] of BAR_STEPS) if (kind === 'move') { const c = document.createComment(id); $(id).before(c); homes.set(id, c); }
+  const banner = $('alert-banner');
+  const top = $('topbar');
   // one row = every box starts above the bottom of the shortest one (items of different heights still share a row)
   const oneRow = (nodes) => {
-    const rs = nodes.filter((k) => k.offsetParent && k.getBoundingClientRect().height).map((k) => k.getBoundingClientRect());
+    const rs = nodes.filter((k) => k.offsetParent && k.getBoundingClientRect().height > 4 && getComputedStyle(k).position !== 'absolute') // not the sr-only live region
+      .map((k) => k.getBoundingClientRect());
     const minBottom = Math.min(...rs.map((r) => r.bottom));
     return rs.every((r) => r.top < minBottom - 1);
   };
-  const banner = $('alert-banner');
-  // ... and the banner keeps room for its counts plus a readable part of the first alert name
-  const fits = () => bar.scrollWidth <= bar.clientWidth + 1 && oneRow([title, status]) && oneRow([...status.children])
-    && (banner.hidden || banner.scrollWidth <= banner.clientWidth + 1);
-  const top = $('topbar');
-  const isOn = ([kind, id]) => (kind === 'cls' ? top.classList.contains(id) : $(id).parentElement === menu);
-  // apply exactly the first n steps; only items whose placement changes are moved (in step order, so the menu keeps it)
-  const setTo = (n) => {
-    for (let i = BAR_STEPS.length - 1; i >= n; i--) {
-      const [kind, id] = BAR_STEPS[i];
-      if (!isOn(BAR_STEPS[i])) continue;
-      if (kind === 'cls') top.classList.remove(id); else homes.get(id).after($(id));
-    }
-    for (let i = 0; i < n; i++) {
-      const [kind, id] = BAR_STEPS[i];
-      if (isOn(BAR_STEPS[i])) continue;
-      if (kind === 'cls') top.classList.add(id); else menu.appendChild($(id));
-    }
-    wrap.hidden = n === 0;
+  // ... and the room for the banner (counts + a readable part of the names) is reserved whether or not an alert is
+  // firing, so an alert appearing never re-compacts the bar and moves its items (below 1280 the banner has its own row)
+  const bannerRoom = (slack) => {
+    if (!WALLBOARD.matches) return true;
+    const cs = getComputedStyle(bar);
+    const free = bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - title.offsetWidth - status.offsetWidth - 2 * parseFloat(cs.columnGap);
+    return free >= (parseFloat(getComputedStyle(banner).getPropertyValue('--banner-need')) || 0) + slack;
   };
+  // the row of title + status must fit too (below 1280 the banner sits on its own row)
+  const rowRoom = () => { const cs = getComputedStyle(bar); return bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - title.offsetWidth - status.offsetWidth - parseFloat(cs.columnGap); };
+  const fits = () => rowRoom() >= 0 && bannerRoom(0) && oneRow([title, status]) && oneRow([...status.children]);
+  const setTo = (n) => BAR_STEPS.forEach((c, i) => top.classList.toggle(c, i < n)); // class changes only: focus is never lost
+  // The stage is a pure function of bar width, theme, tier and mode (BACK TO LIVE shown): it is computed once per
+  // combination (always from stage 0 up, no hysteresis) and reused. Banner text, alerts, ages and states never enter it,
+  // so they cannot re-compact the bar and move its items. Web fonts finishing loading invalidate the cache.
+  const cache = new Map();
   let queued = false;
   let applied = 0;
-  let dirty = true; // content may need less room (new banner text, an item hidden); width growth is detected below
-  let lastW = 0;
+  let lastKey = null;
   const fit = () => {
     queued = false;
-    const focused = document.activeElement;
-    let n = applied;
-    if (!fits()) { while (n < BAR_STEPS.length && !fits()) setTo(++n); }
-    else if (dirty || bar.clientWidth > lastW) { // room may have grown: drop steps while it still fits
-      while (n > 0) { setTo(n - 1); if (fits()) n--; else { setTo(n); break; } }
-    }
-    dirty = false;
-    lastW = bar.clientWidth;
-    if (n !== applied) closeMenu(); // the button moved / the menu content changed
+    const key = [bar.clientWidth, document.documentElement.dataset.theme, WALLBOARD.matches, $('back-live').hidden].join('|');
+    if (key === lastKey) return;
+    lastKey = key;
+    let n = cache.get(key);
+    if (n === undefined) {
+      n = 0;
+      setTo(0);
+      while (n < BAR_STEPS.length && !fits()) setTo(++n);
+      cache.set(key, n);
+    } else setTo(n);
+    if (n !== applied) closeMenu(); // the button may have moved
     applied = n;
-    // a moved element loses focus: give it back (e.g. THEME focused inside the menu)
-    if (focused && focused !== document.activeElement && focused.isConnected) {
-      // still visible: focus it again; it now sits in the closed menu: the "⋯" button that reopens it takes the focus
-      (focused.closest('#bar-menu[hidden]') ? btn : focused).focus({ preventScroll: true });
-    }
   };
   const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(fit); } };
-  const scheduleDirty = () => { dirty = true; schedule(); };
   const ro = new ResizeObserver(schedule);
-  for (const n of [bar, status, $('alert-banner')]) ro.observe(n);
-  new MutationObserver(scheduleDirty).observe(banner, { childList: true, attributes: true, attributeFilter: ['hidden'] }); // new alert text, same box size
-  new MutationObserver(scheduleDirty).observe($('back-live'), { attributes: true, attributeFilter: ['hidden'] });
+  for (const n of [bar, status, banner]) ro.observe(n);
+  new MutationObserver(schedule).observe($('back-live'), { attributes: true, attributeFilter: ['hidden'] });
+  new MutationObserver(schedule).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  document.fonts?.addEventListener('loadingdone', () => { cache.clear(); lastKey = null; schedule(); });
   window.addEventListener('resize', () => { schedule(); closeMenu(); });
   btn.addEventListener('click', () => (menu.hidden ? openMenu() : closeMenu()));
   document.addEventListener('click', (e) => { if (!menu.hidden && !wrap.contains(e.target) && !menu.contains(e.target)) closeMenu(); });
@@ -255,6 +244,8 @@ function closeMenu() {
   $('bar-more').setAttribute('aria-expanded', 'false');
 }
 export const menuOpen = () => !$('bar-menu').hidden;
+
+export let selectTab = () => {};
 
 // ---- panel groups as tabs (tablet landscape side column, phone bottom bar; CSS hides .tab-off only there) ----------
 // Buttons carrying data-tab (tab bar, phone summary cards, status-bar alert chip) select a group.
@@ -284,6 +275,7 @@ export function initTabs(onChange) {
     const b = e.target.closest('button[data-tab]');
     if (b) select(b.dataset.tab, true);
   });
+  selectTab = (name) => select(name, true);
   select('sum', false);
 }
 

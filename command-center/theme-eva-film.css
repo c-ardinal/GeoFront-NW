@@ -54,9 +54,6 @@
   display: inline-block; grid-row: span 2; font: 800 26px/26px var(--ja); color: var(--text); letter-spacing: 0.02em;
   transform: var(--tall); margin-top: 4px;
 }
-/* alert + INVESTIGATE: the kanji title alone identifies the screen, its EN/code lines give their width to the banner */
-[data-theme="eva-film"] #topbar:has(#alert-banner:not([hidden])):has(#back-live:not([hidden])) .title { font-size: 0; column-gap: 0; }
-[data-theme="eva-film"] #topbar:has(#alert-banner:not([hidden])):has(#back-live:not([hidden])) .title::after { display: none; }
 [data-theme="eva-film"] .title::after { content: 'CMD-07 // NODE WATCH SYSTEM'; font: 500 13px/14px var(--display); letter-spacing: 0.2em; color: var(--text-2); }
 [data-theme="eva-film"] .k-v, [data-theme="eva-film"] .w-v, [data-theme="eva-film"] .badge,
 [data-theme="eva-film"] .row .c.n, [data-theme="eva-film"] #clock, [data-theme="eva-film"] #age { font-family: var(--display); }
@@ -74,12 +71,12 @@
   background-size: 48px 100%; background-repeat: no-repeat;
   padding-left: 58px; font: 600 16px/17px var(--display); letter-spacing: 0.06em;
   clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
-  --banner-min: 380px; /* stripes + hex tag + count + first alert name over two lines */
+  --banner-need: 540px; /* stripes + hex tag + counts + a readable part of the names */
 }
 /* Oswald sits ~1.5 px low in its 17 px line: lift the counts and names to the optical centre of the band */
 [data-theme="eva-film"] #alert-banner :is(.tk-lead, .tk-view) { position: relative; top: -1px; }
 [data-theme="eva-film"] #alert-banner::before {
-  content: '\8B66\5831'; display: inline-block; flex: none; font: 800 16px/17px var(--ja); color: var(--warn); background: #000;
+  content: '\8B66\5831'; display: inline-block; flex: none; font: 800 16px/17px var(--ja); color: var(--warn); background: #000; transform: var(--tall); /* 長体 like the headings */
   padding: 0 14px; margin-right: var(--s3);
   clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 8px 100%, 0 50%);
 }
@@ -215,14 +212,15 @@
 [data-theme="eva-film"] body.red-alert #p-alerts::after {
   content: '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 '
            '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 ' / '';
-  /* text centred in the red field under the 8 px hazard stripe (1 px bottom pad: the Mincho ink sits low in its box) */
-  position: absolute; left: var(--s3); bottom: 0; width: max-content; height: 36px; padding-bottom: 1px; display: flex; align-items: center; z-index: 2; white-space: pre; pointer-events: none;
-  font: 800 22px/1 var(--ja); letter-spacing: 0.12em; color: #fff;
+  /* text centred in the red field under the 8 px hazard stripe (2 px bottom pad: the elongated Mincho ink sits low in its box) */
+  position: absolute; left: var(--s3); bottom: 0; width: max-content; height: 36px; padding-bottom: 2px; display: flex; align-items: center; z-index: 2; white-space: pre; pointer-events: none;
+  /* signature type: heavy Mincho for 警報 and its Latin glyphs for ALERT, drawn ~35 % taller than wide (長体) */
+  font: 800 22px/1 var(--ja); letter-spacing: 0.14em; color: #fff; transform: scaleY(1.35);
   animation: film-scroll 18s linear infinite;
 }
 [data-theme="eva-film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
 @keyframes film-band { 50% { background-color: #7a0804; } }
-@keyframes film-scroll { to { transform: translateX(-50%); } }
+@keyframes film-scroll { from { transform: scaleY(1.35); } to { transform: translateX(-50%) scaleY(1.35); } }
 
 [data-theme="eva-film"] #theme-toggle { border-color: var(--accent); color: var(--text); font-family: var(--display); }
 
@@ -249,10 +247,6 @@
 [data-theme="eva-film"] #tabs button { font: 800 17px var(--ja); letter-spacing: 0.1em; color: var(--accent); background: #000; border-color: var(--frame); }
 [data-theme="eva-film"] #tabs button[aria-current="true"] { color: #000; background: var(--accent); border-color: var(--accent); box-shadow: none; }
 [data-theme="eva-film"] #tabs b:not(:empty) { font-family: var(--display); }
-[data-theme="eva-film"] .kpi { border-color: var(--frame); box-shadow: inset 0 3px 0 var(--accent); }
-[data-theme="eva-film"] .kpi b { font: 700 30px var(--display); }
-[data-theme="eva-film"] .kpi-l { font-family: var(--display); letter-spacing: 0.1em; }
-[data-theme="eva-film"] .k-alerts { font-family: var(--display); }
 /* the latitude scale needs a tall globe (top 196 px + 400 px) */
 @media (max-width: 1279px) {
   [data-theme="eva-film"] #p-globe::after { display: none; }

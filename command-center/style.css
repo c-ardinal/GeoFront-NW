@@ -39,6 +39,7 @@
   --st: 76px;
   --fs: 14px;
   --fs-s: 13px;
+  --banner-need: 420px; /* room kept for the alert banner (counts + part of the names), firing or not */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -63,7 +64,7 @@ ul { list-style: none; }
 /* banner: one line; the count stays put and the alert names scroll as a ticker when they do not all fit (util.js
    setTicker), so no firing alert name is ever cut off. min-width reserves room; the status row tightens its gaps */
 #alert-banner {
-  flex: 1; min-width: var(--banner-min, 240px); font: 600 var(--fs)/17px var(--sans); letter-spacing: 0.04em;
+  flex: 1; min-width: var(--banner-need); font: 600 var(--fs)/17px var(--sans); letter-spacing: 0.04em;
   color: #fff; background: var(--banner); padding: var(--s1) var(--s3);
   overflow: hidden; display: flex; align-items: center; white-space: nowrap;
 }
@@ -85,7 +86,6 @@ ul { list-style: none; }
 .tk-wrap .tk-item { overflow-wrap: anywhere; }
 @keyframes tk-loop { to { transform: translateX(-50%); } }
 .status { margin-left: auto; display: flex; align-items: center; gap: var(--s4); white-space: nowrap; }
-#topbar:has(#alert-banner:not([hidden])) .status { gap: var(--s2); }
 /* priority fit (ui.js initTopbar): steps applied while the bar does not fit on one row; moved items live in #bar-menu */
 .bar-more[hidden], .bar-menu[hidden] { display: none; }
 #bar-more { min-width: 32px; height: 28px; font: 600 18px/1 var(--sans); color: var(--text); background: transparent; border: 1px solid var(--frame); cursor: pointer; }
@@ -103,32 +103,49 @@ ul { list-style: none; }
 #topbar.bar-s-notitle .title { display: none; }
 #topbar.bar-s-back .bl-text { display: none; }
 #topbar.bar-s-back #back-live { min-width: 32px; }
-#topbar.bar-s-lead :is(.tk-tag, .tk-total) { display: none; } /* banner keeps "N CRIT/WARN:" + the names; the total stays on the chip / list header */
-#topbar.bar-s-tight .status { gap: var(--s1); }
-#topbar.bar-s-tight .badge { padding-inline: var(--s2); letter-spacing: 0.04em; }
+#topbar.bar-s-lead :is(.tk-tag, .tk-total) { display: none; } /* banner keeps "N CRIT/WARN:" + the names; the total is on the alerts list header */
+#topbar.bar-s-labels .kv-l { display: none; } /* "JST" word: the HH:MM:SS clock reads as a clock */
+#topbar.bar-s-tight .status { gap: var(--s2); }
+#topbar.bar-s-tight .badge { padding-inline: var(--s1); letter-spacing: 0.02em; width: 7.2em; } /* "▲ DEGR 59m" */
+#topbar.bar-s-tight .badge :is(.b-long) { display: none; }
+#topbar.bar-s-tight .badge .b-short { display: inline; }
 #topbar.bar-s-tight .demo-label { padding-inline: var(--s1); }
+/* live values sit in fixed-width slots: a changing digit count or state word never moves their neighbours */
+#clock { display: inline-block; min-width: 8ch; text-align: right; }
+.tk-n { display: inline-block; min-width: 2ch; text-align: right; }
+.badge .b-short { display: none; }
+.badge .b-age { display: inline-block; min-width: 3ch; text-align: right; }
 .kv { color: var(--text-2); }
 .kv b { color: var(--text); font-weight: 600; }
-#theme-toggle { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em; color: var(--text-2); background: transparent; border: 1px solid var(--frame); padding: 2px var(--s2); cursor: pointer; }
+#theme-toggle { min-width: 12ch; font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em; color: var(--text-2); background: transparent; border: 1px solid var(--frame); padding: 2px var(--s2); cursor: pointer; }
 #theme-toggle:hover, #theme-toggle:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
 .demo-label { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.06em; color: #111; background: var(--warn); padding: 2px var(--s2); }
-.badge { font: 600 var(--fs) var(--sans); letter-spacing: 0.1em; padding: 1px var(--s3); border: 1px solid currentColor; min-width: 112px; text-align: center; }
+/* freshness: state + age of the last successful update in one fixed-width badge (details in its tooltip) */
+.badge { font: 600 var(--fs) var(--sans); letter-spacing: 0.08em; padding: 1px var(--s3); border: 1px solid currentColor; width: 10.5em; text-align: center; white-space: nowrap; } /* sized for "▲ DEGRADED 59m": never resizes */
 .badge-live { color: var(--ok); }
 .badge-live::before { content: '\25CF  '; }
 .badge-degraded { color: var(--warn); }
 .badge-degraded::before { content: '\25B2  '; }
 .badge-stale { color: var(--crit); }
 .badge-stale::before { content: '\25A0  '; }
+/* dead-man switch (main.js armDeadman): an opaque STALE layer appears unless a fresh update restarts the timer */
+.badge { position: relative; }
+.b-dead { position: absolute; inset: -2px; display: flex; align-items: center; justify-content: center; color: var(--crit); background: var(--topbar); border: 2px solid var(--crit); opacity: 0; pointer-events: none; }
+.b-dead::before { content: '\25A0\00A0'; }
+#badge:not([data-arm]) .b-dead { opacity: 1; } /* nothing fetched yet */
+#badge[data-arm="a"] .b-dead { animation: deadman-a var(--deadman, 25s) steps(1, end) forwards; }
+#badge[data-arm="b"] .b-dead { animation: deadman-b var(--deadman, 25s) steps(1, end) forwards; }
+@keyframes deadman-a { to { opacity: 1; } }
+@keyframes deadman-b { to { opacity: 1; } }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-/* top-bar status items (the separate KPI strip was removed: every value now lives in exactly one panel) */
 .k-v { font-weight: 600; }
 .k-v.crit, .u.crit, .h-r.crit { color: var(--crit); }
 .u.crit { font-weight: 600; }
 .k-v.warn { color: var(--warn); }
-#k-targets.stale .k-v, #k-targets.stale .u { color: var(--text-2); }
-#k-targets.stale::after { content: ' STALE'; color: #fff; background: var(--stale-tag); font: 600 var(--fs-s) var(--sans); padding: 0 var(--s1); margin-left: var(--s1); }
-.mode { letter-spacing: 0.06em; }
-.mode-investigate { color: var(--warn) !important; }
+#alert-banner { cursor: pointer; }
+#alert-banner:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.bar-menu #theme-toggle { min-height: 32px; }
 #back-live { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.04em; color: var(--text); background: var(--crit-tint); border: 1px solid var(--crit); padding: 2px var(--s2); cursor: pointer; }
 #back-live:hover, #back-live:focus-visible { background: var(--banner); color: #fff; outline: 2px solid var(--text); outline-offset: 1px; }
 
@@ -382,6 +399,11 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+/* not motion: a one-step opacity switch, and the safety net must keep working under reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  #badge[data-arm="a"] .b-dead { animation: deadman-a var(--deadman, 25s) steps(1, end) forwards !important; }
+  #badge[data-arm="b"] .b-dead { animation: deadman-b var(--deadman, 25s) steps(1, end) forwards !important; }
+}
 
 /* ====================================================================================================================
    Screen tiers (spec ch.04). Desktop 1280-2399 is the layout above and is not changed below.
@@ -393,14 +415,13 @@ body.red-alert #topbar { border-top-color: var(--crit); }
      bottom sheet, modal full screen.
    The JS tiers (util.js WALLBOARD / LARGE) use the same queries.
    ==================================================================================================================== */
-#tabs, #kpis, .k-alerts { display: none; }
+#tabs { display: none; }
 
 @media (min-width: 2400px), (min-width: 1280px) and (min-height: 1400px) {
   #p-devices, #p-unknown, #p-wan { flex-shrink: 0; } /* content-sized: never squeezed by the shared-height lists */
   #grid { grid-template-rows: 1fr minmax(220px, 26%); }
   /* firing alerts get a detail line (since / value / summary) and more air instead of a blank panel */
-  #alerts .row { padding: var(--s1) 0; border-bottom: 1px solid var(--track); }
-  #alerts .al-detail { display: block; grid-column: 2 / -1; font-size: var(--fs-s); }
+  #alerts .al-detail { display: block; grid-column: 2 / -1; font-size: var(--fs-s); line-height: var(--row); } /* one more row of the same pitch */
 }
 @media (min-width: 2400px) and (min-aspect-ratio: 21/10) {
   #grid { grid-template-columns: 440px 1fr 440px 640px; grid-template-rows: 1fr; grid-template-areas: "left globe right bottom"; }
@@ -410,7 +431,7 @@ body.red-alert #topbar { border-top-color: var(--crit); }
 
 /* ---- below the wallboard: content-sized panels, page scroll, touch sizes ---- */
 @media (max-width: 1279px) {
-  :root { --hdr: 40px; }
+  :root { --hdr: 36px; --row: 32px; } /* one row pitch for every list of the tier */
   html, body { height: auto; overflow: visible; }
   body { min-height: 100dvh; }
   #topbar { position: sticky; top: 0; z-index: 30; }
@@ -420,23 +441,21 @@ body.red-alert #topbar { border-top-color: var(--crit); }
      row 2 = banner ticker */
   .demo-label { font-size: 0; }
   .demo-label::after { content: 'DEMO'; font-size: var(--fs-s); }
-  .badge { min-width: 0; }
-  .k-alerts { display: inline-flex; align-items: center; gap: var(--s1); min-width: 44px; justify-content: center; font: 600 var(--fs) var(--sans);
-    color: var(--text); background: transparent; border: 1px solid var(--frame); padding: 0 var(--s2); cursor: pointer; }
-  .k-alerts.crit { color: #fff; background: var(--banner); border-color: var(--crit); }
   #alert-banner { order: 3; flex: 1 1 100%; min-width: 0; --tk-min: 64px; }
   #grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: none; }
   #grid > .col, #grid > .bottom { display: contents; }
   #p-globe { grid-area: auto; order: -1; } /* the named area does not exist here (it would open an implicit column) */
   .panel { scroll-margin-top: calc(var(--topbar-h, 56px) + var(--s2)); }
-  /* rows are the tap target themselves: ~40 px, content centred, no padding stacked on top */
-  .row.clickable { height: auto; min-height: 40px; }
-  .log.clickable { min-height: 40px; align-items: center; }
+  /* compact 32 px rows; the >= 44 px touch target comes from an invisible hit area, not from taller rows
+     (neighbouring rows overlap their 6 px margins; the row below wins there) */
+  .row.clickable, .log.clickable { position: relative; }
+  .row.clickable::after, .log.clickable::after { content: ''; position: absolute; inset: -6px 0; }
+  .log.clickable { min-height: var(--row); align-items: center; }
   .panel > h2 .h-t.h-click, .panel > h2 .h-open { align-self: stretch; display: inline-flex; align-items: center; }
   .h-open { position: relative; min-width: 44px; justify-content: center; font-size: 18px; }
-  .h-open::after { content: ''; position: absolute; inset: -6px 0; } /* >= 44 px hit area inside the 40 px header */
+  .h-open::after { content: ''; position: absolute; inset: -6px 0; } /* >= 44 px hit area inside the 36 px header */
   .g-ctl button { width: 44px; height: 44px; }
-  #theme-toggle, #back-live, .k-alerts, .d-btn, .crumb, #bar-more { min-height: 44px; }
+  #theme-toggle, #back-live, .d-btn, .crumb, #bar-more { min-height: 44px; }
   #bar-more, #topbar.bar-s-back #back-live { min-width: 44px; }
   .d-btn { min-width: 44px; }
   #drawer { top: calc(var(--topbar-h, 56px) + var(--s2)); width: min(600px, calc(100vw - 2 * var(--s2))); }
@@ -487,22 +506,8 @@ body.red-alert #topbar { border-top-color: var(--crit); }
   .title { font-size: 0; letter-spacing: 0; }
   .title-ja { display: inline; font: 600 18px var(--sans); letter-spacing: 0.06em; }
   .status { gap: var(--s2); }
-  .tt-k { display: none; }
-  /* "ALERT ■" is said by the red banner itself and the total by the status chip / ALERTS card: room for the names */
+  /* "ALERT ■" is said by the red banner itself and the total by the alerts list header: room for the names */
   .tk-tag, .tk-total { display: none; }
-  /* summary cards */
-  #kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); }
-  .kpi { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: var(--s2); align-items: baseline; min-height: 64px;
-    padding: var(--s2) var(--s3); text-align: left; font: var(--fs) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--frame); cursor: pointer; }
-  .kpi-l { grid-column: 1 / -1; font-size: var(--fs-s); color: var(--text-2); letter-spacing: 0.04em; }
-  .kpi b { font: 600 26px var(--sans); }
-  .kpi .u { margin-left: 0; overflow-wrap: anywhere; }
-  .kpi.crit { border-color: var(--crit); background: var(--crit-tint); }
-  .kpi.crit b { color: var(--crit); }
-  .kpi:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  #kpis.stale { border: 1px dashed var(--crit); }
-  #kpis.stale b { color: var(--text-2) !important; }
-  #kpis.stale::before { content: 'STALE'; grid-column: 1 / -1; font: 600 var(--fs-s) var(--sans); color: #fff; background: var(--stale-tag); padding: 0 var(--s2); }
   /* globe ~300 px, then the selected group */
   #p-globe { height: auto; }
   .globe-wrap { flex: none; height: 300px; }

@@ -21,6 +21,7 @@ export function fitRows(box, rowH) {
 // ---- ticker: must-see text on one line, never silently cut --------------------------------
 // Static when the text fits. When it overflows, two copies scroll as a seamless loop (the copy is aria-hidden, so a
 // live region announces the text once, not per loop; hover/focus pauses it). Reduced motion: the text wraps instead.
+// The ticker never changes the box's focusability or roles: those belong to whoever owns the box.
 const TICKER_PX_S = 60;
 const tickerRO = new ResizeObserver((entries) => entries.forEach((e) => fitTicker(e.target)));
 // lead: strings / nodes shown fixed before the scrolling text (e.g. the counts)
@@ -43,7 +44,6 @@ export function clearTicker(box) {
   tickerRO.unobserve(box);
   delete box.dataset.tk;
   box.classList.remove('ticker', 'ticking', 'tk-wrap');
-  box.removeAttribute('tabindex');
   box.replaceChildren();
 }
 function fitTicker(box) {
@@ -59,7 +59,6 @@ function fitTicker(box) {
   if (!over) {
     box.classList.remove('ticking');
     track.replaceChildren(item);
-    box.removeAttribute('tabindex');
     return;
   }
   if (REDUCED_MOTION) { box.classList.add('tk-wrap'); return; } // stays wrapped until the text changes
@@ -68,7 +67,6 @@ function fitTicker(box) {
   copy.setAttribute('aria-hidden', 'true');
   track.appendChild(copy);
   box.style.setProperty('--tk-dur', `${(item.offsetWidth / TICKER_PX_S).toFixed(1)}s`); // one item incl. loop gap
-  box.tabIndex = 0; // keyboard users can pause it by focusing
 }
 
 export function el(tag, cls, text) {

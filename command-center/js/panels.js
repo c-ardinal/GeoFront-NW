@@ -19,25 +19,15 @@ function capacity(box, base, rowPx) {
   const fit = fitRows(box, rowPx);
   return LARGE.matches ? Math.max(base, fit) : Math.min(base, fit);
 }
-// LARGE: the listed panels of a column keep their natural height (flex-basis) and share the column's spare height in
-// proportion to it (flex-grow); their rows then grow (up to ROW_MAX_PX) into it, so short lists do not leave one blank
-// block at the bottom of a column. Only `shrink` panels (scrolling alerts, capacity-fitted ranking) give height back
-// when the column is too short. items: [panelId, listId, shrink, naturalPx?]; elsewhere the CSS layout applies.
-const ROW_MAX_PX = 33;
+// LARGE: the listed panels of a column keep their natural height (flex-basis). Spare height goes only to the `flex`
+// panels, which turn it into more rows (the capacity-fitted ranking, the scrolling alert list) and give it back when the
+// column is too short; rows never grow taller, so the row pitch stays the same in every panel.
+// items: [panelId, flex, naturalPx?]; elsewhere the CSS layout applies.
 function shareHeight(items) {
-  for (const [pid, bid] of items) {
-    $(bid).style.removeProperty('--row');
-    $(pid).style.flex = LARGE.matches ? '0 0 auto' : '';
-  }
+  for (const [pid] of items) $(pid).style.flex = LARGE.matches ? '0 0 auto' : '';
   if (!LARGE.matches) return;
-  const need = items.map(([pid, , , px]) => px ?? $(pid).offsetHeight);
-  items.forEach(([pid, , shrink], i) => { $(pid).style.flex = `${need[i]} ${shrink ? 1 : 0} ${need[i]}px`; });
-}
-function stretchRows(box) {
-  const n = box.children.length;
-  box.style.removeProperty('--row');
-  if (!LARGE.matches || !n) return;
-  box.style.setProperty('--row', `${Math.min(ROW_MAX_PX, Math.max(ROW_PX, Math.floor(fitRows(box, 1) / n)))}px`);
+  const need = items.map(([pid, , px]) => px ?? $(pid).offsetHeight);
+  items.forEach(([pid, flex], i) => { $(pid).style.flex = `${flex ? 1 : 0} ${flex ? 1 : 0} ${need[i]}px`; });
 }
 
 // ---- flows aggregation (shared with modal/drawer views) ------------------------------
@@ -102,17 +92,13 @@ export function renderFlows(snap, nav) {
   const destBox = $('dest');
   const destNeed = destBox.offsetTop + 2 * parseFloat(getComputedStyle(destBox).paddingTop) + 2 + (byCountry.length + 1) * ROW_PX;
   put('src', rankRows(bySrc, total, 'HOST', SRC_TOP + 2, (g) => nav.src(g.key))); // content-sized: measured below
-  shareHeight([['p-dest', 'dest', true, destNeed], ['p-src', 'src', false]]);
+  shareHeight([['p-dest', true, destNeed], ['p-src', false]]);
   put('dest', rankRows(byCountry, total, 'COUNTRY', capacity($('dest'), DEST_TOP + 2, ROW_PX), (g) => nav.dest({ cc: g.key })));
-  stretchRows($('dest'));
-  stretchRows($('src'));
 }
 
 // right column on LARGE screens: interfaces / wireless / alerts share the height
 export function fitRightColumn() {
-  shareHeight([['p-if', 'ifaces', false], ['p-wlan', 'wlan', false], ['p-alerts', 'alerts', true]]);
-  stretchRows($('ifaces'));
-  stretchRows($('wlan'));
+  shareHeight([['p-if', false], ['p-wlan', false], ['p-alerts', true]]);
 }
 
 export function renderDevices(m, nav) {
@@ -132,11 +118,6 @@ export function renderDevices(m, nav) {
   const hr = $('dev-online');
   hr.textContent = known ? `${online} / ${DEVICES.length} online` : `— / ${DEVICES.length} online`;
   hr.classList.toggle('crit', known > 0 && online < DEVICES.length);
-  // phone summary card
-  const down = DEVICES.filter((d) => m.up.get(d) === 0);
-  $('kpi-dev').textContent = known ? `${online}/${DEVICES.length}` : '—';
-  $('kpi-dev-sub').textContent = down.length ? `DOWN: ${down.join(', ')}` : 'online';
-  $('kpi-dev-card').classList.toggle('crit', known > 0 && online < DEVICES.length);
 }
 
 export function drawSpark(id, series, color, stepS) {
@@ -171,8 +152,8 @@ export function wanValues(m) {
 
 export function renderWan(snap) {
   const w = wanValues(snap.m);
-  $('wan-down').textContent = $('kpi-down').textContent = has(w.down) ? Math.round(w.down) : '—';
-  $('wan-up').textContent = $('kpi-up').textContent = has(w.up) ? Math.round(w.up) : '—';
+  $('wan-down').textContent = has(w.down) ? Math.round(w.down) : '—';
+  $('wan-up').textContent = has(w.up) ? Math.round(w.up) : '—';
   drawSpark('spark-down', snap.sDown, cssVar('--spark-1'), 15);
   drawSpark('spark-up', snap.sUp, cssVar('--spark-2'), 15);
   put('wan-foot', [
@@ -251,20 +232,21 @@ export function renderAlerts(alerts, nav) {
   document.body.classList.toggle('red-alert', alarming.length > 0);
   banner.hidden = alarming.length === 0;
   const names = [...new Set(alarming.map((a) => `${a.labels.alertname}${a.labels.instance ? ` (${a.labels.instance})` : ''}`))];
-  // Counts: the banner counts the alarming (critical + warning) alerts it names and adds the total when info alerts
-  // also fire; every other counter (list header, status chip, summary card, tab) is the total of firing alerts.
+  // Counts: the banner counts the alarming (critical + warning) alerts it names plus the total of firing alerts (incl.
+  // info), which the alerts list header and tab also show. Counts sit in fixed-width slots and the prefix keeps one
+  // shape, so 9 -> 10 alerts or an info alert appearing never shifts the names.
   // Every alarming name stays readable: the banner scrolls (ticker) when they do not fit on one line.
-  const total = firing.length > alarming.length ? ` · ${firing.length} total` : '';
-  const lead = [el('span', 'tk-tag', 'ALERT ■ '), `${alarming.length} CRIT/WARN`, el('span', 'tk-total', total), ':'];
+  const total = ` · ${firing.length} total`;
+  const totalEl = el('span', 'tk-total');
+  totalEl.append(' · ', el('span', 'tk-n', firing.length), ' total');
+  const lead = [el('span', 'tk-tag', 'ALERT ■ '), el('span', 'tk-n', alarming.length), ' CRIT/WARN', totalEl, ':'];
   if (alarming.length) setTicker(banner, lead, names.join(' · ')); else clearTicker(banner);
   banner.title = alarming.length ? `ALERT ■ ${alarming.length} CRIT/WARN${total}: ${names.join(' · ')}` : '';
-  const sub = `firing · ${alarming.length} crit/warn`;
-  for (const id of ['kpi-alert-card', 'k-alerts']) $(id).classList.toggle('crit', alarming.length > 0);
-  $('kpi-alert').textContent = firing.length;
-  $('kpi-alert-sub').textContent = sub;
-  $('k-alerts').querySelector('b').textContent = firing.length;
-  $('k-alerts').title = `${firing.length} ${sub} (opens the alerts tab)`;
-  $('k-alerts').setAttribute('aria-label', `${firing.length} ${sub}: open the alerts tab`);
+  // the banner is a button (always focusable while shown: tabindex in the markup); the announcement is a separate
+  // live region, updated only when the alert set changes
+  banner.setAttribute('aria-label', alarming.length ? `${alarming.length} critical or warning alerts firing: ${names.join(', ')}. Open the alert list` : 'No alerts');
+  const said = alarming.length ? `Alert: ${alarming.length} firing: ${names.join(', ')}` : '';
+  if ($('alert-sr').textContent !== said) $('alert-sr').textContent = said;
   $('tab-alert-n').textContent = firing.length || '';
 }
 
@@ -281,15 +263,6 @@ export function renderHealth(snap, nav) {
   rows.push(row([badge('none', ''), cell('log ingest (loki)', 'sub'), cell(''), num(snap.lokiRx, 2), cell('lines/s', 'n sub')]));
   put('health', rows);
 
-  // top status bar: coverage + freshness of UP targets only; DOWN targets are named instead of inflating the age
-  const upAll = [...j.up.values()].reduce((a, b) => a + b, 0);
-  const totAll = [...j.total.values()].reduce((a, b) => a + b, 0);
-  $('k-cover').textContent = totAll ? `${upAll}/${totAll}` : '—';
-  $('k-cover').className = `k-v ${upAll < totAll ? 'warn' : ''}`;
-  const fresh = has(snap.freshUp) ? `max age ${snap.freshUp.toFixed(0)} s` : 'age —';
-  $('k-fresh').textContent = snap.down.length ? `DOWN: ${snap.down.join(', ')}` : fresh;
-  $('k-fresh').className = `u ${snap.down.length ? 'crit' : ''}`;
-  $('k-fresh').title = `${fresh} for up targets${snap.down.length ? `; down: ${snap.down.join(', ')}` : ''}`;
 }
 
 // The five usual levels are always listed; emergency / alert / debug / unrecognised ("other") only when they have
