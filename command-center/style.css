@@ -567,3 +567,67 @@ body.red-alert #topbar { border-top-color: var(--crit); }
   #modal-root { place-items: stretch; }
   #boot pre { font-size: 14px; }
 }
+
+/* ---- PLAYBACK (playback.js): fixed-height control bar under the top bar; phone: a bottom sheet above the tabs ----
+   Fixed widths for every changing text (window, play/pause), so the bar never moves while playing. The data time is
+   shown once, in the banner slot (.tk-pb, fixed width); the badge says PLAYBACK (no age, no dead-man overlay). */
+.pb { flex: 0 0 auto; height: 44px; display: flex; align-items: center; gap: var(--s2); padding: 0 var(--pad-x);
+  background: var(--topbar); border: 1px solid var(--frame); border-left: 4px solid var(--accent); position: relative; z-index: 41; }
+.pb[hidden] { display: none; }
+.pb-tag { flex: none; font: 600 var(--fs) var(--sans); letter-spacing: 0.08em; color: #111; background: var(--accent); padding: 2px var(--s2); }
+.pb-btn, #pb-speed, .pb-fld input { font: 600 var(--fs-s) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--frame);
+  min-height: 32px; padding: 2px var(--s2); white-space: nowrap; }
+.pb-btn { flex: none; cursor: pointer; }
+.pb-btn:hover { border-color: var(--accent); background: var(--hover); }
+:is(.pb-btn, #pb-speed, .pb-fld input, .pb-slider):focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.pb-btn:disabled { color: var(--text-2); border-style: dashed; cursor: not-allowed; background: var(--panel); }
+.pb-range { position: relative; flex: none; }
+.pb-range-btn { width: 17em; text-align: left; font-variant-numeric: tabular-nums; }
+.pb-range-btn::after { content: ' \25BE'; color: var(--text-2); }
+.pb-play { width: 7.4em; text-align: left; }
+.pb-play[data-on="true"] { border-color: var(--accent); color: var(--accent); }
+.pb-ico { display: inline-block; width: 1.4em; text-align: center; }
+.pb-speed-l { flex: none; }
+.pb-slider { flex: 1 1 160px; min-width: 120px; height: 32px; accent-color: var(--accent); cursor: pointer; }
+.pb-live { color: var(--ok); border-color: var(--ok); }
+.pb-status { flex: 0 1 16em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-s); color: var(--text-2); }
+.pb-pop { position: absolute; left: 0; top: calc(100% + 6px); z-index: 56; width: min(360px, calc(100vw - 16px)); display: grid; gap: var(--s2);
+  padding: var(--s3); background: var(--topbar); border: 1px solid var(--accent); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); }
+.pb-pop[hidden] { display: none; }
+.pb-presets { display: flex; gap: var(--s1); }
+.pb-presets .pb-btn { flex: 1; }
+.pb-fld { display: grid; gap: 2px; font-size: var(--fs-s); color: var(--text-2); }
+.pb-fld input { font-weight: 400; color-scheme: dark; }
+.pb-why { min-height: 1.3em; font-size: var(--fs-s); color: var(--warn); }
+.pb-why:empty { display: none; }
+/* freshness badge in playback: same box, its own state word */
+.badge-playback { color: var(--accent); }
+.badge-playback::before { content: '\25B6  '; }
+.badge-playback .b-dead { display: none; }
+/* banner slot in playback: "履歴再生 HH:MM:SS" first (fixed width), then the alerts alarming at that time; neutral when none */
+.tk-pb { display: inline-block; width: 9.4em; margin-right: var(--s2); padding: 0 var(--s1); text-align: center; color: #111; background: var(--accent); font-variant-numeric: tabular-nums; }
+#alert-banner.pb-quiet { color: var(--text); background: var(--topbar); box-shadow: inset 0 0 0 1px var(--accent); }
+body.pb-on #drawer { top: calc(64px + var(--pb-h, 44px) + var(--gap)); }
+
+@media (max-width: 1279px) {
+  .pb { position: sticky; top: var(--topbar-h, 56px); z-index: 29; height: auto; min-height: 52px; flex-wrap: wrap; padding: var(--s1) var(--s2); row-gap: var(--s1); }
+  .pb-btn, #pb-speed, .pb-fld input { min-height: 44px; }
+  .pb-slider { height: 44px; }
+  body.pb-on #drawer { top: calc(var(--topbar-h, 56px) + var(--pb-h, 52px) + var(--s2)); }
+}
+@media (max-width: 767px) {
+  /* bottom sheet above the tab bar: row 1 tag + window, row 2 slider, row 3 play / step / speed, row 4 export / LIVE */
+  .pb { position: fixed; top: auto; left: 0; right: 0; bottom: calc(61px + env(safe-area-inset-bottom, 0px)); z-index: 34;
+    border-width: 2px 0 0; border-top-color: var(--accent); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5); }
+  body.pb-on { padding-bottom: calc(64px + var(--pb-h, 200px) + env(safe-area-inset-bottom, 0px)); }
+  .pb-range { position: static; flex: 1 1 0; min-width: 0; }
+  .pb-range-btn { width: 100%; }
+  .pb-pop { left: var(--s2); right: var(--s2); top: auto; bottom: calc(100% + 6px); width: auto; }
+  .pb-slider { order: 1; flex: 1 1 100%; }
+  .pb-play, #pb-step, .pb-speed-l { order: 2; }
+  .pb-play { flex: 1 1 0; width: auto; }
+  #pb-export, .pb-live { order: 3; flex: 1 1 0; }
+  .pb-status { order: 4; flex: 1 1 100%; white-space: normal; }
+  .pb-status:empty { display: none; }
+  body.pb-on #drawer { top: auto; }
+}

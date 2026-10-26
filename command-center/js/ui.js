@@ -1,6 +1,6 @@
-// View modes (WALLBOARD / INVESTIGATE), modal, detail drawer with breadcrumbs, idle auto-return.
+// View modes (WALLBOARD / INVESTIGATE / PLAYBACK), modal, detail drawer with breadcrumbs, idle auto-return.
 // A view is { title, src: 'prom'|'loki'|'both'|'none', note?, mount(body), update(ctx) }; update() runs on open and after every poll.
-import { $, el, REDUCED_MOTION, uiZoom, WALLBOARD } from './util.js';
+import { $, el, REDUCED_MOTION, uiZoom, WALLBOARD, isPlayback } from './util.js';
 
 const params = new URLSearchParams(location.search);
 // Auto-return to WALLBOARD after this much idle time. `?idle=<seconds>` shortens it for scripted tests only.
@@ -22,10 +22,13 @@ export function initUi(h) {
   updateMode();
 }
 
-export const mode = () => (st.modal || st.stack.length || st.selection || st.touched ? 'INVESTIGATE' : 'WALLBOARD');
+// PLAYBACK outranks the others: it has its own way back (the playback bar's "LIVE に戻る"), Esc / BACK TO LIVE only close
+// views there, and the idle auto-return (INVESTIGATE only) never ends a playback
+export const mode = () => (isPlayback() ? 'PLAYBACK' : st.modal || st.stack.length || st.selection || st.touched ? 'INVESTIGATE' : 'WALLBOARD');
+export const refreshMode = () => updateMode();
 function updateMode() {
   const m = mode();
-  $('back-live').hidden = m === 'WALLBOARD';
+  $('back-live').hidden = m !== 'INVESTIGATE';
   document.body.dataset.mode = m.toLowerCase();
   hooks.onModeChange(m);
 }
@@ -75,7 +78,7 @@ export function openModal(view) {
   if (!st.modal) st.modalOpener = opener();
   st.modal = view;
   $('modal-title').textContent = view.title;
-  document.querySelector('#modal .m-note').textContent = view.note || 'live · IP/MAC masked';
+  document.querySelector('#modal .m-note').textContent = view.note || (isPlayback() ? 'playback · IP/MAC masked' : 'live · IP/MAC masked');
   const body = $('modal-body');
   body.replaceChildren();
   view.mount(body);
@@ -244,7 +247,7 @@ function openMenu() {
   if (mr.left < 8) m.style.right = '8px';
   $('bar-more').setAttribute('aria-expanded', 'true');
 }
-function closeMenu() {
+export function closeMenu() {
   if ($('bar-menu').contains(document.activeElement)) $('bar-more').focus({ preventScroll: true }); // focus never falls into a hidden menu
   $('bar-menu').hidden = true;
   $('bar-more').setAttribute('aria-expanded', 'false');
@@ -288,8 +291,7 @@ export function initTabs(onChange) {
 // ---- live refresh ----------------------------------------------------------------------------
 export function refreshViews(ctx) {
   st.ctx = ctx;
-  if (st.modal) runUpdate(st.modal, $('modal'));
-  if (st.stack.length) runUpdate(st.stack[st.stack.length - 1], $('drawer'));
+  return Promise.all([st.modal && runUpdate(st.modal, $('modal')), st.stack.length && runUpdate(st.stack[st.stack.length - 1], $('drawer'))]);
 }
 async function runUpdate(view, container) {
   const ctx = st.ctx;

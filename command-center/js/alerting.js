@@ -2,7 +2,7 @@
 // repeat; ACK / silence controls (alert drawer); the silence list with create / extend / expire (alerts modal).
 // Sources: Alertmanager's alerts and silences (masked, mask-api /am/), notify-relay's records (Loki {job="notify"}),
 // and /am/ops (are writes allowed: only while the screens are on 127.0.0.1, until an authentication layer exists).
-import { el, has, jstFull, jstHm, fmtDur, maskText } from './util.js';
+import { el, has, jstFull, jstHm, fmtDur, maskText, isPlayback } from './util.js';
 import { amAlerts, amSilences, amOps, notifyLog, createSilence, expireSilence } from './api.js';
 import { section, putIn, tiles, alertKey } from './views-common.js';
 
@@ -76,6 +76,9 @@ export async function pollAlerting() {
 export const NT_KIND = { sent: 'ok', partial: 'warn', acked: 'info', silenced: 'unknown', failed: 'warn', pending: 'none', none: 'none', unknown: 'unknown' };
 // -> { kind, label (fixed slot, <= 4 chars), text, at, next, receivers, until, silence }
 export function notifyState(a, now = Date.now()) {
+  // Alertmanager only knows the present: in playback the state of a past alert is not reconstructed here (the evidence
+  // export carries the notification records of the window)
+  if (isPlayback()) return { kind: 'none', label: '—', text: 'playback: notification state is shown in LIVE only (see the evidence export for the records)' };
   if (AM.ok === null) return { kind: 'none', label: '—', text: 'checking notifications' };
   if (!AM.ok) return { kind: 'unknown', label: '不明', text: 'Alertmanager unavailable: notification state unknown' };
   const am = AM.byKey.get(alertKey(a.labels));
@@ -196,13 +199,15 @@ export function alertOpsSection() {
         { label: st.kind === 'acked' ? 'ACK until (JST)' : 'Silenced until (JST)', value: has(st.until) ? jstFull.format(new Date(st.until)).slice(0, -3) : undefined,
           sub: st.silence ? maskText(String(st.silence.comment || '')) : undefined },
       ]));
-      const w = AM.ops.writable && AM.ok && firing;
+      const pb = isPlayback(); // a past state: nothing to acknowledge or silence now
+      const w = AM.ops.writable && AM.ok && firing && !pb;
       for (const n of [dur.sel, scope.sel, mute]) n.disabled = !w;
       ack.disabled = !w || st.kind === 'acked';
       unmute.hidden = !st.silence;
       unmute.disabled = !w || !ours(st.silence);
       scope.sel.querySelector('option[value="device"]').disabled = !a.labels.instance;
-      note.textContent = !AM.ok ? 'Alertmanager に接続できないため操作できません'
+      note.textContent = pb ? '履歴再生中は操作できません (LIVE に戻ってから操作してください)'
+        : !AM.ok ? 'Alertmanager に接続できないため操作できません'
         : !firing ? '発報中ではないため操作できません (解消済み)'
           : !AM.ops.writable ? `操作できません: ${AM.ops.reason}`
             : st.silence && !ours(st.silence) ? 'この抑止は command-center 以外で作られたため、ここでは解除できません' : '';
@@ -248,9 +253,10 @@ export function silenceSection({ devices, alertNames }) {
   return {
     wrap: s.wrap,
     update() {
-      const w = AM.ops.writable && AM.ok;
+      const pb = isPlayback();
+      const w = AM.ops.writable && AM.ok && !pb;
       for (const c of controls) c.disabled = !w;
-      note.textContent = !AM.ok ? 'Alertmanager に接続できません: 一覧と操作は使えません' : !w ? `操作できません: ${AM.ops.reason}` : '';
+      note.textContent = pb ? '履歴再生中: 下は現在の抑止・確認の一覧です (操作は LIVE で)' : !AM.ok ? 'Alertmanager に接続できません: 一覧と操作は使えません' : !w ? `操作できません: ${AM.ops.reason}` : '';
       note.hidden = !note.textContent;
       const now = Date.now();
       const shown = AM.silences.filter((x) => ['active', 'pending'].includes(x.status?.state)).sort((a, b) => Date.parse(a.endsAt) - Date.parse(b.endsAt));

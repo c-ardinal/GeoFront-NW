@@ -529,7 +529,13 @@ services:
     build:
       context: ./mask-api
       additional_contexts: *python-base
+      args:
+        # this tool's commit, written into evidence exports: OBS_COMMIT=$(git rev-parse --short HEAD) docker compose build
+        OBS_COMMIT: ${OBS_COMMIT:-unknown}
     environment:
+      # evidence export (/evidence/): the Loki retention bounds the playback range; GRAFANA_URL for its version
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
+      GRAFANA_URL: http://grafana:3000
       # silence / ACK writes (the only writes, /am/...) are allowed while the screens are on 127.0.0.1 only
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
       # 1 = also allow them for X-Obs-Role operator / admin, set by an authentication layer in the proxy (caddy/Caddyfile)

@@ -1,6 +1,14 @@
 // Shared helpers: DOM, formatting, masking, list rows, sortable tables and line charts.
 
 export const $ = (id) => document.getElementById(id);
+
+// ---- data time: the one clock every query builder reads -------------------------------------------
+// Live: the wall clock. PLAYBACK: the playback cursor, set by main.js only (playback.js drives it), so every
+// Prometheus / Loki window, instant query (time=) and "N min ago" text is "as of" the same moment.
+let cursorMs = null;
+export const now = () => cursorMs ?? Date.now();
+export const isPlayback = () => cursorMs !== null;
+export function setCursor(ms) { cursorMs = ms === null ? null : Math.round(ms); }
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 export const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 

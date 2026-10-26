@@ -1,6 +1,6 @@
 // Panel-title modals: the full, unabridged data behind each wallboard panel.
 // Every modal reads top-down: summary tiles (is it OK / what stands out) -> charts -> detail list (表 / カード).
-import { el, has, fixed, fmtUptime, fmtBytes, fmtDur, maskIp, maskText, jstFull, sortTable, upState, bar, refocus } from './util.js';
+import { el, has, fixed, fmtUptime, fmtBytes, fmtDur, maskIp, maskText, jstFull, sortTable, upState, bar, refocus, now, isPlayback } from './util.js';
 import { promQuery, lokiLogs, lokiMetric, logqlString } from './api.js';
 import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow, sevKind, FLOW_TEXT, WAN, WAN_NOT_CONFIGURED, wanSel, wanLabel, WLAN, isWlx } from './panels.js';
 import {
@@ -289,7 +289,7 @@ export function wanModal() {
       }
       const w = wanValues(ctx.snap.m);
       const down = pts(ctx.snap.sDown), up = pts(ctx.snap.sUp);
-      const spark = (p, cls) => ({ series: [{ points: p, cls }], step: 15, t0: Date.now() / 1000 - 900, t1: Date.now() / 1000 });
+      const spark = (p, cls) => ({ series: [{ points: p, cls }], step: 15, t0: now() / 1000 - 900, t1: now() / 1000 });
       const uMax = has(w.utilD) || has(w.utilU) ? Math.max(w.utilD ?? 0, w.utilU ?? 0) : undefined;
       const uKind = !has(uMax) ? 'unknown' : uMax >= 90 ? 'crit' : uMax >= 70 ? 'warn' : 'ok';
       putIn(sum, tiles([
@@ -435,12 +435,12 @@ export function alertsModal() {
       s1.body.append(tl, keyLegend(ALERT_KEYS));
       dv = dataView('alerts', [
         { key: 'state', label: 'State' }, { key: 'severity', label: 'Severity' }, { key: 'name', label: 'Alert' }, { key: 'instance', label: 'Instance' },
-        { key: 'ifName', label: 'ifName' }, { key: 'activeAt', label: 'Active since (JST)', fmt: (v) => jstFull.format(new Date(v)) },
+        { key: 'ifName', label: 'ifName' }, { key: 'activeAt', label: 'Active since (JST)', fmt: (v) => (has(v) ? jstFull.format(new Date(v)) : '—') },
         { key: 'dur', label: 'Duration', num: true, fmt: (v) => fmtDur(v) }, { key: 'value', label: 'Value', num: true, fmt: fmtN(2) },
         { key: 'notify', label: 'Notification' }, { key: 'summary', label: 'Summary' },
       ], { key: 'dur', desc: true }, (r) => ({
         title: r.name, sub: [r.instance, r.ifName].filter(Boolean).join(' '), badge: sevKind(r.severity), cls: r.state === 'pending' ? 'card-pending' : '',
-        fields: [['State', r.state], ['Active for', fmtDur(r.dur)], ['Since', jstFull.format(new Date(r.activeAt))], ['Value', fixed(r.value, 2)], ['Notification', r.notify]],
+        fields: [['State', r.state], ['Active for', has(r.dur) ? fmtDur(r.dur) : undefined], ['Since', has(r.activeAt) ? jstFull.format(new Date(r.activeAt)) : undefined], ['Value', fixed(r.value, 2)], ['Notification', r.notify]],
         extra: r.summary ? el('p', 'card-note', r.summary) : null,
       }), (r) => maskText(alertKey(r.raw.labels)));
       sil = silenceSection({ devices: () => DEVICES, alertNames });
@@ -452,7 +452,7 @@ export function alertsModal() {
       const firing = al.filter((a) => a.state === 'firing');
       const cnt = (s) => firing.filter((a) => a.labels.severity === s).length;
       const crit = cnt('critical'), warn = cnt('warning');
-      const longest = al.length ? Math.max(...al.map((a) => (Date.now() - Date.parse(a.activeAt)) / 1000)) : undefined;
+      const longest = al.length ? Math.max(...al.map((a) => (now() - Date.parse(a.activeAt)) / 1000)) : undefined;
       const states = firing.map((a) => notifyState(a));
       const n = (k) => states.filter((x) => x.kind === k).length;
       const muted = n('acked') + n('silenced');
@@ -472,7 +472,7 @@ export function alertsModal() {
         const st = a.state === 'firing' ? notifyState(a) : null;
         return {
           state: a.state, severity: a.labels.severity, name: a.labels.alertname, instance: a.labels.instance, ifName: a.labels.ifName,
-          activeAt: Date.parse(a.activeAt), dur: (Date.now() - Date.parse(a.activeAt)) / 1000, value: Number(a.value), summary: a.annotations.summary, raw: a,
+          activeAt: Date.parse(a.activeAt), dur: (now() - Date.parse(a.activeAt)) / 1000, value: Number(a.value), summary: a.annotations.summary, raw: a,
           notify: st ? [st.label, nextText(st)].filter(Boolean).join(' · ') : undefined,
         };
       }), (r) => ctx.nav.alert(r.raw));
@@ -490,7 +490,9 @@ export function logsModal(init = {}) {
   const f = { host: init.host || '', sev: init.sev || '', text: init.text || '', win: init.win || 900, follow: true };
   let list, count, more, scanNote, sum, chartBox, cs, staleTag, chartNote, entries = [], cursorEnd = null, partial = false, ctxRef, seq = 0, shown = null, chartShown = null;
   const ctok = {};
-  const filterKey = () => `${query()}|${f.win}`; // which filter the lines on screen belong to
+  // which filter (and, in playback, which data time) the lines on screen belong to: a new playback position
+  // invalidates the loaded pages and the "load older" continuation, like a new filter
+  const filterKey = () => `${query()}|${f.win}|${isPlayback() ? now() : 'live'}`;
   const lineId = (x) => `${x.ts}|${x.host}|${x.sev}|${x.line}`;
   // unloaded: nothing on screen belongs to the current filter (first open, load failed, rejected)
   const listState = () => (shown !== filterKey() ? 'unloaded' : !entries.length && partial ? 'loaded-empty-partial' : 'loaded');
@@ -509,8 +511,9 @@ export function logsModal(init = {}) {
     return `{${m.join(',')}}${f.text ? ` |= ${logqlString(f.text)}` : ''}`;
   };
   async function load(reset) {
-    const endNs = reset ? BigInt(Date.now()) * 1000000n : cursorEnd;
-    const startNs = BigInt(Date.now() - f.win * 1000) * 1000000n;
+    if (!reset && shown !== filterKey()) reset = true; // "load older" after the filter / playback time moved: start over there
+    const endNs = reset ? BigInt(now()) * 1000000n : cursorEnd;
+    const startNs = BigInt(now() - f.win * 1000) * 1000000n;
     if (endNs <= startNs) { more.disabled = true; return; }
     const my = ++seq; // a newer filter change supersedes slower, older responses
     let got, res;

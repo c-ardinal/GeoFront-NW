@@ -77,6 +77,21 @@
 		}
 		reverse_proxy mask-api:8000
 	}
+	# Evidence export (mask-api evidence.py): read-only, GET / HEAD only. The zip is assembled by mask-api from its own
+	# masked read paths; it limits the window / rows / lines / bytes / time itself, runs one export at a time and a few
+	# per minute (429). Same Host allowlist as every route of this site.
+	handle /evidence/* {
+		@evidenceWrite not method GET HEAD
+		header @evidenceWrite Content-Type application/json
+		respond @evidenceWrite `\{"status":"error","error":"read-only"\}` 405
+		# above mask-api's export time budget (EVIDENCE_TIME_BUDGET, 60 s): the zip, or its own error, always arrives;
+		# a client that gives up closes the upstream connection and mask-api abandons the export (its slot is freed)
+		reverse_proxy mask-api:8000 {
+			transport http {
+				response_header_timeout 90s
+			}
+		}
+	}
 	redir /grafana /grafana/ 308
 	handle /grafana/* {
 		# Published beyond localhost, every /grafana/ request is first asked of `grafana-guard` (internal network only):

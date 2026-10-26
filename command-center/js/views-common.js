@@ -1,7 +1,7 @@
 // Building blocks shared by modal and drawer views: sections, stat tiles, charts (canvas line charts plus HTML/SVG
 // bars, sparklines, timelines, stacked columns) and the table / card list. Layout order in every view:
 // summary tiles -> charts -> detail list.
-import { el, clickable, lineChart, legend, chartColors, has, fixed, badge, refocus, jstHm, maskText, SEV_KEYS, SEV_LEVELS, SEV_BAD, sevKey } from './util.js';
+import { el, clickable, lineChart, legend, chartColors, has, fixed, badge, refocus, jstHm, maskText, SEV_KEYS, SEV_LEVELS, SEV_BAD, sevKey, now } from './util.js';
 import { promRange, getJson } from './api.js';
 import { sevKind, totalBps, FLOW_TEXT } from './panels.js';
 
@@ -77,7 +77,7 @@ export async function fetchRange(token, queries, secs) {
   const my = (token.seq = (token.seq || 0) + 1);
   const results = await Promise.all(queries.map((x) => promRange(x.q.replaceAll('$RATE', win), secs, step)));
   if (my !== token.seq) return null;
-  const t1 = Date.now() / 1000;
+  const t1 = now() / 1000;
   const series = results.flatMap((res, qi) => res.map((r) => ({ name: queries[qi].name(r.metric), metric: r.metric, qi, points: r.values.map(([t, v]) => [Number(t), Number(v)]) })));
   return { series, step, win, t0: t1 - secs, t1 };
 }
@@ -390,7 +390,7 @@ export async function sevBuckets(token, selector, secs, endS) {
   //    iff that interval overlaps the window, so no edge bucket is dropped and none is counted twice. On the aligned
   //    path the first bucket can begin before the window (ragged edge: reported in `edge`, the tiles stay exact).
   const a = Math.max(1, Math.ceil(secs / 1440));
-  const t1 = Math.ceil(Math.ceil(endS ?? Date.now() / 1000) / a) * a;
+  const t1 = Math.ceil(Math.ceil(endS ?? now() / 1000) / a) * a;
   const t0 = t1 - secs;
   const my = (token.seq = (token.seq || 0) + 1);
   const url = (q, start, end, st) => `/loki/loki/api/v1/query_range?query=${encodeURIComponent(q)}&start=${start}&end=${end}&step=${st}`;

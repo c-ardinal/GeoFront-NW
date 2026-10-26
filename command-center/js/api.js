@@ -1,4 +1,6 @@
 // Read-only access to Prometheus/Loki through the same-origin nginx allowlist (/prom, /loki).
+// Every window ends at now() (util.js): the wall clock live, the playback cursor in PLAYBACK.
+import { now, isPlayback } from './util.js';
 
 export async function getJson(url) {
   const r = await fetch(url, { cache: 'no-store' });
@@ -13,13 +15,28 @@ export async function getJson(url) {
   if (j.status && j.status !== 'success') throw new Error(j.error || 'query failed');
   return j.data;
 }
-export const promQuery = (q) => getJson(`/prom/api/v1/query?query=${encodeURIComponent(q)}`).then((d) => d.result);
+const nowS = () => now() / 1000;
+const nowNs = () => BigInt(now()) * 1000000n;
+// live instant queries stay exactly as before (Prometheus' own "now"); playback pins them to the cursor
+export const promQuery = (q) => getJson(`/prom/api/v1/query?query=${encodeURIComponent(q)}${isPlayback() ? `&time=${nowS().toFixed(3)}` : ''}`).then((d) => d.result);
 export function promRange(q, seconds, step) {
-  const end = Date.now() / 1000;
+  const end = nowS();
   return getJson(`/prom/api/v1/query_range?query=${encodeURIComponent(q)}&start=${end - seconds}&end=${end}&step=${step}`).then((d) => d.result);
 }
 export const promAlerts = () => getJson('/prom/api/v1/alerts').then((d) => d.alerts);
 export const promRules = () => getJson('/prom/api/v1/rules').then((d) => d.groups.flatMap((g) => g.rules));
+// The alert list as of the playback cursor, in the shape of /api/v1/alerts: ALERTS gives name, labels and state,
+// ALERTS_FOR_STATE the activation time. Value and annotations are not stored in the TSDB: left empty (shown as "—").
+export async function promAlertsAt() {
+  const [al, fs] = await Promise.all([promQuery('ALERTS'), promQuery('ALERTS_FOR_STATE')]);
+  const strip = (m) => Object.fromEntries(Object.entries(m).filter(([k]) => k !== '__name__' && k !== 'alertstate'));
+  const key = (m) => JSON.stringify(Object.entries(strip(m)).sort());
+  const since = new Map(fs.map((r) => [key(r.metric), Number(r.value[1])]));
+  return al.map((r) => {
+    const t = since.get(key(r.metric));
+    return { labels: strip(r.metric), state: r.metric.alertstate, activeAt: Number.isFinite(t) ? new Date(t * 1000).toISOString() : undefined, annotations: {} };
+  });
+}
 
 // Loki log query; start/end in ns (strings ok). Returns streams.
 const lokiLogData = (q, { startNs, endNs, limit = 200, direction = 'backward' }) =>
@@ -35,12 +52,12 @@ export function lokiLogs(q, opts) {
   }));
 }
 export function lokiRange(q, seconds, limit) { // raw streams (wallboard feed; unfiltered selector, never partial)
-  const end = BigInt(Date.now()) * 1000000n;
+  const end = nowNs();
   return lokiLogData(q, { startNs: String(end - BigInt(seconds) * 1000000000n), endNs: String(end), limit }).then((d) => d.result);
 }
 // Loki metric query through the allowed query_range path; returns the last point per series.
 export function lokiMetric(q) {
-  const end = Math.floor(Date.now() / 1000);
+  const end = Math.floor(nowS());
   return getJson(`/loki/loki/api/v1/query_range?query=${encodeURIComponent(q)}&start=${end - 60}&end=${end}&step=60`)
     .then((d) => d.result.map((r) => ({ metric: r.metric, value: r.values[r.values.length - 1] })));
 }
@@ -67,9 +84,12 @@ export const createSilence = (body) => amWrite('POST', '/am/api/v2/silences', bo
 export const expireSilence = (id) => amWrite('DELETE', `/am/api/v2/silence/${encodeURIComponent(id)}`);
 // notify-relay's records of sent notifications (one JSON line per alert and receiver)
 export function notifyLog(hours, limit) {
-  const end = BigInt(Date.now()) * 1000000n;
+  const end = nowNs();
   return lokiLogs('{job="notify"}', { startNs: String(end - BigInt(hours * 3600) * 1000000000n), endNs: String(end), limit });
 }
+
+// ---- evidence export (mask-api /evidence/): read-only ----------------------------------------------------------
+export const evidenceInfo = () => amJson('/evidence/info');
 
 // LogQL string literal (backtick raw string cannot contain a backtick, so fall back to escaped quotes).
 export function logqlString(s) {

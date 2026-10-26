@@ -40,7 +40,30 @@
   <div id="bar-menu" class="bar-menu" role="group" aria-label="Settings" hidden>
     <div class="bar-menu-title"><span lang="ja">宅内網監視</span> NETWORK OBSERVATORY</div>
     <button id="theme-toggle" type="button" title="Switch visual theme (layout and data unchanged)">THEME: STD</button>
+    <button id="pb-enter" type="button" lang="ja" title="Play back the screens at a past time (PLAYBACK)">履歴再生 (PLAYBACK)</button>
   </div>
+  <!-- PLAYBACK controls: a fixed-height bar under the top bar (phone: a bottom sheet above the tabs); hidden in LIVE.
+       The data time itself is shown once, in the banner slot ("履歴再生 HH:MM:SS"); here only the window and the slider. -->
+  <section id="playback" class="pb" aria-label="履歴再生の操作" lang="ja" hidden>
+    <span class="pb-tag" aria-hidden="true">履歴再生</span>
+    <div class="pb-range">
+      <button id="pb-range-btn" type="button" class="pb-btn pb-range-btn" aria-expanded="false" aria-controls="pb-pop" title="再生する期間を変える">—</button>
+      <div id="pb-pop" class="pb-pop" role="group" aria-label="再生する期間" hidden>
+        <div id="pb-presets" class="pb-presets" role="group" aria-label="直近"></div>
+        <label class="pb-fld">開始 (JST)<input id="pb-from" type="datetime-local"></label>
+        <label class="pb-fld">終了 (JST)<input id="pb-to" type="datetime-local"></label>
+        <button id="pb-apply" type="button" class="pb-btn">この期間を再生</button>
+        <p id="pb-why" class="pb-why" role="status"></p>
+      </div>
+    </div>
+    <button id="pb-play" type="button" class="pb-btn pb-play">▶ 再生</button>
+    <button id="pb-step" type="button" class="pb-btn" title="15 秒進める (1 ステップ)">▶| コマ送り</button>
+    <label class="pb-fld pb-speed-l"><span class="sr-only">再生速度</span><select id="pb-speed" aria-label="再生速度"></select></label>
+    <input id="pb-slider" class="pb-slider" type="range" aria-label="再生位置">
+    <button id="pb-export" type="button" class="pb-btn" title="この期間の証跡 (伏せ字済みの zip) を出力">証跡を出力</button>
+    <button id="pb-live" type="button" class="pb-btn pb-live" title="WALLBOARD・直近 15 分・自動更新に戻る">● LIVE に戻る</button>
+    <p id="pb-status" class="pb-status" role="status"></p>
+  </section>
 
   <main id="grid">
     <!-- below 1280 px wide (tablet landscape side column, phone bottom bar): panel groups as tabs -->

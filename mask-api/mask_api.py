@@ -2,9 +2,10 @@
 
 The browser never talks to Prometheus/Loki directly: every /prom/ and /loki/ request goes
 through here. Only GET on an allowlisted path is forwarded; every JSON string in the response
-(label names/values, log lines, rule expressions) has IPv4 masked to a.b.c.x and MAC addresses
-to aa:bb:cc:xx:xx:xx (NFR-09); a value that is exactly one IPv4 becomes a.b.c.x~<opaque token>
-so the UI can still tell addresses apart and drill down. IPv6 is not masked (the demo data has none).
+(label names/values, log lines, rule expressions) is masked (NFR-09). A value that is exactly one address keeps a
+structured mask with an opaque token, so the UI can still tell addresses apart and drill down: a.b.c.x~<token>,
+<first 64 bits>::x~<token>, aa:bb:cc:xx:xx:xx. Free text is masked by shape only (see "text masking" below): a standalone
+IPv4 keeps a.b.c.x (+ its port), a 6-pair MAC aa:bb:cc:xx:xx:xx, anything else address-like becomes "x".
 
 Queries cannot test hidden digits:
 - Loki: only the shapes the UI sends are accepted (stream selector on known labels with equality,
@@ -20,19 +21,25 @@ is the silence allowlist (create / extend / expire, for ACK and 抑止), see the
 
 Packet analysis (/pcap/, from the proxy): pcap_api.py, sharing this module's tokens, masking and write guards.
 
+Evidence export (/evidence/, from the proxy, GET only): evidence.py builds a zip from this module's own read paths.
+
 Run: python mask_api.py            (listens on :8000)
      python mask_api.py --selftest
 """
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import random
 import re
 import secrets
+import select
+import socket
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import OrderedDict
 from typing import NamedTuple
 
+import evidence
 import pcap_api
 
 PROM = os.environ.get("PROM_URL", "http://prometheus:9090")
@@ -58,13 +66,64 @@ PROM_QUERY = {"/prom/api/v1/query": PROM + "/api/v1/query", "/prom/api/v1/query_
 PROM_PLAIN = {"/prom/api/v1/alerts": PROM + "/api/v1/alerts", "/prom/api/v1/rules": PROM + "/api/v1/rules"}
 LOKI_RANGE = "/loki/loki/api/v1/query_range"
 
-IPV4 = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b")
-MAC = re.compile(r"\b([0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2})\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\b")
+# Exact values (one IPv4 / MAC label value; pcap_api) and the literal checks. Free text is masked by mask_text.
+IPV4 = re.compile(r"(?<![\d.])(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}(?!\d)")
+MAC = re.compile(r"(?<!\d)(?<![0-9A-Fa-f][:-])([0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2})\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}(?!\d)(?![:-][0-9A-Fa-f])")
+# ---- text masking: shape only, fail closed --------------------------------------------------------------------------
+# Free text (log lines, annotations, any string that is not exactly one address) is cut into runs over
+# [0-9A-Fa-f:.-] after normalising for classification: invisible / combining / variation characters are dropped,
+# full-width and other Unicode digits / letters / dot and colon look-alikes (。 ｡ ． ﹒ ： ﹕ ∶ ...) count as ASCII,
+# Unicode spaces as a space. A run is classified by its shape only - nothing in this path parses an address, so nothing
+# can raise. Kept partial forms (all standalone: no letter, digit or "._:-" right next to them):
+#   - a dotted quad a.b.c.d (octets 0-255) -> a.b.c.x, also with ":port" (a.b.c.x:443), a trailing ":" / ".", and
+#     YAMAHA's ".port" when that reading is the only one (exactly 5 groups and the last > 255: no octet)
+#   - a MAC of exactly 6 pairs with one separator (":" or "-") -> aa:bb:cc:xx:xx:xx
+# Kept as is: clock times / time ranges, dates, host:port (one ":", decimal port), runs with at most one hex group
+# (std::string, ".443", "::"), silence ids (UUID), a quoted 16-hex Alertmanager fingerprint, already masked forms,
+# a string that is only a number (JSON values, timestamps, counters - also one of 12 digits: values are never masked).
+# Everything else that looks like an address -> "x": 2+ ":" with 2+ groups, 3+ hex groups joined by ":" / "-", any
+# other dotted digits of 4+ groups (overlong octets too), Cisco aaaa.bbbb.cccc, 8+ hex characters with a digit, and
+# inside text a bounded run of exactly 12 digits (a MAC written as digits).
+# Structured masks (IPv6 /64 + token) exist only for label values that ARE one address (mask_value).
+# Any exception while masking masks the whole string as "x" (fail closed; a response is never lost to it).
+FREE_RUN = re.compile(r"[0-9A-Fa-f:.\-]{3,}")  # shorter runs hold nothing address-like
+SEPS = re.compile(r"[:.\-]")
+QUAD_FORM = re.compile(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?([:.])?")
+QUAD_DOTPORT = re.compile(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,5})")
+MAC_FORM = re.compile(r"([0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2})\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}([:.])?")
+MASKED_MAC_PREFIX = re.compile(r"[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\1[0-9A-Fa-f]{2}\1")
+ANY_DOTTED = re.compile(r"\d+\.\d+\.\d+\.\d+")
+CISCO = re.compile(r"[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}")
+_T = r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?"  # a real clock time (00:00-23:59:59.f): not 33:44:55
+TIME_RUN = re.compile(_T)
+TIME_RANGE = re.compile(_T + "-" + _T)  # ponytail: a MAC with mixed separators that reads as two clock times stays
+DATE_RUN = re.compile(r"\d{4}-\d{2}-\d{2}")
+HOST_PORT = re.compile(r"[0-9A-Fa-f]*:\d{1,5}")
+FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+UUID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")  # silence ids
+MASKED_V4_RUN = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.")  # a.b.c. before the "x"
+NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+STANDALONE_EDGE = re.compile(r"[0-9A-Za-z.:_\-]")
+# masked forms the screens are given (exact label values; also cut out before checking a query literal for raw parts)
+MASKED_ANY = re.compile(r"(?:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,3})?::x|(?:::ffff:|64:ff9b::)?\d{1,3}\.\d{1,3}\.\d{1,3}\.x"
+                        r"|[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\1[0-9A-Fa-f]{2}\1xx\1xx\1xx)(?:~[0-9a-f]{12})?")
+# characters that render as nothing (or only modify the previous one): dropped before classifying
+_INVISIBLE_CATS = {"Cf", "Mn", "Me", "Cc", "Cn"}  # Cn: unassigned (U+2065, U+FFF0-FFF8, U+E0000...)
+_INVISIBLE = {"\u3164", "⠀", "ᅟ", "ᅠ", "ﾠ", "᠎"} | {chr(c) for c in range(0xFE00, 0xFE10)}
+# look-alikes NFKC leaves alone
+_LOOKALIKE = {"。": ".", "\u00b7": ".", "\u2022": ".", "\u30fb": ".", "\uff65": ".", "\u2026": ".", "\u2025": ".", "\u066b": ".", "\u066c": ".", "\u06d4": ".", "\u2e31": ".", "\u0387": ".", "\u2219": ".", "｡": ".", "․": ".", "‧": ".", "܁": ".", "܂": ".", "ꓸ": ".",
+              "∶": ":", "꞉": ":", "ː": ":", "׃": ":", "܃": ":", "܄": ":", "፡": ":", "︰": ":",
+              "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "−": "-", "﹣": "-", "－": "-"}
 TOKEN_LEN = 12
 # Masked IPv4 as sent to the browser: a.b.c.x, or a.b.c.x~<token> for a value that was exactly one address.
 MASKED_IPV4 = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.x(?:~([0-9a-f]{%d}))?\b" % TOKEN_LEN)
 MASKED_MAC = re.compile(r"\b([0-9A-Fa-f]{2})([:-])([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2xx\2xx\2xx\b")
-TOKEN_REF = re.compile(r"\.x~(\w*)")
+TOKEN_REF = re.compile(r"[.:]x~(\w*)")
+# masked IPv6 as flowd labels it (and as text masking writes it): <up to 64 bits>::x, ::ffff:/64:ff9b:: + masked IPv4
+MASKED_V6 = re.compile(r"(?<![0-9A-Fa-f:.])(?:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,3})?::x|(?:::ffff:|64:ff9b::)\d{1,3}\.\d{1,3}\.\d{1,3}\.x)"
+                       r"(?:~([0-9a-f]{%d}))?(?![0-9A-Za-z_:])" % TOKEN_LEN)
+# hex groups with colons that could narrow a hidden IPv6 part: "::" with a hex digit, or a group mixing a-f and digits
+HEXCOLON = re.compile(r"(?<![0-9A-Za-z_])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4})+(?![0-9A-Za-z_])")
 # What is left of a literal once masked forms are removed must not narrow a hidden part:
 # no digit.digit (a partial IPv4 such as "113.50") and no 4+ hex pairs (a partial MAC).
 FRAGMENT = re.compile(r"\d\.\d|\b[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){2}\b")
@@ -130,17 +189,200 @@ class Rejected(ValueError):
     pass
 
 
+def v6_base(ip):
+    """pcap_api.v6_base without building network objects per call (label values): IPv4-mapped / NAT64 keep the masked
+    IPv4, 6to4 / Teredo hide everything, else the /64 + "::x" (compressed like ipaddress)."""
+    n = int(ip)
+    v4 = n & 0xFFFFFFFF
+    q = f"{v4 >> 24}.{(v4 >> 16) & 255}.{(v4 >> 8) & 255}.x"
+    if n >> 32 == 0xFFFF:
+        return "::ffff:" + q
+    if n >> 32 == 0x64FF9B << 64:
+        return "64:ff9b::" + q
+    if n >> 112 == 0x2002:
+        return "2002::x"
+    if n >> 96 == 0x20010000:
+        return "2001::x"
+    g = [(n >> (112 - 16 * i)) & 0xFFFF for i in range(4)]
+    while g and not g[-1]:
+        g.pop()
+    return ":".join(f"{x:x}" for x in g) + "::x"
+
+
+_CHAR = {}  # non-ASCII char -> its ASCII stand-in for classification (one char -> one char)
+
+
+def _ascii_char(c):
+    m = _CHAR.get(c)
+    if m is None:
+        k = unicodedata.normalize("NFKC", c)
+        if c in _LOOKALIKE:
+            m = _LOOKALIKE[c]
+        elif len(k) == 1 and k.isascii() and (k.isalnum() or k in ":.-"):
+            m = k
+        elif unicodedata.decimal(c, None) is not None:
+            m = str(unicodedata.decimal(c))
+        elif unicodedata.category(c) == "Zs":
+            m = " "
+        else:
+            m = c
+        if len(_CHAR) < 4096:
+            _CHAR[c] = m
+    return m
+
+
+def _invisible(c):
+    return c in _INVISIBLE or unicodedata.category(c) in _INVISIBLE_CATS
+
+
+def _edge(c):
+    return bool(c) and bool(STANDALONE_EDGE.match(c))
+
+
+def _long_hex(g, quoted=False):
+    """8+ hex mixing a digit in (IPv4 / MAC / IPv6 written as one word: c0000201, 0011aabbccdd), or 12 digits (a MAC of
+    digits only). Not: shorter numbers, a quoted 16-hex Alertmanager fingerprint (ponytail: an IPv6 half written that
+    way, in quotes, would pass)."""
+    if len(g) < 8 or len(g) == 16 and quoted:
+        return False
+    if g.isdigit():
+        return len(g) == 12
+    return any(ch.isdigit() for ch in g)
+
+
+def _keep_quad(q, before, after):
+    return not _edge(before) and not _edge(after) and all(int(x) <= 255 for x in q[:4])
+
+
+def _free_run(r, s, start, end):
+    """One run of the normalised text s at [start, end) -> its masked form."""
+    before, after = s[start - 1:start], s[end:end + 1]
+    if TIME_RUN.fullmatch(r) or DATE_RUN.fullmatch(r):  # the commonest runs in a log line
+        return r
+    # the kept partial forms: standalone IPv4 (+ :port, + a trailing ":" / "."), YAMAHA's a.b.c.d.port, a 6-pair MAC
+    q = QUAD_FORM.fullmatch(r)
+    if q:
+        a, b, c, d, port, punct = q.groups()
+        return f"{a}.{b}.{c}.x" + (f":{port}" if port else "") + (punct or "") if _keep_quad((a, b, c, d), before, after) else "x"
+    q = QUAD_DOTPORT.fullmatch(r)
+    if q:
+        a, b, c, d, port = q.groups()
+        sure = int(port) > 255  # a port that cannot be an octet: 1.192.0.2.1 must not read as 1.192.0.x + .1
+        return f"{a}.{b}.{c}.x.{port}" if sure and _keep_quad((a, b, c, d), before, after) else "x"
+    mac = MAC_FORM.fullmatch(r)
+    if mac:
+        return f"{mac.group(1)}{mac.group(2)}xx{mac.group(2)}xx{mac.group(2)}xx" + (mac.group(3) or "") if not _edge(before) and not _edge(after) else "x"
+    if after == "x" and not _edge(before):  # the visible part of a form written by this masking (the "x" follows)
+        if MASKED_V4_RUN.fullmatch(r):
+            return r
+        if MASKED_MAC_PREFIX.fullmatch(r) and s[end:end + 8] == "xx{0}xx{0}xx".format(r[2]):
+            return r
+    nc = r.count(":")
+    if nc < 2 and r.count(".") < 3 and nc + r.count("-") < 2:  # no quad, no 3 groups: only a long hex word can matter
+        quoted = before == '"' and after == '"'
+        return "x" if any(_long_hex(g, quoted) for g in SEPS.split(r)) or CISCO.search(r) else r
+    core = r.strip(".-:")
+    if not core:
+        return r
+    i = r.find(core)
+    lead, tail = r[:i], r[i + len(core):]
+    if UUID.fullmatch(core):  # silence ids
+        return r
+    groups = [g for g in SEPS.split(core) if g]
+    if any(_long_hex(g) for g in groups):  # before the keep-forms below: c0000201:443 is no host:port
+        return lead + "x" + tail
+    if TIME_RUN.fullmatch(core) or TIME_RANGE.fullmatch(core) or HOST_PORT.fullmatch(core) or UUID.fullmatch(core):
+        return r
+    if len(groups) <= 1:
+        return r
+    if r.count(":") >= 2 or ANY_DOTTED.search(core) or CISCO.search(core) or any(
+            not (TIME_RUN.fullmatch(g.group(0)) or TIME_RANGE.fullmatch(g.group(0)) or DATE_RUN.fullmatch(g.group(0)) or UUID.fullmatch(g.group(0)))
+            for g in HEX_GROUPS3.finditer(core)):
+        return lead + "x" + tail
+    return r
+
+
+HEX_GROUPS3 = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]+(?:[:\-][0-9A-Fa-f]+){2,}")  # 3+ hex groups joined by : / -
+
+
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # tab / newline / carriage return stay (whitespace)
+
+
+def _normalise(s):
+    """-> (s without invisible / control characters, the same text with ASCII stand-ins; same length)."""
+    if s.isascii():
+        s = CONTROL.sub("", s) if CONTROL.search(s) else s
+        return s, s
+    s = "".join(c for c in s if (c.isascii() and not CONTROL.match(c)) or not c.isascii() and not _invisible(c))
+    return s, "".join(c if c.isascii() else _ascii_char(c) for c in s)
+
+
+def _mask_text(s):
+    s, t = _normalise(s)
+    out, pos = [], 0
+    for m in FREE_RUN.finditer(t):
+        r = m.group(0)
+        rep = _free_run(r, t, m.start(), m.end())
+        if rep != r:
+            out += (s[pos:m.start()], rep)
+            pos = m.end()
+    if not out:
+        return s
+    out.append(s[pos:])
+    return "".join(out)
+
+
 def mask_text(s):
-    return MAC.sub(r"\1\2xx\2xx\2xx", IPV4.sub(r"\1.x", s))
+    """Free text -> masked (see above). A string that is only a number (JSON values, timestamps) is returned as is."""
+    if len(s) < 3 or NUMBER.fullmatch(s):
+        return s
+    try:
+        return _mask_text(s)
+    except Exception:  # fail closed: never pass text that could not be masked, never fail the response
+        return "x"
+
+
+def raw_runs(s):
+    """The parts of s that free-text masking changes (debugging / reviews; the export check uses leak_detector)."""
+    s, t = _normalise(s)
+    return [m.group(0) for m in FREE_RUN.finditer(t) if _free_run(m.group(0), t, m.start(), m.end()) != m.group(0)]
+
+
+def has_raw_address(s):
+    """Does s hold any part of an address that free-text masking would hide (masked forms the screens use are fine)?"""
+    rest = MASKED_ANY.sub(" ", s)
+    return mask_text(rest) != rest
+
+
+def v6_fragment(s):
+    for m in HEXCOLON.finditer(s):
+        t = m.group(0)
+        if "::" in t and re.search(r"[0-9A-Fa-f]", t) or re.search(r"[A-Fa-f]", t) and re.search(r"\d", t):
+            return True
+    return False
 
 
 def mask_value(s):
+    """One string from a service. A value that is exactly one address keeps a structured mask (+ a token: the screens
+    still tell addresses apart and drill down); a value that is already masked stays; anything else is free text."""
+    if MASKED_ANY.fullmatch(s) or FINGERPRINT.fullmatch(s):  # masked already / an Alertmanager fingerprint
+        return s
     m = IPV4.fullmatch(s)
-    if not m:
-        return mask_text(s)
-    tok = hmac.new(KEY, s.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN]
-    TOKENS[tok] = s
-    return f"{m.group(1)}.x~{tok}"
+    if m:
+        tok = hmac.new(KEY, s.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN]
+        TOKENS[tok] = s
+        return f"{m.group(1)}.x~{tok}"
+    if ":" in s and len(s) <= 45:
+        try:
+            ip = ipaddress.IPv6Address(s)
+        except ValueError:
+            ip = None
+        if ip is not None:
+            return f"{v6_base(ip)}~{pcap_api.token(str(ip))}"
+    mac = MAC.fullmatch(s)
+    if mac:
+        return MAC.sub(r"\1\2xx\2xx\2xx", s)
+    return mask_text(s)
 
 
 def mask_json(v):
@@ -150,12 +392,12 @@ def mask_json(v):
         return [mask_json(x) for x in v]
     if isinstance(v, dict):
         out = {mask_text(k): pcap_api.mask_free(x) if k in FREE_LABELS and isinstance(x, str) else mask_json(x) for k, x in v.items()}
-        labels, notes = v.get("labels"), out.get("annotations")
+        labels, notes = v.get("labels"), v.get("annotations")
         if isinstance(labels, dict) and isinstance(notes, dict):  # an alert: its text may quote those label values
             raw = sorted((x for k, x in labels.items() if k in FREE_LABELS and isinstance(x, str) and x), key=len, reverse=True)
-            for x in raw:
+            for x in raw:  # replaced in the raw text first (as the label shows it), then the text is masked
                 notes = {k: n.replace(x, pcap_api.mask_free(x)) if isinstance(n, str) else n for k, n in notes.items()}
-            out["annotations"] = notes
+            out["annotations"] = mask_json(notes)
         return out
     return v
 
@@ -181,9 +423,10 @@ def literal_body(lit):
 
 
 def check_literal(body):
-    if IPV4.search(body) or MAC.search(body):
+    if has_raw_address(body):
         raise Rejected(REJECT_MSG)
-    if FRAGMENT.search(MASKED_MAC.sub(" ", MASKED_IPV4.sub(" ", body))):
+    rest = MASKED_MAC.sub(" ", MASKED_IPV4.sub(" ", MASKED_V6.sub(" ", body)))
+    if FRAGMENT.search(rest) or v6_fragment(rest):
         raise Rejected(REJECT_MSG)
     for t in TOKEN_REF.finditer(body):
         if t.group(1) not in TOKENS:
@@ -200,9 +443,27 @@ def _ip_span(m, as_regex):
     return f"{a}[.]{b}[.]{c}[.][0-9]{{1,3}}"
 
 
+def _v6_span(m, as_regex):
+    """A masked IPv6: with its token -> the exact address (checked against the visible part); without -> as written
+    (flowd labels IPv6 destinations in this masked form)."""
+    tok = m.group(1)
+    if not tok:
+        return re.escape(m.group(0)) if as_regex else m.group(0)
+    ip = TOKENS.get(tok)
+    try:
+        ok = ip is not None and v6_base(ipaddress.IPv6Address(ip)) == m.group(0).split("~")[0]
+    except ValueError:
+        ok = False
+    if not ok:
+        raise Rejected(TOKEN_MSG)
+    return re.escape(ip) if as_regex else ip
+
+
 def _rewrite(text, as_regex):
     """Replace masked forms: tokens -> exact address; plain masks -> prefix regex (regex mode only)."""
-    spans = sorted([(m.start(), m.end(), _ip_span(m, as_regex)) for m in MASKED_IPV4.finditer(text)]
+    v6 = [(m.start(), m.end(), _v6_span(m, as_regex)) for m in MASKED_V6.finditer(text)]
+    inside = lambda m: any(a <= m.start() < b for a, b, _ in v6)  # 64:ff9b::192.0.2.x~t: the IPv4 inside belongs to the IPv6
+    spans = sorted(v6 + [(m.start(), m.end(), _ip_span(m, as_regex)) for m in MASKED_IPV4.finditer(text) if not inside(m)]
                    + [(m.start(), m.end(), "{1}{2}{3}{2}{4}(?:{2}[0-9A-Fa-f]{{2}}){{3}}".format(None, *m.groups()))
                       for m in MASKED_MAC.finditer(text)])
     out, pos = [], 0
@@ -215,7 +476,8 @@ def _rewrite(text, as_regex):
 
 def matcher(label, op, body):
     """Label matcher upstream: token -> exact address; plain masked form -> prefix regex."""
-    has_plain = any(not x.group(4) for x in MASKED_IPV4.finditer(body)) or MASKED_MAC.search(body)
+    rest = MASKED_V6.sub(" ", body)
+    has_plain = any(not x.group(4) for x in MASKED_IPV4.finditer(rest)) or MASKED_MAC.search(rest)
     if has_plain:
         return f"{label}{ {'=': '=~', '!=': '!~'}[op] }{json.dumps(_rewrite(body, as_regex=True))}"
     return f"{label}{op}{json.dumps(_rewrite(body, as_regex=False))}"
@@ -224,7 +486,7 @@ def matcher(label, op, body):
 # ---- Prometheus -------------------------------------------------------------------------------
 
 def prom_query(q):
-    if IPV4.search(q) or MAC.search(q) or PROM_FORBIDDEN.search(q):
+    if has_raw_address(q) or PROM_FORBIDDEN.search(q):
         raise Rejected(REJECT_MSG)
     for m in re.finditer(STRING, q):
         if not PROM_MATCHER_LHS.search(q[:m.start()]):
@@ -234,8 +496,9 @@ def prom_query(q):
     def sub(m):  # every literal is a matcher value (checked above); the label name stays in place
         op, _, lit = m.groups()
         body = literal_body(lit)
-        if not (MASKED_IPV4.search(body) or MASKED_MAC.search(body)):
-            return m.group(0)
+        v6 = MASKED_V6.fullmatch(body)
+        if v6 and not v6.group(1) or not (MASKED_IPV4.search(body) or MASKED_MAC.search(body) or MASKED_V6.search(body)):
+            return m.group(0)  # nothing to rewrite (a masked IPv6 without a token is matched as flowd labels it)
         return matcher("", op, body)
     return PROM_LITERAL.sub(sub, q)
 
@@ -575,7 +838,7 @@ def route(method, raw_path):
         return None, None, (403, "forbidden")
     params = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
     try:
-        if any(IPV4.search(v) or MAC.search(v) for _, v in params):
+        if any(has_raw_address(v) for _, v in params):
             raise Rejected(REJECT_MSG)
         url, post = loki_plan(params) if parts.path == LOKI_RANGE else prom_plan(parts.path, params)
     except Rejected as e:
@@ -599,10 +862,10 @@ def masked_body(raw, content_type, post=None):
     return mask_text(raw.decode("utf-8", "replace")).encode(), "text/plain; charset=utf-8"
 
 
-def fetch(url, post=None):
+def fetch(url, post=None, timeout=TIMEOUT_S):
     """-> (status, body bytes, content type), masked (and line-filtered for Loki)."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=TIMEOUT_S) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=timeout) as r:
             status, raw, ctype = r.status, read_capped(r), r.headers.get("Content-Type")
     except urllib.error.HTTPError as e:
         status, raw, ctype = e.code, read_capped(e), e.headers.get("Content-Type")
@@ -886,14 +1149,16 @@ def am_handle(method, raw_path, headers, read_body):
         return am_json(400, {"status": "error", "errorType": "rejected", "error": str(e)})
 
 
-def respond(method, raw_path, headers, read_body):
-    """-> (status, body, content type) for one request."""
+def respond(method, raw_path, headers, read_body, gone=None):
+    """-> (status, body, content type[, extra headers]) for one request. gone(): the client has disconnected."""
     _role = request_role(headers)  # always "viewer": masking never depends on it (writes: see writable())
     try:
         if raw_path.startswith("/am/"):
             return am_handle(method, raw_path, headers, read_body)
         if raw_path.startswith("/pcap/"):
             return pcap_api.handle(method, raw_path, headers, read_body)
+        if raw_path.startswith("/evidence/"):
+            return evidence.handle(method, raw_path, headers, gone)
         url, post, err = route(method, raw_path)
         if err:
             return err[0], error_body(*err), "application/json"
@@ -918,8 +1183,10 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(n)
             got[0] += len(data)
             return data
-        status, body, ctype = respond(self.command, self.path, self.headers, read_body)
+        status, body, ctype, *extra = respond(self.command, self.path, self.headers, read_body, self._gone)
         self.send_response(status)
+        for k, v in (extra[0] if extra else {}).items():  # e.g. the evidence zip's Content-Disposition
+            self.send_header(k, v)
         length = self.headers.get("Content-Length") or "0"
         if not length.isdigit() or int(length) > got[0] or self.headers.get("Transfer-Encoding"):  # body left unread (early reject): never parse it as a request
             self.close_connection = True
@@ -937,6 +1204,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path  # never log the query string
         sys.stdout.write(f"{self.command} {path} {status} {int((time.monotonic() - t0) * 1000)}ms{note}\n")
         sys.stdout.flush()
+
+    def _gone(self):
+        """The client closed its connection (a readable socket with nothing to read), e.g. the proxy gave up."""
+        try:
+            if not select.select([self.connection], [], [], 0)[0]:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
 
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _handle
 
@@ -973,6 +1249,13 @@ LOKI_PROBES = [
     r'sum by (severity) (count_over_time({job="syslog"} |= "113.50" [60s]))',
     'sum by (dst) (count_over_time({job="syslog"} |= "x" [60s]))',
     '{job="syslog"} |= "a" or {job="syslog"}',
+    # IPv6 (P4 review probe4): full addresses and fragments that could narrow a hidden host part
+    '{job="syslog"} |= "2001:db8:10:1:211"',
+    '{job="syslog"} |= "fe33:4455"',
+    '{job="syslog"} |= "2001:db8::1"',
+    '{job="syslog"} |= "::ffff:192.0.2.1"',
+    '{job="syslog"} |= "機器192.0.2.1"',
+    '{job="syslog"} |= "MAC00:11:22:33:44:55"',
 ]
 PROM_PROBES = [
     'demo_flow_bytes_total{dst_ip=~"203.*"}',
@@ -992,6 +1275,10 @@ PROM_PROBES = [
     'demo_flow_bytes_total{dst_ip="203.0.113.x"} > on() group_left() vector(1) == bool 1 or "113.50"',
     'info(up)',
     "demo_flow_bytes_total{dst_ip='1.2'}",
+    'up{instance="[2001:db8::5]:9100"}',
+    'obs_flow_bytes_total{dst_ip="2001:db8:1:2:a:b:c:d"}',
+    'obs_flow_bytes_total{dst_ip="2001:db8:1:2::x:abcd"}',
+    'up{instance="host_192.0.2.1"}',
 ]
 
 
@@ -1105,8 +1392,151 @@ def am_selftest(tok):
                 os.environ[k] = v
 
 
+# ---- leak detector: independent of the masking (its own normalisation and patterns), deliberately broader: when it
+# flags what masking keeps, the masking is adjusted, never the detector loosened --------------------------------------
+_DET_DROP = {"Cf", "Mn", "Me", "Cc", "Cn"}
+_DET_EXTRA = {"\u3164", "⠀", "ᅟ", "ᅠ", "ﾠ", "᠎", "\u034f"} | {chr(c) for c in range(0xFE00, 0xFE10)}
+_DET_MAP = str.maketrans({"。": ".", "\u00b7": ".", "\u2022": ".", "\u30fb": ".", "\uff65": ".", "\u2026": ".", "\u2025": ".", "\u066b": ".", "\u066c": ".", "\u06d4": ".", "\u2e31": ".", "\u0387": ".", "\u2219": ".", "｡": ".", "․": ".", "‧": ".", "܁": ".", "܂": ".", "ꓸ": ".",
+                          "∶": ":", "꞉": ":", "ː": ":", "׃": ":", "܃": ":", "܄": ":", "፡": ":",
+                          "︰": ":", "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "−": "-"})
+DET_QUAD = re.compile(r"(?<!\d)\d{1,4}\.\d{1,4}\.\d{1,4}\.\d{1,4}(?!\d)")  # overlong octets (0192.0.2.1) are findings
+DET_GROUPS = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]+(?:[:\-]{1,2}[0-9A-Fa-f]+){2,}")
+DET_V6 = re.compile(r"[0-9A-Fa-f]::[0-9A-Fa-f]")  # fe80::1, 2001:db8::a
+DET_CISCO = re.compile(r"[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}")
+DET_LONG = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{8,}(?![0-9A-Fa-f])")
+DET_OK_CONTEXT = re.compile(r'"(?:fingerprint|sha256|observatory)":\s*"[0-9a-f]{7,64}"')  # fingerprints, digests, the build revision
+DET_KEEP = [re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:-(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?)?"),
+            re.compile(r"\d{4}-\d{2}-\d{2}"), re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")]
+
+
+def _det_normalise(text):
+    text = unicodedata.normalize("NFKC", text.translate(_DET_MAP))  # look-alikes first: NFKC turns … into ...
+    text = "".join(" " if unicodedata.category(c) == "Zs" else c for c in text
+                   if c not in _DET_EXTRA and unicodedata.category(c) not in _DET_DROP or c in "\n\t\r")
+    return text.translate(_DET_MAP)
+
+
+def leak_detector(text):
+    """Raw address parts in text: any 4 dotted digit groups; 3+ hex groups joined by ':' / '-' (clock times, dates,
+    silence ids excepted); compressed IPv6 (a::b); Cisco aaaa.bbbb.cccc; 8+ hex mixing letters and digits, or 12
+    digits. Masked forms the screens use and quoted fingerprints / digests are not findings."""
+    t = _det_normalise(text)
+    t = DET_OK_CONTEXT.sub(" ", MASKED_ANY.sub(" ", t))
+    out = DET_QUAD.findall(t) + DET_V6.findall(t) + DET_CISCO.findall(t)
+    for m in DET_GROUPS.finditer(t):
+        g = m.group(0).strip(":-")
+        if not any(k.fullmatch(g) for k in DET_KEEP):
+            out.append(m.group(0))
+    for m in DET_LONG.finditer(t):
+        g = m.group(0)
+        if re.search(r"[A-Fa-f]", g) and re.search(r"\d", g) or len(g) == 12 and g.isdigit():
+            out.append(g)
+    return out
+
+
+def masker_selftest(perf_strict=False):
+    """Free-text masking (P4 re-review r3): property tests (glue incl. "-" and hex letters, every IPv6 shape, 6-8 pair
+    MACs with mixed separators, IPv4 incl. mapped, full-width text), the reviewer's DoS inputs, idempotence,
+    readability, the independent leak detector, and time (absolute bounds only with OBS_SELFTEST_PERF=1)."""
+    rnd = random.Random(7)
+    glue = ["", " ", "x", "ip=", "addr:", "[", "(", "dst:", "IP", "機器", "ｱ", "\"", "'", "<", "@", "#", "/", ",", "_", "src ", "a.", "-", "--",
+            ".", ":", "=", "g", "host-", "dead", "a", "ff:", "1.", "ver 3."]
+    tails = ["", " ", "]", ")", ".443", ":443", "]:443", "%eth0", "%25lan1", "/64", ",", "が", "x", "g", ".", ":", "-", "::", "\"", "_", "#53",
+             ".51000", ":51000", "z1", "-ab", "ab"]
+    full = str.maketrans("0123456789abcdefABCDEF:.", "０１２３４５６７８９ａｂｃｄｅｆＡＢＣＤＥＦ：．")
+    n = 0
+    for _ in range(4000):
+        groups = [rnd.randrange(0x10000) for _ in range(4)] + [rnd.randrange(0x1000, 0x10000) for _ in range(4)]
+        if rnd.random() < .3:
+            groups[rnd.randrange(1, 4)] = 0
+        ip = ipaddress.IPv6Address(sum(g << (112 - 16 * k) for k, g in enumerate(groups)))
+        form = rnd.choice([str(ip), ip.exploded, str(ip).upper(), ip.exploded.upper()])
+        if rnd.random() < .1:
+            form = form.translate(full)
+        text = rnd.choice(glue) + form + rnd.choice(tails)
+        out = mask_text(text)
+        low = [f"{g:x}" for g in groups[4:]] + [f"{g:04x}" for g in groups[4:]]
+        assert not any(x in out.lower() for x in low), (text, out)
+        assert mask_text(out) == out and not leak_detector(out), (text, out, leak_detector(out))
+        q = [rnd.randrange(1, 256), rnd.randrange(256), rnd.randrange(256), rnd.randrange(100, 256)]
+        form = ".".join(map(str, q))
+        text = rnd.choice(glue) + form + rnd.choice(tails)
+        out = mask_text(text)
+        assert form not in out and f"{q[2]}.{q[3]}" not in out and mask_text(out) == out and not leak_detector(out), (text, out)
+        mac = [f"{rnd.randrange(256):02x}" for _ in range(rnd.choice([6, 7, 8]))]
+        if rnd.random() < .5:
+            mac = [m.upper() for m in mac]
+        seps = [rnd.choice(":-")] * (len(mac) - 1) if rnd.random() < .7 else [rnd.choice(":-") for _ in mac[1:]]
+        form = mac[0] + "".join(sp + m for sp, m in zip(seps, mac[1:]))
+        text = rnd.choice(glue) + form + rnd.choice(tails)
+        out = mask_text(text)
+        assert not any(f"{mac[i - 1]}{seps[i - 1]}{mac[i]}" in out for i in range(3, len(mac))), (text, out)
+        assert mask_text(out) == out and not leak_detector(out), (text, out, leak_detector(out))
+        v4 = ipaddress.IPv4Address(rnd.getrandbits(32) | 100)
+        for f2 in [str(ipaddress.IPv6Address(0xFFFF << 32 | int(v4))), "::ffff:%x:%x" % (int(v4) >> 16, int(v4) & 0xffff)]:
+            out = mask_text(rnd.choice(glue) + f2 + rnd.choice(tails))
+            assert str(v4) not in out and ("%x" % (int(v4) & 0xffff)) not in out.split("::ffff:")[-1][:5] and not leak_detector(out), (f2, out)
+        n += 5
+    # the raw forms are seen by the detector (it is not blind to what the masking hides)
+    for raw in ["2001:db8::1", "fe80::1%eth0", "00:11:22:33:44:55", "host-00-11-22-33-44-55", "192.0.2.1", "c0000201", "001122334455", "a:b:c",
+                "0011.2233.4455", "0192.0.2.1", "192\u034f.0.2.1", "192\ufe0f.0.2.1", "１９２。１６８。１。１", "192\u3164.0.2.1", "2001:db8\u200b::1",
+                "192\x00.0.2.1", "192\u2065.0.2.1", "192\U000e0001.0.2.1", "192・168・1・1", "192·0·2·1", "192٫0٫2٫1", "192…0…2…1"]:
+        assert leak_detector(raw), raw
+    # the reviewer's DoS inputs: masked, never an exception (r3 a3 / a4)
+    for c in ["a.::ffff:192.0.2.100", "a.::ffff:c000:264", "a.::1.2.3.4", "1.::1.2.3.4", "b.::ffff:1.2.3.4 x", "a.:1.2.3.4", "e.:2001:db8::1.2.3.4",
+              "a.2001:db8::1.2.3.4", "ab.cd::1.2.3.4", "fe80::a.1.2.3.4", "Login failed user=ed.:2001:db8::192.0.2.1", "seen e.:1.2.3.4::1.2.3.4",
+              "192\u200b.0.2.1", "192.0.2\xad.1", "١٩٢.٠.٢.١", "192.0.2.𝟏", "192﹒0﹒2﹒1", "2001﹕db8﹕﹕1", "00︓11︓22︓33︓44︓55"]:
+        out = mask_text(c)
+        assert not leak_detector(out) and mask_text(out) == out, (c, out)
+    # readable text stays as it is
+    for keep in ["14:04:20", "13:52:00.123", "2026-10-26T13:52:00+09:00", "rtx1300:9100", "10:443", "std::string", "foo::bar", "LAN2:", "PP[01]",
+                 "LAN2[in]", "v3.6.0", "ab:cd", "ff:ff", "192.0.2.x", "192.0.2.x.443", "a - b", "-----", "...", "::", "::1", "12:00:00-13:00:00",
+                 '"fingerprint": "0123456789abcdef"', "8f3e2a1c-1b2d-4c5e-9f00-123456789abc", "1792990353919000000", "1.5", "NaN", "Rejected at IN(1020) filter",
+                 "[WLAN] STA associated: x SSID=home-main band=5GHz", "2026-10-26T05:03:04.123456789Z", "45.5 %"]:
+        assert mask_text(keep) == keep, (keep, mask_text(keep))
+    for c, want in [
+            ("[INSPECT] PP[01][out][101098] TCP 192.168.100.23:50211 > 192.0.2.10:443 (2026/10/24 12:00:00)",
+             "[INSPECT] PP[01][out][101098] TCP 192.168.100.x:50211 > 192.0.2.x:443 (2026/10/24 12:00:00)"),
+            ("PP[01] Rejected at IN(1020) filter: TCP 198.51.100.7:51515 > 192.168.100.1:23", "PP[01] Rejected at IN(1020) filter: TCP 198.51.100.x:51515 > 192.168.100.x:23"),
+            ("<190>Oct 25 12:00:00 rtx1300 PP[01] Rejected at IN(1020) filter: UDP 203.0.113.9:5353 > 192.168.100.1:161",
+             "<190>Oct 25 12:00:00 rtx1300 PP[01] Rejected at IN(1020) filter: UDP 203.0.113.x:5353 > 192.168.100.x:161"),
+            ("[DHCPD] LAN1(1) Allocates 192.168.100.23: 02:00:5e:10:00:17", "[DHCPD] LAN1(1) Allocates 192.168.100.x: 02:00:5e:xx:xx:xx"),
+            ("[WLAN] STA associated: 02:00:5e:20:00:2a SSID=home-main band=5GHz", "[WLAN] STA associated: 02:00:5e:xx:xx:xx SSID=home-main band=5GHz"),
+            ("[WLAN] STA disassociated: 02-00-5e-20-00-2a reason=8", "[WLAN] STA disassociated: 02-00-5e-xx-xx-xx reason=8"),
+            ("TCP 192.168.100.23.50211 > 192.0.2.10.443 rejected", "TCP 192.168.100.x.50211 > 192.0.2.x.443 rejected"),  # YAMAHA addr.port
+            ("192.0.2.1.80 ", "x "), ("1.192.0.2.1 ", "x "), ("192.0.2.1.8080 ", "192.0.2.x.8080 "), ("192.0.2.1.80x", "xx"), ("1.192.0.2.1;", "x;"),
+            ("c0000201:443", "x"), ("001122334455:1", "x"), ("0011.2233.4455", "x"), ("0011-2233-4455", "x"), ("0192.0.2.1", "x"), ("192.0.2.1234", "x"),
+            ("192\u034f.0.2.1", "192.0.2.x"), ("192\ufe0f.0.2.1", "192.0.2.x"), ("１９２。１６８。１。１", "192.168.1.x"), ("192｡168｡1｡1", "192.168.1.x"),
+            ("00:11:22:33:44:55:66", "x"), ("00:11:22-33:44:55", "x"), ("MAC 00:11:22:33:44:55.", "MAC 00:11:22:xx:xx:xx."),
+            ("192\x00.0.2.1", "192.0.2.x"), ("192\ufff0.0.2.1", "192.0.2.x"), ("192・168・1・1", "192.168.1.x"), ("192…0…2…1", "192.0.2.x"),
+            ("a\tb\n192.0.2.1\r", "a\tb\n192.0.2.x\r"), ("日本・東京", "日本・東京"),
+            ("192.0.2.1", "192.0.2.x"), ("IP 192.0.2.1.", "IP 192.0.2.x."), ("機器192.0.2.1が", "機器192.0.2.xが"), ("192.0.2.1:443", "192.0.2.x:443"),
+                    ("2001:db8::1", "x"), ("[2001:db8::5]:443", "[x]:443"), ("fe80::1%eth0", "x%eth0"), ("host-00-11-22-33-44-55", "host-x"),
+                    ("client-id 01:00:a0:de:12:34:56", "client-id x"), ("2001:db8:1:2:1234::gateway", "x::gateway"), ("enx001122334455", "enxx"),
+                    ("dst:2001:db8:10:1:211:22ff:fe33:4455.51000", "dst:x")]:
+        assert mask_text(c) == want, (c, mask_text(c), want)
+
+    def took(f):
+        t = time.perf_counter()
+        f()
+        return time.perf_counter() - t
+    evil = ["a:" * 32768, "1:" * 32768, "fe:" * 21845, "1." * 32768, "a-" * 32768, ("ab:cd " * 11000)[:65536], ("::" + "1:" * 4) * 6000,
+            "a.::1.2.3.4 " * 5000, ("2001:db8::1 " * 6000)[:65536]]
+    worst = max(took(lambda e=e: mask_text(e)) for e in evil)
+    lines = [f"2026-10-26T13:52:{i % 60:02d}+09:00 rtx1300 [INSPECT] LAN2[in] TCP 2001:db8:10:1:{rnd.getrandbits(16):x}:{rnd.getrandbits(16):x}:fe33:4455.51000"
+             f" > 192.0.{i % 250}.{i % 199} 00:11:22:33:{i % 90:02d}:55 12:00:00" for i in range(5000)]
+    page = took(lambda: [mask_text(x) for x in lines])
+    small, big = ("2001:db8::1 " * 1400)[:16384], ("2001:db8::1 " * 5600)[:65536]
+    t_small, t_big = took(lambda: mask_text(small)), took(lambda: mask_text(big))
+    print(f"masker: {n} property cases; 64 KB adversarial max {worst * 1000:.1f} ms; 5000-line page {page * 1000:.0f} ms")
+    assert t_big / max(t_small, 1e-3) < 8, (t_big, t_small)  # linear, never quadratic
+    if perf_strict:
+        assert worst < 0.05 and page < 0.2, (worst, page)
+
+
 def selftest():
     q = urllib.parse.quote
+    masker_selftest(os.environ.get("OBS_SELFTEST_PERF") == "1")
     assert mask_json({"metric": {"__name__": "obs_capture_up", "iface": "enx02005e100017"}})["metric"]["iface"] == "enx"
     al = mask_json({"labels": {"alertname": "CaptureDown", "iface": "enx02005e100017"},
                     "annotations": {"summary_ja": "enx02005e100017 でキャプチャが止まりました (5 分)"}})
@@ -1121,9 +1551,36 @@ def selftest():
     tok = m["result"][0]["metric"]["dst_ip"]
     assert re.fullmatch(r"203\.0\.113\.x~[0-9a-f]{12}", tok) and m["result"][0]["metric"]["mac"] == "02:00:5E:xx:xx:xx"
     assert mask_value("203.0.113.50") == tok and mask_value("203.0.113.60") != tok  # stable, and distinct per address
-    assert m["result"][1]["values"][0][1] == "TCP 192.168.100.x:5555 > 192.0.2.x:443 02-00-5e-xx-xx-xx"  # no tokens in text
-    assert m["result"][0]["value"] == [1, "42"] and m["v6"] == "2001:db8::1"  # IPv6 deliberately untouched
+    assert m["result"][1]["values"][0][1] == "TCP 192.168.100.x:5555 > 192.0.2.x:443 02-00-5e-xx-xx-xx"  # free text keep-forms, no tokens
+    assert m["result"][0]["value"] == [1, "42"] and re.fullmatch(r"2001:db8::x~[0-9a-f]{12}", m["v6"]), m["v6"]  # one IPv6 value: /64 + token
+    assert m["oid"] == "x"  # free text: dotted digits that are not one standalone quad
     assert mask_json({"10.0.0.1": 1}) == {"10.0.0.x": 1}
+    assert mask_value("2001:db8:1:2::x") == "2001:db8:1:2::x" and mask_value("192.0.2.x") == "192.0.2.x"  # masked values stay
+    assert mask_value("02:00:5e:10:00:0a") == "02:00:5e:xx:xx:xx" and mask_value("rtx1300") == "rtx1300"
+    # free text: the standalone keep-forms (IPv4 [+port], 6-pair MAC), everything else address-like -> "x"
+    for raw, want in [("192.0.2.1が応答なし", "192.0.2.xが応答なし"), ("機器192.0.2.1", "機器192.0.2.x"), ("host_192.0.2.1", "host_x"),
+                      ("x192.0.2.1y", "xxy"), ("MAC00:11:22:33:44:55", "Mx"), ("経由00:11:22:33:44:55です", "経由00:11:22:xx:xx:xxです"),
+                      ("192.0.2.1:443", "192.0.2.x:443"), ("192.0.2.1.443", "192.0.2.x.443"), ("2001:db8::1", "x"), ("fe80::1%eth0", "x%eth0"),
+                      ("[2001:db8::5]:443", "[x]:443"), ("2001:db8::1が", "xが"), ("addr=2001:db8:0:0:1:2:3:4,", "addr=x,"),
+                      ("::ffff:192.0.2.1", "::x"), ("2001:db8::1/64", "x/64"), ("IPv6アドレス2001:db8::abcd", "IPv6アドレスx"),
+                      ("TCP 2001:db8:10:1:211:22ff:fe33:4455.51000 > 2001:db8:ffff::1.443 rejected", "TCP x > x rejected"),
+                      ("src=2001:db8:10:1:211:22ff:fe33:4455/128", "src=x/128"), ("addr 2001:DB8:10:1:211:22FF:FE33:4455", "addr x"),
+                      ("fe80::211:22ff:fe33:4455%lan1", "x%lan1"), ("64:ff9b::192.0.2.1", "x"), ("2002:c000:20a::1", "x"),
+                      ("14:04:20 std::string v3.6.0 192.0.2.x", "14:04:20 std::string v3.6.0 192.0.2.x"), ("a::b", "x")]:
+        assert mask_text(raw) == want, (raw, mask_text(raw), want)
+        assert mask_text(want) == want, want  # idempotent
+    probe4 = mask_json({"stream": {"job": "syslog"}, "values": [["1", "[INSPECT] LAN2[in] TCP 2001:db8:10:1:211:22ff:fe33:4455.51000 > 2001:db8:ffff::1.443"]],
+                        "metric": {"instance": "[2001:db8::5]:9100", "reason": "from 2001:db8::9"},
+                        "alerts": [{"labels": {"alertname": "X", "instance": "2001:db8::7"}, "annotations": {"summary": "2001:db8::7 down"}}]})
+    flat = json.dumps(probe4)
+    assert "4455" not in flat and "::5]" not in flat and "::9" not in flat and "::7 " not in flat and "::1." not in flat, flat
+    assert probe4["metric"]["instance"] == "[x]:9100" and probe4["alerts"][0]["annotations"]["summary"] == "x down", probe4
+    assert re.fullmatch(r"2001:db8::x~[0-9a-f]{12}", probe4["alerts"][0]["labels"]["instance"])  # exact value: structured + token
+    # never an exception out of masking: a page with the reviewer's inputs goes through (r3 a3 / a4)
+    page = {"status": "success", "data": {"resultType": "streams", "result": [{"stream": {"job": "syslog"}, "values": [
+        ["1", "Login failed user=ed.:2001:db8::192.0.2.1"], ["2", "a.::1.2.3.4"], ["3", "seen e.:1.2.3.4::1.2.3.4"]]}]}}
+    body, _ = masked_body(json.dumps(page).encode(), "application/json")
+    assert b"192.0.2.1" not in body and b"1.2.3.4" not in body and json.loads(body)["status"] == "success", body
 
     def plan(p):
         url, post, err = route("GET", p)
@@ -1376,6 +1833,9 @@ def selftest():
     assert plan(pq(ui))[0].endswith(ui)
     assert plan(pq("topk(3, demo_flow_bytes_total) > 1e9"))[0]  # ranking/comparison only see numbers; labels come back masked
     assert plan(pq('rate(x{dst_ip="%s"}[5m])' % tok))[0].endswith('rate(x{dst_ip="203.0.113.50"}[5m])')  # token round trip
+    for v6 in ("2001:db8:1:2::x", "fe80::x", "64:ff9b::192.0.2.x", "2002::x"):  # flowd's masked IPv6 labels: exact match
+        assert plan(pq('obs_flow_bytes_total{dst_ip="%s"}' % v6))[0].endswith('obs_flow_bytes_total{dst_ip="%s"}' % v6), v6
+    assert plan(lq('{job="syslog"} |= "14:04:20" |= "10:443"'))[1].filters == [("|=", "14:04:20"), ("|=", "10:443")]  # times / ports
     assert plan(pq('sum(rate(x{dst_ip="203.0.113.x"}[5m]))'))[0].endswith('sum(rate(x{dst_ip=~"203[.]0[.]113[.][0-9]{1,3}"}[5m]))')
     assert plan(pq('x{dst_ip!="203.0.113.x"}'))[0].endswith('x{dst_ip!~"203[.]0[.]113[.][0-9]{1,3}"}')
 
@@ -1393,10 +1853,12 @@ def selftest():
     tok = mask_value("203.0.113.50")  # (re-register the token the alert tests use)
     am_selftest(tok)
     pcap_api.selftest()
+    evidence.selftest()
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
 
 pcap_api.setup(sys.modules[__name__])
+evidence.setup(sys.modules[__name__], pcap_api)
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:

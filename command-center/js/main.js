@@ -1,7 +1,7 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
-import { $, el, vmap, scalar, has, jstClock, REDUCED_MOTION, LARGE, WALLBOARD } from './util.js';
-import { promQuery, promRange, promAlerts, lokiRange, lokiMetric, flattenStreams } from './api.js';
+import { $, el, vmap, scalar, has, jstClock, jstFull, REDUCED_MOTION, LARGE, WALLBOARD, now, isPlayback, setCursor } from './util.js';
+import { promQuery, promRange, promAlerts, promAlertsAt, lokiRange, lokiMetric, flattenStreams } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
 import * as UI from './ui.js';
@@ -10,6 +10,8 @@ import * as D from './views-drawer.js';
 import { setNoFlowSource } from './views-common.js';
 import * as AL from './alerting.js';
 import * as PA from './views-pcap.js';
+import * as PB from './playback.js';
+import { downloadEvidence } from './evidence.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -35,7 +37,9 @@ function applyTheme(name, persist) {
 
 // ---- state ----------------------------------------------------------------------------------
 // seen* keep rows that disappear from Prometheus (target down) visible as UNKNOWN instead of vanishing.
-const state = { flowsConfigured: true, promOkAt: -Infinity, lokiOkAt: -Infinity, promOkWall: 0, dataAgeAtOk: 0, waitFresh: false, saidMode: null, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
+// gen: bumped on every switch of the data time (playback enter / seek back / leave): an answer that was asked for the
+// previous time is dropped instead of rendered
+const state = { gen: 0, flowsConfigured: true, promOkAt: -Infinity, lokiOkAt: -Infinity, promOkWall: 0, dataAgeAtOk: 0, waitFresh: false, saidMode: null, promErr: null, lokiErr: null, snap: null, seenLogs: new Set(), seenIf: new Set(), seenWlan: new Set() };
 
 // ---- navigation: every "open related data" action goes through here ------------------------------
 // Each drawer view carries its own globe selection; it is (re)applied whenever that view is shown,
@@ -65,7 +69,7 @@ const nav = {
   // packet analysis: opts { dest, src } narrow it to that traffic (filter from the flows' address tokens, last 15 min)
   packets: async (opts = {}) => {
     const f = await PA.drillFilter({ ...opts, flows: state.snap?.flows || [] });
-    const since = opts.dest || opts.src ? Date.now() / 1000 - 900 : undefined;
+    const since = opts.dest || opts.src ? now() / 1000 - 900 : undefined;
     UI.openModal(PA.analysisView({ ...f, since: OBS.flowSource === 'capture' ? since : undefined }));
   },
 };
@@ -162,14 +166,17 @@ function normFlows(res) {
 }
 
 async function pollProm() {
+  const gen = state.gen;
+  const pb = isPlayback();
   const names = Object.keys(Q);
   const [res, sDown, sUp, alerts] = await Promise.all([
     Promise.all(names.map((n) => promQuery(Q[n]))).then((vals) => Object.fromEntries(names.map((n, i) => [n, vals[i]]))),
     P.WAN.instance ? promRange(gate(`rate(ifHCInOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [], // no WAN configured: nothing to ask
     P.WAN.instance ? promRange(gate(`rate(ifHCOutOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [],
-    promAlerts(),
-    AL.pollAlerting(), // notification state (Alertmanager / notify records): never fails, its own state says "unknown"
+    pb ? promAlertsAt() : promAlerts(), // playback: the alert list of that time, from the TSDB (ALERTS)
+    pb ? null : AL.pollAlerting(), // notification state (Alertmanager / notify records): never fails, its own state says "unknown"
   ]);
+  if (gen !== state.gen) throw new Error('superseded'); // asked for another data time
   const m = {
     up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'),
     devIn: vmap(res.devIn, 'instance'), devOut: vmap(res.devOut, 'instance'), devErr: vmap(res.devErr, 'instance'),
@@ -197,10 +204,10 @@ async function pollProm() {
   const geoBuild = scalar(res.geoBuild);
   const capture = res.capUp.length ? { up: scalar(res.capUp), drops: scalar(res.capDrop), dumpDrops: scalar(res.capDumpDrop), ring: scalar(res.capRing), over: scalar(res.capOver) } : null;
   state.snap = {
-    at: Date.now(), m, flowsOk, flowsConfigured: state.flowsConfigured, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
+    at: now(), m, flowsOk, flowsConfigured: state.flowsConfigured, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
     freshMin: scalar(res.freshMin), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx), capture,
-    geo: { ageDays: has(geoBuild) ? (Date.now() / 1000 - geoBuild) / 86400 : null, months: res.geoInfo.map((r) => r.metric.month).filter(Boolean) },
+    geo: { ageDays: has(geoBuild) ? (now() / 1000 - geoBuild) / 86400 : null, months: res.geoInfo.map((r) => r.metric.month).filter(Boolean) },
   };
   const s = state.snap;
   P.renderDevices(m, nav); // before the flow rankings: they are fitted to the height the device list leaves
@@ -217,17 +224,21 @@ async function pollProm() {
 }
 
 async function pollLoki() {
+  const gen = state.gen;
   const [logs, sev] = await Promise.all([
     lokiRange('{job="syslog"}', 120, 40),
     lokiMetric('sum by (severity) (count_over_time({job="syslog"}[15m]))'),
   ]);
+  if (gen !== state.gen) throw new Error('superseded');
   P.renderLogs(flattenStreams(logs), state.seenLogs, nav);
   P.renderSeverity(sev, nav);
   if (state.seenLogs.size > 2000) state.seenLogs = new Set([...state.seenLogs].slice(-500));
 }
 
 async function poll() {
+  const gen = state.gen;
   const [p, l] = await Promise.allSettled([pollProm(), pollLoki()]);
+  if (gen !== state.gen) return; // the data time changed meanwhile: its own poll reports
   const now = mono();
   if (p.status === 'fulfilled') {
     state.promOkAt = now; state.promOkWall = Date.now(); state.promErr = null;
@@ -240,12 +251,14 @@ async function poll() {
   updateHealth();
   // header info slots may be cut to an ellipsis on narrow panels: the full text stays available as a tooltip
   for (const h of document.querySelectorAll('.panel > h2 .h-r')) h.title = h.textContent;
-  if (state.snap) UI.refreshViews(ctx());
+  // playback paces its batches on the whole refresh, open detail views included (their own range queries)
+  if (state.snap) { const views = UI.refreshViews(ctx()); if (isPlayback()) await views; }
 }
 const ctx = () => {
   const now = mono();
+  const pb = isPlayback(); // a paused playback is not late: only a failed fetch makes it stale
   return { snap: state.snap, nav, seenIf: state.seenIf, seenWlan: state.seenWlan,
-    promStale: now - state.promOkAt > STALE_AFTER_MS || !!state.promErr, lokiStale: now - state.lokiOkAt > STALE_AFTER_MS || !!state.lokiErr };
+    promStale: (!pb && now - state.promOkAt > STALE_AFTER_MS) || !!state.promErr, lokiStale: (!pb && now - state.lokiOkAt > STALE_AFTER_MS) || !!state.lokiErr };
 };
 
 // ---- freshness (NFR-05 / NFR-10) -----------------------------------------------------------------
@@ -263,6 +276,7 @@ function armDeadman() {
   b.dataset.arm = b.dataset.arm === 'a' ? 'b' : 'a'; // switching between two identical keyframes restarts the timer
 }
 function updateHealth() {
+  if (isPlayback()) { playbackHealth(); return; }
   const now = mono();
   const promLate = now - state.promOkAt;
   const promStale = promLate > STALE_AFTER_MS;
@@ -295,7 +309,24 @@ function updateHealth() {
   const said = reasons.length && mode !== 'STALE' ? `${mode}: ${reasons.join('; ')}` : mode;
   if ($('badge-sr').textContent !== said && mode !== state.saidMode) { $('badge-sr').textContent = said; state.saidMode = mode; }
 }
-const BADGE_SHORT = { LIVE: 'LIVE', DEGRADED: 'DEGR', STALE: 'STALE' };
+const BADGE_SHORT = { LIVE: 'LIVE', DEGRADED: 'DEGR', STALE: 'STALE', PLAYBACK: 'PLAY' };
+// PLAYBACK: the badge says PLAYBACK (no age: the data time is the banner's 履歴再生 HH:MM:SS); a panel is STALE only when
+// the fetch for the current position failed; the dead-man overlay is off (nothing is expected to update while paused)
+function playbackHealth() {
+  const s = state.snap;
+  const flowStale = s ? state.flowsConfigured && !s.flowsOk : false;
+  for (const id of PROM_PANELS) $(id).classList.toggle('stale', !!state.promErr || (flowStale && FLOW_PANELS.includes(id)));
+  for (const id of LOKI_PANELS) $(id).classList.toggle('stale', !!state.lokiErr);
+  const b = $('badge');
+  b.classList.remove('badge-live', 'badge-degraded', 'badge-stale');
+  b.classList.add('badge-playback');
+  b.querySelector('.b-long').textContent = 'PLAYBACK';
+  b.querySelector('.b-short').textContent = BADGE_SHORT.PLAYBACK;
+  b.querySelector('.b-age').textContent = '';
+  const errs = [state.promErr && `metrics: ${state.promErr}`, state.lokiErr && `logs: ${state.lokiErr}`, flowStale && 'flow source DOWN at that time'].filter(Boolean);
+  b.title = [`playback: data as of ${jstFull.format(new Date(now()))} JST`, ...(errs.length ? errs : ['all sources answered'])].join(' · ');
+  if (state.saidMode !== 'PLAYBACK') { $('badge-sr').textContent = 'PLAYBACK'; state.saidMode = 'PLAYBACK'; }
+}
 const fmtAge = (sec) => (sec < 60 ? `${Math.floor(sec)}s` : sec < 3600 ? `${Math.floor(sec / 60)}m` : `${Math.min(99, Math.floor(sec / 3600))}h`);
 
 function tickClock() {
@@ -305,7 +336,7 @@ function tickClock() {
 }
 // back from hidden / frozen: the values on screen may be old: STALE until the first fresh fetch, which starts now
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
+  if (document.hidden || isPlayback()) return; // playback: what is on screen is still the data of its position
   state.waitFresh = true;
   tickClock();
   poll();
@@ -453,12 +484,32 @@ $('alert-banner').addEventListener('keydown', (e) => { if (e.key === 'Enter' || 
 AL.setOnChange(() => poll()); // after an ACK / silence change: show its effect now, not at the next poll
 G.initGlobe({ onDest: (key) => { const [cc, city] = key.split('|'); nav.dest({ cc, city }); }, onInteract: () => UI.touched() });
 wirePanelTitles();
+// ---- playback: main.js owns the data time (util.now()); playback.js moves the cursor and paces the fetches ---------
+const resetFeed = () => { state.gen++; P.resetLogs(state.seenLogs); };
+PB.initPlayback({
+  setTime: (ms) => setCursor(ms),
+  fetch: () => poll(),
+  jump: resetFeed,
+  live: () => { // back to LIVE: the wallboard, the last 15 min, live polling; STALE until the first live answer
+    resetFeed();
+    $('badge').classList.remove('badge-playback');
+    state.saidMode = null;
+    state.waitFresh = true;
+    UI.clearAll();
+    poll();
+  },
+  exportWindow: (button, status) => {
+    const w = PB.pbWindow();
+    downloadEvidence({ scope: 'all', from: (w.from / 1000).toFixed(3), to: (w.to / 1000).toFixed(3) }, button, status);
+  },
+});
+$('pb-enter').addEventListener('click', () => { UI.closeMenu(); PB.enterDefault(); });
 boot();
 tickClock();
 setInterval(tickClock, 1000);
 poll().then(() => { // link in the notifications (OBS_PUBLIC_URL/?open=alerts): the alert list, once there is data
   if (new URLSearchParams(location.search).get('open') === 'alerts') openAlerts();
 });
-setInterval(poll, POLL_MS);
+setInterval(() => { if (!isPlayback()) poll(); }, POLL_MS); // live polling is off during playback
 // scripted-test hook (read-only): screen position of a destination on the globe
-window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode };
+window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode, playback: PB.testState, enterPlayback: PB.enter };

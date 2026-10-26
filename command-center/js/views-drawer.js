@@ -1,6 +1,6 @@
 // Detail drawer views: device, interface, destination, source host, alert, syslog line, collection job.
 // Each drawer reads top-down: summary tiles -> charts / relation bars -> detail lists.
-import { el, has, fixed, fmtUptime, fmtDur, maskIp, maskText, jstFull, upState } from './util.js';
+import { el, has, fixed, fmtUptime, fmtDur, maskIp, maskText, jstFull, upState, now, isPlayback } from './util.js';
 import { lokiLogs, promRules } from './api.js';
 import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind, FLOW_TEXT, isWlx } from './panels.js';
 import {
@@ -8,9 +8,11 @@ import {
   ALERT_KEYS, stackCols, SEV_KEYS, SEV_BAD, sevBuckets, multiples, seriesBy, maxOf, ipTokens, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
 } from './views-common.js';
 import { alertOpsSection } from './alerting.js';
+import { evidenceSection } from './evidence.js';
 
 const HOUR = 3600;
 const nsOf = (ms) => BigInt(Math.round(ms)) * 1000000n;
+const min = (a, b) => (a < b ? a : b); // BigInt-safe
 const errKind = (v) => (has(v) ? (v > 0 ? 'warn' : 'ok') : 'unknown');
 const errStatus = (v) => (has(v) ? (v > 0 ? 'errors seen' : 'none') : 'unknown');
 // tile spark from one series of a fetched range (qi = query index)
@@ -51,7 +53,7 @@ export function deviceView(name) {
       s.chart.body.append(chart.wrap);
       s.ifBox = el('div');
       s.ifs.body.append(s.ifBox, keyLegend(IO_KEYS));
-      body.append(s.sum, s.chart.wrap, s.ifs.wrap, s.alerts.wrap, s.sev.wrap, s.logs.wrap);
+      body.append(s.sum, s.chart.wrap, s.ifs.wrap, s.alerts.wrap, s.sev.wrap, s.logs.wrap, evidenceSection(() => ({ scope: 'device', instance: name })).wrap);
     },
     async update(ctx) {
       const { m } = ctx.snap;
@@ -88,7 +90,7 @@ export function deviceView(name) {
             })), { t0: r.t0, t1: r.t1, step: r.step, max: maxOf(ins, outs) }));
           }),
         sevBuckets(stok, `{job="syslog",host=${lv(name)}}`, HOUR).then((r) => { if (r) putIn(s.sev.body, sevChart(r, `${name} syslog lines per ${r.step / 60} min`)); }),
-        lokiLogs(`{job="syslog",host=${lv(name)}}`, { startNs: String(nsOf(Date.now() - HOUR * 1000)), endNs: String(nsOf(Date.now())), limit: 50 })
+        lokiLogs(`{job="syslog",host=${lv(name)}}`, { startNs: String(nsOf(now() - HOUR * 1000)), endNs: String(nsOf(now())), limit: 50 })
           .then((res) => putIn(s.logs.body, logList(name, res.entries, ctx.nav, null, res))),
       ]);
     },
@@ -106,7 +108,7 @@ export function ifaceView(key) {
       s = { sum: el('div'), t: section('Traffic, last 1 h', 'Mbps'), e: section('Errors, last 1 h', 'per minute'), info: section('Interface') };
       s.t.body.append(traffic.wrap);
       s.e.body.append(errs.wrap);
-      body.append(s.sum, s.t.wrap, s.e.wrap, s.info.wrap);
+      body.append(s.sum, s.t.wrap, s.e.wrap, s.info.wrap, evidenceSection(() => ({ scope: 'iface', instance: inst, ifName })).wrap);
     },
     async update(ctx) {
       const r = ifaceRows(ctx.snap.m, ctx.seenIf).find((x) => x.key === key) || { operText: 'UNKNOWN' };
@@ -166,7 +168,8 @@ export function destView(d) {
       s.srcBox = el('div');
       s.src.body.append(s.srcBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
-      body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap);
+      body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap,
+        evidenceSection(() => (d.ip ? { scope: 'dest', ip: d.ip } : { scope: 'dest', cc: d.cc, city: d.city })).wrap);
     },
     async update(ctx) {
       lastNav = ctx.nav;
@@ -215,7 +218,7 @@ export function srcView(host) {
       s.ccBox = el('div');
       s.cc.body.append(s.ccBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
-      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap);
+      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap, evidenceSection(() => ({ scope: 'src', host })).wrap);
     },
     async update(ctx) {
       lastNav = ctx.nav;
@@ -259,24 +262,27 @@ export function alertView(alert0) {
         rule: section('Rule', 'from /api/v1/rules'), rel: section('Related'), logs: section('Syslog around activation', '±5 min') };
       s.tlBox = el('div');
       s.tl.body.append(s.tlBox, keyLegend(ALERT_KEYS));
-      body.append(s.sum, s.ops.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
+      const ev = evidenceSection(() => ({ scope: 'alert', alertname: alert0.labels.alertname, instance: alert0.labels.instance, ifName: alert0.labels.ifName, severity: alert0.labels.severity }),
+        () => Date.parse(alert0.activeAt));
+      body.append(s.sum, s.ops.wrap, ev.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
     },
     async update(ctx) {
       const cur = ctx.snap.alerts.find((a) => alertKey(a.labels) === id);
       const a = cur || alert0;
       s.ops.update(a, cur?.state === 'firing');
       const active = Date.parse(a.activeAt);
+      const anchor = has(active) ? active : now(); // playback without ALERTS_FOR_STATE: around the cursor
       const [kind, sevText] = sevKind(a.labels.severity);
       putIn(s.sum, tiles([
         { label: 'State', value: cur ? a.state.toUpperCase() : 'RESOLVED', kind: cur ? (a.state === 'firing' ? kind : 'warn') : 'ok', status: cur ? (a.state === 'firing' ? 'firing now' : 'pending (for: not yet met)') : 'no longer in the alert list' },
         { label: 'Severity', value: sevText, kind, status: a.labels.severity || 'none' },
-        { label: 'Active for', value: cur ? fmtDur((Date.now() - active) / 1000) : undefined, sub: `since ${jstFull.format(new Date(active))}` },
+        { label: 'Active for', value: cur && has(active) ? fmtDur((now() - active) / 1000) : undefined, sub: has(active) ? `since ${jstFull.format(new Date(active))}` : 'activation time not recorded' },
         { label: 'Value', value: has(Number(a.value)) ? Number(a.value) : a.value, d: 2 },
       ]));
       s.labels.body.replaceChildren(kv(Object.entries(a.labels).map(([k, v]) => [k, maskText(String(v))])));
       s.ann.body.replaceChildren(kv(Object.entries(a.annotations || {}).map(([k, v]) => [k, maskText(String(v))])));
       const sel = `ALERTS{${Object.entries(a.labels).map(([k, v]) => `${k}=${lv(v)}`).join(',')}}`;
-      const secs = Math.min(24 * HOUR, Math.max(HOUR, Math.ceil((Date.now() - active) / 1000) + 600));
+      const secs = Math.min(24 * HOUR, Math.max(HOUR, Math.ceil((now() - anchor) / 1000) + 600));
       const tlP = fetchRange(tok, [{ q: sel, name: () => '' }], secs).then((r) => { if (r) putIn(s.tlBox, timeline(alertLanes(r, ctx.snap.alerts, ctx.nav).map((l) => ({ ...l, onOpen: null })), r.t0, r.t1, 'not active in window')); });
       const inst = a.labels.instance;
       const rel = [];
@@ -287,7 +293,7 @@ export function alertView(alert0) {
       const rule = rules.find((r) => r.name === a.labels.alertname);
       s.rule.body.replaceChildren(rule ? kv([['Expression', rule.query], ['for', rule.duration ? `${rule.duration} s` : '0 s'], ['Rule health', rule.health]]) : el('p', 'na', 'rule not found'));
       const logsP = DEVICES.includes(inst)
-        ? lokiLogs(`{job="syslog",host=${lv(inst)}}`, { startNs: String(nsOf(active - 300000)), endNs: String(nsOf(Math.min(Date.now(), active + 300000))), limit: 100 })
+        ? lokiLogs(`{job="syslog",host=${lv(inst)}}`, { startNs: String(nsOf(anchor - 300000)), endNs: String(nsOf(Math.min(now(), anchor + 300000))), limit: 100 })
           .then((res) => putIn(s.logs.body, logList(inst, res.entries.slice(-40), ctx.nav, null, res)))
         : Promise.resolve(s.logs.body.replaceChildren(el('p', 'na', 'not a syslog-emitting device')));
       await Promise.all([tlP, logsP]);
@@ -298,7 +304,9 @@ export function alertView(alert0) {
 // ---- syslog line context -------------------------------------------------------------------
 export function loglineView(e) {
   let s;
-  let around = null, aroundRes = null, vol = null; // historical context does not change: fetched once, re-rendered on every mount (back / breadcrumb)
+  // the context around a line does not change: fetched once per data time (live: once; playback: again when the cursor
+  // moved, so nothing after the cursor is shown), re-rendered on every mount (back / breadcrumb)
+  let around = null, aroundRes = null, vol = null, at = null;
   const tok = {};
   const tMs = Number(e.ts.slice(0, 13));
   return {
@@ -308,7 +316,9 @@ export function loglineView(e) {
       body.append(s.sum, s.line.wrap, s.vol.wrap, s.ctx.wrap);
     },
     async update(ctx) {
-      if (s.ctx.body.childElementCount) return; // already rendered into the current mount
+      const pos = isPlayback() ? now() : 'live';
+      if (pos !== at) { around = aroundRes = vol = null; at = pos; s.ctx.body.replaceChildren(); }
+      if (s.ctx.body.childElementCount) return; // already rendered into the current mount, for this data time
       const kind = SEV_BAD.includes(e.sev) ? 'crit' : e.sev === 'warning' ? 'warn' : 'info'; // emergency / alert count as crit too
       s.sum.replaceChildren(tiles([
         { label: 'Time (JST)', value: jstFull.format(new Date(tMs)) },
@@ -316,10 +326,10 @@ export function loglineView(e) {
         { label: 'Severity', value: e.sev.toUpperCase(), kind, status: e.sev },
       ]));
       s.line.body.replaceChildren(logList(e.host, [e], ctx.nav, e.ts), linkList(DEVICES.includes(e.host) ? [[`Device ${e.host.toUpperCase()}`, () => ctx.nav.device(e.host)]] : []));
-      const volP = vol ? Promise.resolve(vol) : sevBuckets(tok, `{job="syslog",host=${lv(e.host)}}`, 1200, Math.min(Date.now(), tMs + 600000) / 1000).then((r) => (vol = r || vol));
+      const volP = vol ? Promise.resolve(vol) : sevBuckets(tok, `{job="syslog",host=${lv(e.host)}}`, 1200, Math.min(now(), tMs + 600000) / 1000).then((r) => (vol = r || vol));
       if (!around) {
         const t = BigInt(e.ts);
-        aroundRes = await lokiLogs(`{job="syslog",host=${lv(e.host)}}`, { startNs: String(t - 600000000000n), endNs: String(t + 600000000000n), limit: 1000, direction: 'forward' });
+        aroundRes = await lokiLogs(`{job="syslog",host=${lv(e.host)}}`, { startNs: String(t - 600000000000n), endNs: String(min(t + 600000000000n, BigInt(now()) * 1000000n)), limit: 1000, direction: 'forward' }); // never past the playback cursor
         const all = aroundRes.entries;
         const i = Math.max(0, all.findIndex((x) => x.ts === e.ts && x.line === e.line));
         around = all.slice(Math.max(0, i - 20), i + 21);

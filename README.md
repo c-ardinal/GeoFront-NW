@@ -108,7 +108,7 @@ docker compose --profile demo up -d --build
     - **Prometheus**: 文字列は `=` / `!=` のラベル一致の値としてだけ使えます。正規表現マッチ (`=~` `!~`) と、ラベルの文字列を読む・写す・並べる関数 (`label_replace` `label_join` `sort_by_label` `count_values` `info` `limitk` `limit_ratio`) は拒否します。パラメータは `query` と時刻 (`time` / `start` / `end` / `step`) だけです。
     - 共通: 文字列の中に完全な IPv4 / MAC、部分 IP (伏せた形とトークンを除いた残りに **数字.数字**。例 `113.50`、`2.4GHz` も該当)、部分 MAC (**4 組以上の 16 進ペア**。例 `5e:20:00:01`)、発行していないトークン、`\x2e` のように文字を隠すエスケープがあれば拒否します。
   - 伏せた形 (`203.0.113.x`、`02:00:5e:xx:xx:xx`) での絞り込みは使えます。ログビューアでは伏せた本文にそのまま一致します。Prometheus のラベル一致では「同じ先頭を持つ任意のアドレス」に書き換えます (例: `dst_ip="203.0.113.x"` は同じ /24 の全宛先)。
-  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) IPv6 は伏せません (デモデータに含まれません)。ドット区切りの MAC 表記 (`0200.5e10.0001`) も対象外です。(4) Grafana (`/grafana/`) と Prometheus (127.0.0.1:9090) は管理ツールとして生の値を表示します。マスク対象はコマンドセンター (`/prom/` `/loki/`) 経由の経路だけです。`OBS_BIND` で LAN 公開すると Grafana はログインが必要になります (`OBS_GRAFANA_ANON_ON_LAN=1` で匿名 Viewer に戻すと、LAN から生の値が見えます)。Prometheus の :9090 は常に 127.0.0.1 のみです。
+  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) 伏せ方は 2 通りです (P4)。**ラベル値** (値そのものが 1 つのアドレス) は形を保ちます: IPv4 `a.b.c.x~<トークン>`、IPv6 は先頭 64 ビット + `::x~<トークン>` (IPv4 と同じくトークンで絞り込めます)、MAC `aa:bb:cc:xx:xx:xx`。**本文** (ログ行・注記・クエリ文など) はアドレスを解析せず形だけで判定し、残す部分は次の 2 つだけです: 前後に英数字や `._:-` が付かない IPv4 (`192.0.2.x`、`:ポート` 付き `192.0.2.x:443`、YAMAHA の `.ポート` 付きはポートが 255 より大きくオクテットと取り違えようがないときだけ `192.0.2.x.50211`、それ以外は `x`) と、区切りがそろった 6 組の MAC (`02:00:5e:xx:xx:xx`)。それ以外のアドレスらしい並び (IPv6、7 組以上の MAC・client-id、英字に続く IPv4、`0011.2233.4455`、`c0000201` のような 16 進の 1 語など) は `x` になります。時刻・日付・`host:port`・`std::string`・数値だけの文字列はそのままです。見えない文字 (ゼロ幅など) は除き、全角や `。` `：` などの紛らわしい記号は ASCII として判定します。クエリ・行フィルタでは完全なアドレスと 16 進の断片を拒否します (`14:04:20` などの時刻・`10:443` は可)。(4) Grafana (`/grafana/`) と Prometheus (127.0.0.1:9090) は管理ツールとして生の値を表示します。マスク対象はコマンドセンター (`/prom/` `/loki/`) 経由の経路だけです。`OBS_BIND` で LAN 公開すると Grafana はログインが必要になります (`OBS_GRAFANA_ANON_ON_LAN=1` で匿名 Viewer に戻すと、LAN から生の値が見えます)。Prometheus の :9090 は常に 127.0.0.1 のみです。
 - 読み取り専用のプロキシ許可パスに `/prom/api/v1/rules` (GET のみ、アラートのルール式表示用) を追加しました。
 
 ## 異常注入
@@ -242,7 +242,7 @@ docker compose up -d
 git pull                              # compose.yaml のイメージ (タグ + digest) や設定が更新される
 docker compose run --rm tools backup  # 念のため
 docker compose pull                   # 固定された新しいイメージを取得
-docker compose up -d --build          # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す)
+OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build  # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す。OBS_COMMIT は証跡出力の版情報)
 docker compose run --rm tools check
 ```
 
@@ -356,6 +356,26 @@ docker compose run --rm tools check             # 「パケット取込とフロ
 ### デモ
 
 demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分。DHCP でホスト名を名乗る 6 台、ARP、DNS、NTP、TLS ClientHello の SNI、HTTP の Host、ドキュメント用アドレス宛ての通信) を繰り返し再生して、地球儀と通信先パネルのフローを作ります (`DEMO_PCAP_SCALE` 倍に拡大。ドキュメント用アドレスにはデモ用の架空の位置 `demo/demo-geo.json` を付け、203.0.113.50 / .60 などは Unknown のまま)。`DEMO_PCAP_REPLAY=0` にすると以前の demo-gen の合成フローに戻ります。解析画面ではこの pcap を開けます。pcap は `python demo/make_demo_pcap.py` で同じものを作り直せます (`--check` で一致を確認)。
+
+## 履歴再生と証跡出力 (P4)
+
+### 履歴再生 (PLAYBACK)
+
+- 入り方: 上部バーの「⋯」→「履歴再生 (PLAYBACK)」。上部バーの下 (スマートフォンは画面下のタブの上) に再生バーが出ます。最初は直近 1 時間の先頭で一時停止しています。
+- 期間: 再生バー左の期間ボタンで、直近 1h / 6h / 24h / 7d、または開始・終了の時刻 (JST) を指定します。保持期間 (Prometheus の `PROM_RETENTION` と Loki の `LOKI_RETENTION` の短い方。mask-api の `/evidence/info` で確認) より前を含む期間や未来の時刻は、理由を表示してボタンを無効にします。保持期間内でもデータが無い時刻は「—」で、0 にはしません。
+- 操作: 時間スライダ (15 秒単位)、再生 / 一時停止、コマ送り (15 秒)、速度 0.5 / 1 / 2 / 4 / 8×、「● LIVE に戻る」(WALLBOARD・直近 15 分・自動更新に戻り、最初のライブ取得が成功するまで STALE)。
+- 画面全体 (各パネル・地球儀のアーク・警報一覧・syslog・重要度・詳細ドロワー・モーダル) が「その時刻時点」のデータになります。Prometheus の即時クエリは `time=` を付け、範囲クエリ・Loki の時間窓はすべてその時刻で終わります (時刻は `util.now()` の 1 か所から全クエリが読みます)。警報一覧は TSDB の `ALERTS` / `ALERTS_FOR_STATE` から作るため、値と注記 (annotations) は「—」です。通知状態 (通知済・確認済…) は Alertmanager が現在しか持たないため、再生中は「—」とし、通知記録は証跡出力に入れます。確認 (ACK)・抑止の操作は再生中は無効です。
+- 再生中の表示: バナー欄に固定幅の「履歴再生 HH:MM:SS」(画面のデータの時刻) と、その時刻に発報していた CRIT/WARN の警報。鮮度バッジは PLAYBACK (経過時間と STALE の自動表示は出さず、その時刻の取得に失敗したパネルだけ STALE)。ライブの 10 秒ごとの取得は止まり、5 分無操作での自動復帰もしません (Esc は詳細を閉じるだけ)。
+- 負荷: 再生中の取得は前の取得が終わってから、かつ「15 秒 (収集間隔) ÷ 速度」以上 (最短 1 秒) あけて行い (1× は 15 秒ごと、8× は約 2 秒ごと)、そのあいだに進んだ分 (速度 × 経過時間) をまとめて進めます。サーバが遅いと 1 歩が大きくなるだけで、要求は増えません。スライダやコマ送りの操作は 1 秒以内に反映します。
+
+### 証跡出力
+
+- 詳細ドロワー (警報・機器・接続口・通信先・送信元) の「証跡を出力」、または再生バーの「証跡を出力」(再生中の期間全体) で zip をダウンロードします。期間は、再生中はその期間、ライブでは直近 1 時間 (警報は発報 10 分前から、最長 7 日)。ドロワーでは任意で保存済み pcap (リング・アップロード・デモ) の統計を含められます。
+- zip は mask-api (`GET /evidence/export`、読み取りのみ) がサーバ側で、画面と同じ読み取り経路 (許可リストと伏せ字) から組み立て、最後にもう一度、本文の規則で伏せ字を掛けます (上記 (3)。画面用のアドレストークンは除去、manifest のファイルの sha256 は伏せずにそのまま)。生の pcap は含めません (P3 の統計 JSON のみ)。ファイル名は `obs-evidence-<対象の種類>-<開始 JST>-<長さ>.zip` で、アドレスや機器名は入れません。
+- 中身: `manifest.json` (期間・対象・フィルタ・データソースと版 (Prometheus / Loki / Grafana / 本ツールのコミット)・出力日時・出力者 (今は `local`)・各ファイルの行数 / バイト数 / sha256 / 切り詰めの有無と理由)、`metrics/*.csv` (対象の範囲クエリ。クエリ文も manifest に記録)、`alerts/ALERTS.csv`・`alerts/ALERTS_FOR_STATE.csv` (警報の履歴)・`alerts/notifications.txt` (notify-relay の通知記録)・`alerts/rule.json` (警報のとき)、`logs/syslog.txt` (伏せ字済み)、`pcap/stats.json` (選んだとき)。
+- 上限 (超えた分は切り詰め、manifest の `truncated` / `truncated_by` に記録): 期間 7 日、1 系列あたり約 2000 点 (期間に応じて step を広げる)、CSV 1 本 50000 行 (`EVIDENCE_MAX_ROWS`)、ログ 1 本 20000 行 (`EVIDENCE_MAX_LINES`)、合計 24 MB (`EVIDENCE_MAX_MB`)、60 秒 (`EVIDENCE_TIME_BUDGET`)。同時に 1 件だけ (実行中は 429)、1 分に 6 件まで (`EVIDENCE_PER_MIN`、超えると 429)。proxy (Caddy) は `/evidence/*` を GET / HEAD だけ通します。
+- 本ツールのコミットはビルド時に渡します (実行時に `.git` は読みません): `OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build`。渡さないと manifest の版は `unknown` です。
+- 画面のスナップショット (PNG) は入れていません: ブラウザだけで DOM を画像にするには追加のライブラリが要るため (新しい依存は入れない方針)。必要ならブラウザのスクリーンショット機能で撮って添えてください。
 
 ## 既知の制限 (P1 時点)
 

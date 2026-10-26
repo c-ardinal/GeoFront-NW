@@ -1,6 +1,6 @@
 // Wallboard panel renderers. Rows open related detail through the `nav` callbacks (drawer views).
 import { $, el, cell, num, badge, row, head, bar, put, refocus, upState, has, fmtUptime, maskIp, maskText, cssVar, jstClock, SEV_KEYS, sevKey, sevName,
-  WALLBOARD, LARGE, fitRows, uiZoom, setTicker, clearTicker, jstHm, fmtDur } from './util.js';
+  WALLBOARD, LARGE, fitRows, uiZoom, setTicker, clearTicker, jstHm, fmtDur, now, isPlayback } from './util.js';
 
 // The demo's three devices; replaced in place by the inventory (/obs/config.json) in prod, before the first render.
 export const DEVICES = ['rtx1300', 'wlx413', 'wlx222'];
@@ -189,7 +189,7 @@ export function drawSpark(id, series, color, stepS) {
   ctx.clearRect(0, 0, w, h);
   const pts = series.length ? series[0].values.map(([t, v]) => [Number(t), Number(v)]) : [];
   if (pts.length < 2) return;
-  const t1 = Date.now() / 1000, t0 = t1 - 900;
+  const t1 = now() / 1000, t0 = t1 - 900;
   const vmax = Math.max(10, ...pts.map((p) => p[1])) * 1.15;
   const x = (t) => ((t - t0) / (t1 - t0)) * w;
   const y = (v) => h - (v / vmax) * h;
@@ -296,7 +296,7 @@ export function renderAlerts(alerts, nav, notify) {
     slot.title = nt.text;
     // detail line (since / value / summary) is shown on large screens only (style.css), where the panel has room
     const since = Date.parse(a.activeAt);
-    const detail = [Number.isFinite(since) && `since ${jstHm.format(new Date(since))} (${fmtDur((Date.now() - since) / 1000)})`,
+    const detail = [Number.isFinite(since) && `since ${jstHm.format(new Date(since))} (${fmtDur((now() - since) / 1000)})`,
       a.value !== undefined && `value ${Number(a.value).toPrecision(3)}`, nt.nextText, a.annotations.summary].filter(Boolean).join(' · ');
     const r = row([badge(kind, text), cell(a.labels.alertname, 'name', a.annotations.summary), cell(where, 'n sub'), slot, cell(detail, 'al-detail sub')],
       '', () => nav.alert(a), `details for ${a.labels.alertname} ${where}`); // label = focus key: stays the same when the state changes
@@ -312,7 +312,13 @@ export function renderAlerts(alerts, nav, notify) {
   const alarming = firing.filter((a) => ['critical', 'warning'].includes(a.labels.severity));
   const banner = $('alert-banner');
   document.body.classList.toggle('red-alert', alarming.length > 0);
-  banner.hidden = alarming.length === 0;
+  // PLAYBACK: the banner slot always shows "履歴再生 HH:MM:SS" (the time of the data on screen, fixed width), followed by
+  // the alerts that were alarming then; it is neutral (not red) when there were none
+  const pb = isPlayback();
+  const pbText = pb ? `履歴再生 ${jstClock.format(new Date(now()))}` : '';
+  banner.classList.toggle('pb-banner', pb);
+  banner.classList.toggle('pb-quiet', pb && !alarming.length);
+  banner.hidden = !pb && alarming.length === 0;
   const names = [...new Set(alarming.map((a) => `${a.labels.alertname}${a.labels.instance ? ` (${a.labels.instance})` : ''}`))];
   // Counts: the banner counts the alarming (critical + warning) alerts it names plus the total of firing alerts (incl.
   // info), which the alerts list header and tab also show. Counts sit in fixed-width slots and the prefix keeps one
@@ -321,12 +327,15 @@ export function renderAlerts(alerts, nav, notify) {
   const total = ` · ${firing.length} total`;
   const totalEl = el('span', 'tk-total');
   totalEl.append(' · ', el('span', 'tk-n', firing.length), ' total');
-  const lead = [el('span', 'tk-tag', 'ALERT ■ '), el('span', 'tk-n', alarming.length), ' CRIT/WARN', totalEl, ':'];
-  if (alarming.length) setTicker(banner, lead, names.join(' · ')); else clearTicker(banner);
-  banner.title = alarming.length ? `ALERT ■ ${alarming.length} CRIT/WARN${total}: ${names.join(' · ')}` : '';
+  const pbTag = () => (pb ? [el('span', 'tk-pb', pbText)] : []);
+  const lead = [...pbTag(), el('span', 'tk-tag', 'ALERT ■ '), el('span', 'tk-n', alarming.length), ' CRIT/WARN', totalEl, ':'];
+  if (alarming.length) setTicker(banner, lead, names.join(' · '));
+  else if (pb) setTicker(banner, pbTag(), firing.length ? `no CRIT/WARN alerts at this time · ${firing.length} info` : 'no firing alerts at this time');
+  else clearTicker(banner);
+  banner.title = `${pb ? `${pbText} (data time, JST) · ` : ''}${alarming.length ? `ALERT ■ ${alarming.length} CRIT/WARN${total}: ${names.join(' · ')}` : pb ? 'no CRIT/WARN alerts at this time' : ''}`;
   // the banner is a button (always focusable while shown: tabindex in the markup); the announcement is a separate
   // live region, updated only when the alert set changes
-  banner.setAttribute('aria-label', alarming.length ? `${alarming.length} critical or warning alerts firing: ${names.join(', ')}. Open the alert list` : 'No alerts');
+  banner.setAttribute('aria-label', `${pb ? `${pbText}. ` : ''}${alarming.length ? `${alarming.length} critical or warning alerts firing: ${names.join(', ')}. Open the alert list` : 'No alerts'}`);
   const said = alarming.length ? `Alert: ${alarming.length} firing: ${names.join(', ')}` : '';
   if ($('alert-sr').textContent !== said) $('alert-sr').textContent = said;
   $('tab-alert-n').textContent = firing.length || '';
@@ -441,5 +450,11 @@ function fitLogRows(box) {
     r.style.animation = 'none'; // older lines coming back into view, not new arrivals
     box.prepend(r);
   }
+}
+// a new time position (playback seek, entering / leaving playback): the feed restarts from that position's lines
+export function resetLogs(seenLogs) {
+  seenLogs.clear();
+  logBuf = [];
+  $('logs').replaceChildren();
 }
 export const fitLogs = () => { if (logNav) refocus($('logs'), () => fitLogRows($('logs'))); };
