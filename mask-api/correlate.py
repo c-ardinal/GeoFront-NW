@@ -337,6 +337,11 @@ def selftest():
     assert all(i["score"] == 2 for i in out["items"] if i.get("instance") == "wlx222") and out["items"][-1]["kind"] == "surge"  # unrelated last
     assert [i["t"] for i in out["items"] if i["score"] == 2] == sorted(i["t"] for i in out["items"] if i["score"] == 2)
     assert any(p.startswith("syslog: loki slow") for p in out["partial"]) and "原因と断定" in out["notice"]
+    # P6: a notify record of an address-valued device carries mask-api's token (notify-relay, shared key): the same device
+    tok, other = M.mask_value("192.0.2.10"), M.mask_value("192.0.2.11")
+    line = M.mask_line({"job": "notify"}, json.dumps({"alertname": "DeviceDown", "instance": tok, "status": "firing", "receiver": "r", "result": "ok"}))
+    ev = loki_events("notify", {"result": [{"stream": {"job": "notify"}, "values": [[str(int(t0 * 1e9)), line]]}]})[0]
+    assert ev["instance"] == tok and relate(ev, {"instance": tok}) == (2, ["同じ機器"]) and relate(ev, {"instance": other}) == (0, ["同時期"]), ev
     # request checks
     good = f"at={now - 60}&from={now - 660}&to={now}"
     assert parse(good, now)["ctx"] == {}

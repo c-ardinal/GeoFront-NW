@@ -276,6 +276,7 @@ docker compose run --rm tools check
 ## アラート通知 (P2)
 
 Prometheus のアラートはすべて Alertmanager に送られ、Alertmanager が重大度 (critical / warning / info) ごとの送り先・再通知・復旧通知・抑止を受け持ちます。実際の送信は notify-relay が行い、通知文は日本語で、機器名・対象 (ifName)・値・開始時刻 (JST)・画面へのリンク (`OBS_PUBLIC_URL/?open=alerts`、開くと警報一覧) を含み、IP / MAC は mask-api と同じ規則で伏せます (例 `192.168.100.x`、`00:a0:de:xx:xx:xx`)。復旧 (resolved) も通知します。
+- 通知記録 (Loki `{job="notify"}`、P6): ラベル値 (instance / ifName) が IPv4 アドレスそのもののときは、画面と同じ `a.b.c.x~<トークン>` で記録します (mask-api と同じ HMAC・同じ鍵)。画面・原因候補で同じ機器として突き合わせられます (証跡の zip ではトークンを除き、そのような機器の範囲では記録をトークンで正確に選びます)。鍵は mask-api のプロセスごとの鍵で、新しい秘密値は増やしていません: mask-api がメモリ上だけのボリューム (`token-key`、tmpfs) に書き、notify-relay が読み取り専用で読みます (他のコンテナは見えません)。鍵が無いとき (まだ書かれていない・読めない) は従来どおり `a.b.c.x` で記録します。mask-api は記録のトークンを今の鍵で確かめ、合わないもの (mask-api と notify-relay がどちらも止まって鍵が変わる前の記録など) はトークンを外して `a.b.c.x` で表示します。IPv6 アドレスそのもののラベル値は `x` です。通知先へ送る本文の伏せ字は変わりません (本文にトークンは入れません)。
 
 - **既定はどこにも送りません。** 通知先は `alerting/receivers.yaml` (git 管理外。書式は `alerting/receivers.example.yaml`) に書き、秘密値 (Webhook URL・トークン・SMTP パスワード) は `.env` だけに置きます。setup (prod-setup / `tools targets`) がこの 2 つから Alertmanager の設定 (秘密値なし) と notify-relay の設定 (秘密値あり、`generated` ボリュームに権限 600) を作ります。ログに秘密値は出しません。
 - 通知先の種類: メール (SMTP。`SMTP_TLS=starttls` / `tls` / `none`)、Slack (Incoming Webhook)、Discord (Webhook)、LINE (Messaging API の push。LINE Notify は 2025 年に終了済みのため使いません。チャネルアクセストークンを `.env`、送り先のユーザー ID / グループ ID を receivers.yaml に)、汎用 Webhook (JSON を POST。任意で Bearer トークン)。秘密値は種類ごとに 1 組です (メールの宛先は 1 件に複数書けます)。
@@ -395,11 +396,14 @@ demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分�
 ### 証跡出力
 
 - 詳細ドロワー (警報・機器・接続口・通信先・送信元) の「証跡を出力」、または再生バーの「証跡を出力」(再生中の期間全体) で zip をダウンロードします。期間は、再生中はその期間、ライブでは直近 1 時間 (警報は発報 10 分前から、最長 7 日)。ドロワーでは任意で保存済み pcap (リング・アップロード・デモ) の統計を含められます。
-- zip は mask-api (`GET /evidence/export`、読み取りのみ) がサーバ側で、画面と同じ読み取り経路 (許可リストと伏せ字) から組み立て、最後にもう一度、本文の規則で伏せ字を掛けます (上記 (3)。画面用のアドレストークンは除去、manifest のファイルの sha256 は伏せずにそのまま)。生の pcap は含めません (P3 の統計 JSON のみ)。ファイル名は `obs-evidence-<対象の種類>-<開始 JST>-<長さ>.zip` で、アドレスや機器名は入れません。
+- zip は mask-api (`GET /evidence/export`、読み取りのみ。スナップショット付きは下記の POST) がサーバ側で、画面と同じ読み取り経路 (許可リストと伏せ字) から組み立て、最後にもう一度、本文の規則で伏せ字を掛けます (上記 (3)。画面用のアドレストークンは除去、manifest のファイルの sha256 は伏せずにそのまま)。生の pcap は含めません (P3 の統計 JSON のみ)。ファイル名は `obs-evidence-<対象の種類>-<開始 JST>-<長さ>.zip` で、アドレスや機器名は入れません。
 - 中身: `manifest.json` (期間・対象・フィルタ・データソースと版 (Prometheus / Loki / Grafana / 本ツールのコミット)・出力日時・出力者 (今は `local`)・各ファイルの行数 / バイト数 / sha256 / 切り詰めの有無と理由)、`metrics/*.csv` (対象の範囲クエリ。クエリ文も manifest に記録)、`alerts/ALERTS.csv`・`alerts/ALERTS_FOR_STATE.csv` (警報の履歴)・`alerts/notifications.txt` (notify-relay の通知記録)・`alerts/rule.json` (警報のとき)、`logs/syslog.txt` (伏せ字済み)、`pcap/stats.json` (選んだとき)。
-- 上限 (超えた分は切り詰め、manifest の `truncated` / `truncated_by` に記録): 期間 7 日、1 系列あたり約 2000 点 (期間に応じて step を広げる)、CSV 1 本 50000 行 (`EVIDENCE_MAX_ROWS`)、ログ 1 本 20000 行 (`EVIDENCE_MAX_LINES`)、合計 24 MB (`EVIDENCE_MAX_MB`)、60 秒 (`EVIDENCE_TIME_BUDGET`)。同時に 1 件だけ (実行中は 429)、1 分に 6 件まで (`EVIDENCE_PER_MIN`、超えると 429)。proxy (Caddy) は `/evidence/*` を GET / HEAD だけ通します。
+- 上限 (超えた分は切り詰め、manifest の `truncated` / `truncated_by` に記録): 期間 7 日、1 系列あたり約 2000 点 (期間に応じて step を広げる)、CSV 1 本 50000 行 (`EVIDENCE_MAX_ROWS`)、ログ 1 本 20000 行 (`EVIDENCE_MAX_LINES`)、合計 24 MB (`EVIDENCE_MAX_MB`)、60 秒 (`EVIDENCE_TIME_BUDGET`)。同時に 1 件だけ (実行中は 429)、1 分に 6 件まで (`EVIDENCE_PER_MIN`、超えると 429)。proxy (Caddy) は `/evidence/*` を GET / HEAD と、スナップショット付きの `POST /evidence/export` (127.0.0.1 公開のときだけ) だけ通します。
 - 本ツールのコミットはビルド時に渡します (実行時に `.git` は読みません): `OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build`。渡さないと manifest の版は `unknown` です。
-- 画面のスナップショット (PNG) は入れていません: ブラウザだけで DOM を画像にするには追加のライブラリが要るため (新しい依存は入れない方針)。必要ならブラウザのスクリーンショット機能で撮って添えてください。
+- 画面のスナップショット (P6、任意・既定はオフ): 詳細ドロワーの証跡出力にある「画面の画像」にチェックを入れると、押した時点の画面 (表示中のまま = 伏せ字済み) をブラウザ内で PNG にして zip に `snapshot.png` として入れます。新しいライブラリは使いません (画面を複製して SVG の foreignObject で描き、地球儀 (WebGL) などの canvas はその場で描いた画像として差し込みます)。複製の中の文字はもう一度 IPv4 / MAC を伏せ、画面用のアドレストークンを除き、入力欄に打った文字は空にします。manifest の `snapshot` に `generated_by: "browser"`・sha256・大きさ (px) を記録し、`files` にも `source: "browser"` で載せます。サーバ (mask-api) は PNG であること (署名・各 chunk の CRC・8192 px 以下・8 MB 以下 `EVIDENCE_SNAPSHOT_MAX_MB`) を確かめ、画像の chunk (IHDR / PLTE / IDAT / IEND) だけを残します (文字・時刻・EXIF などのメタデータは入りません。ファイル名にもアドレスは入りません)。画像はブラウザが作ったものなので、zip の他のファイルのようにサーバのデータから作ったものではありません。
+  - 書き込みの規則: スナップショット付きの出力は PNG を送る `POST /evidence/export` (他は今までどおり GET) で、抑止・ACK と同じ制限です: **127.0.0.1 公開のときだけ**、同じオリジン + `X-Obs-Csrf`、証跡出力の同時 1 件・1 分 6 件。
+  - **LAN 公開時** (`OBS_BIND` が 127.x 以外): proxy と mask-api の両方が POST を 403 で拒否します (認証が無いため)。画面は理由 (`スナップショットなし: LAN 公開中は…`) を表示し、スナップショットなしの zip をそのまま出力します。作れないブラウザ (foreignObject の画像を canvas に描くと読めなくなるブラウザ、読めない canvas) や大きすぎる画像でも同じく理由を表示して PNG なしで出力します。
+  - 制限: 写るのは表示中の画面 (ウィンドウの大きさ、最大 4096 px、devicePixelRatio は 2 まで) です。各パネルのスクロール位置は保たず、それぞれの先頭を描きます。Web フォント (Google Fonts) は埋め込めないため文字はシステムのフォントになります。履歴再生バーと原因候補の「証跡」には付けていません (ドロワーの証跡出力だけ)。
 
 ## ネットワーク図と相関 (P5)
 

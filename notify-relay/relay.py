@@ -9,6 +9,12 @@ masked with the same rules as mask-api), sends it to that receiver's destination
 Why not Alertmanager's own integrations: it has none for the LINE Messaging API, and its results (the HTTP / SMTP answer
 per destination) are only in its log, which `tools` cannot read. Here one masking function covers every channel.
 
+Address tokens (P6): a label value of a record (instance / ifName) that is exactly one IPv4 address is recorded as
+mask-api shows it, a.b.c.x~<token>, with mask-api's own HMAC and key, so the screens and 原因候補 can match the record to
+the same device. The key is mask-api's per-process key, shared through the memory-only token-key volume (mask-api writes
+it, this relay only reads it); no key (not there yet, unreadable) -> a.b.c.x as before (fail closed). The messages sent
+to the destinations are not affected (masked as before, no tokens).
+
 Secrets: only in the generated config (/etc/obs-generated/notify/relay.json, mode 0600, written by `tools targets`
 from .env). Nothing secret is logged: log lines name the receiver and the answer, never a URL or a token.
 
@@ -21,7 +27,10 @@ Run: python relay.py            (listens on :9095, internal network only)
 """
 import contextlib
 import email.policy
+import hashlib
+import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -62,6 +71,9 @@ REAP_PASSES = 3
 RETRY_AFTER_MAX_S = 10  # a 429 / 503 asking for at most this long is retried here once; longer: Alertmanager retries
 RETRY_KEY_WINDOW_S = 300  # LINE X-Line-Retry-Key window cap; the window is min(this, group_interval) (see line_retry_key)
 ACK_RE = re.compile(r"^ACK\b")  # an ACK silence's comment (the same rule in mask-api and the command-center)
+TOKEN_KEY = Path(os.environ.get("RELAY_TOKEN_KEY", "/run/obs-key/token.key"))  # mask-api's key (compose: token-key volume)
+TOKEN_LEN = 12  # mask_api.TOKEN_LEN
+EXACT_V4 = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}")  # mask_api.IPV4 as mask_value uses it: fullmatch
 
 # Same rules as mask-api (mask_text): IPv4 -> a.b.c.x, MAC -> aa:bb:cc:xx:xx:xx.
 IPV4 = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b")
@@ -87,6 +99,41 @@ _cfg = {"mtime": None, "data": None}
 
 def mask(s):
     return MAC.sub(r"\1\2xx\2xx\2xx", IPV4.sub(r"\1.x", str(s)))
+
+
+_key = {"stamp": None, "key": None}
+_key_lock = threading.Lock()
+
+
+def token_key():
+    """mask-api's address-token key (32 bytes), re-read when mask-api has replaced it, or None."""
+    with _key_lock:
+        try:
+            st = TOKEN_KEY.stat()
+            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+            if stamp != _key["stamp"]:
+                k = TOKEN_KEY.read_bytes()
+                _key.update(stamp=stamp, key=k if len(k) == 32 else None)
+        except OSError:
+            _key.update(stamp=None, key=None)
+        return _key["key"]
+
+
+def label_value(s, key):
+    """A record's label value as mask-api's mask_value shows it: exactly one IPv4 -> a.b.c.x~<token> (same HMAC-SHA256
+    of the whole value, same key), without the key a.b.c.x; exactly one IPv6 -> x (its /64 is not recorded); anything
+    else as free text (mask)."""
+    s = str(s)
+    m = EXACT_V4.fullmatch(s)
+    if m:
+        return f"{m.group(1)}.x~{hmac.new(key, s.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN]}" if key else f"{m.group(1)}.x"
+    if ":" in s and len(s) <= 45:
+        try:
+            ipaddress.IPv6Address(s)
+            return "x"
+        except ValueError:
+            pass
+    return mask(s)
 
 
 def config():
@@ -303,16 +350,16 @@ SENDERS = {"email": send_email, "slack": send_slack, "discord": send_discord, "l
 
 # ---- records (Loki + memory) --------------------------------------------------------------------
 
-def records(name, rtype, payload, result, detail, repeat, now, text=None):
+def records(name, rtype, payload, result, detail, repeat, now, text=None, key=None):
     """One record per alert of the notification (what the command-center matches by fingerprint). text: the rendered,
-    masked message (kept for the demo sink, so the demo shows what would have been sent)."""
+    masked message (kept for the demo sink, so the demo shows what would have been sent). key: the token key or None."""
     out = []
     for a in payload.get("alerts") or []:
         labels = a.get("labels") or {}
         sev = labels.get("severity", "")
         out.append({"t": now, "receiver": name, "type": rtype, "status": a.get("status"), "result": result, "starts": a.get("startsAt", ""),
                     "detail": detail, "fingerprint": a.get("fingerprint", ""), "alertname": labels.get("alertname", ""),
-                    "instance": mask(labels.get("instance", "")), "ifName": labels.get("ifName", ""), "severity": sev,
+                    "instance": label_value(labels.get("instance", ""), key), "ifName": label_value(labels.get("ifName", ""), key), "severity": sev,
                     "repeat_s": repeat.get(sev), "test": labels.get("obs_test", ""), **({"message": text} if text else {})})
     return out
 
@@ -337,7 +384,7 @@ def is_test_resolved(payload):
     return bool(alerts) and all((a.get("labels") or {}).get("alertname") == TEST_ALERT and a.get("status") == "resolved" for a in alerts)
 
 
-def notify(name, payload, cfg, now=None, send=None, push=push_loki):
+def notify(name, payload, cfg, now=None, send=None, push=push_loki, key=token_key):
     """-> HTTP status for Alertmanager: 200 sent; 400 the destination refused (no retry helps); 502 retry later."""
     r = cfg.get("receivers", {}).get(name)
     if r is None:
@@ -353,7 +400,7 @@ def notify(name, payload, cfg, now=None, send=None, push=push_loki):
     detail = mask(detail)  # an SMTP / HTTP answer may quote an address
     # the sink keeps the message without the link line (every read masks IPs, which would break the screens' own URL)
     kept = text.split(LINK_PREFIX)[0].rstrip() if r["type"] == "sink" else None
-    recs = records(name, r["type"], payload, result, detail, cfg.get("repeat", {}), now or time.time(), kept)
+    recs = records(name, r["type"], payload, result, detail, cfg.get("repeat", {}), now or time.time(), kept, key())
     RESULTS.extend(recs)
     push(recs)
     log(f"notify {name} ({r['type']}) {payload.get('status')} {len(recs)} alert(s): { {'ok': 'OK', 'partial': 'PARTIAL', 'failed': 'NG'}[result] } {detail}")
@@ -504,9 +551,35 @@ def selftest():
            "repeat": {"critical": 3600}, "public_url": ""}
     pushed = []
     sent = lambda ok, code: (lambda r, s, t, p: (ok, code, f"HTTP {code}"))
-    assert notify("s", {"status": "firing", "alerts": [fire]}, cfg, 100.0, sent(True, 200), pushed.extend) == 200
+    assert notify("s", {"status": "firing", "alerts": [fire]}, cfg, 100.0, sent(True, 200), pushed.extend, key=lambda: None) == 200
     assert pushed[-1]["result"] == "ok" and pushed[-1]["repeat_s"] == 3600 and pushed[-1]["fingerprint"] == "0123456789abcdef"
-    assert pushed[-1]["instance"] == "192.0.2.x" and pushed[-1]["t"] == 100.0
+    assert pushed[-1]["instance"] == "192.0.2.x" and pushed[-1]["t"] == 100.0  # no key: fail closed, no token
+    # address tokens: the same as mask-api's for the same address and key (golden vector, asserted in mask-api too)
+    gold = bytes(range(32))
+    assert label_value("192.0.2.10", gold) == "192.0.2.x~141e10c52e03" and label_value("192.0.2.11", gold) == "192.0.2.x~65ccf18bfbf0"
+    assert label_value("192.0.2.10", None) == "192.0.2.x" and label_value("2001:db8::1", gold) == "x" == label_value("2001:db8::1", None)
+    assert label_value("rtx1300", gold) == "rtx1300" and label_value("aa:bb:cc:dd:ee:ff", gold) == "aa:bb:cc:xx:xx:xx"
+    assert label_value("192.0.2.10:161", gold) == "192.0.2.x:161"  # not exactly one address: free text, no token
+    out = []
+    assert notify("s", {"alerts": [fire]}, cfg, 1, lambda r, s_, t, p: out.append(s_ + t) or (True, 200, "HTTP 200"), pushed.extend, key=lambda: gold) == 200
+    assert pushed[-1]["instance"] == "192.0.2.x~141e10c52e03", pushed[-1]
+    assert "~" not in out[-1] and "192.0.2.x" in out[-1] and "192.0.2.10" not in out[-1]  # the message sent out: unchanged, no token
+    assert notify("s", {"alerts": [fire]}, cfg, 1, sent(True, 200), pushed.extend, key=lambda: None) == 200
+    assert pushed[-1]["instance"] == "192.0.2.x"  # no key: fail closed
+    # the key file: missing / wrong length -> None (fail closed); replaced -> re-read
+    global TOKEN_KEY
+    real_key, tmp = TOKEN_KEY, Path(os.environ.get("TMPDIR") or os.environ.get("TEMP") or "/tmp") / f"relay-key-{os.getpid()}"
+    try:
+        TOKEN_KEY = tmp
+        assert token_key() is None
+        tmp.write_bytes(b"short")
+        assert token_key() is None
+        tmp.write_bytes(gold)
+        os.utime(tmp, ns=(1, 2))
+        assert token_key() == gold
+    finally:
+        TOKEN_KEY = real_key
+        tmp.unlink(missing_ok=True)
     assert notify("s", {"alerts": [fire]}, cfg, 1, sent(False, 404), pushed.extend) == 400  # refused: no retry
     assert notify("s", {"alerts": [fire]}, cfg, 1, sent(False, 503), pushed.extend) == 502  # retried by Alertmanager
     assert notify("m", {"alerts": [fire]}, cfg, 1, sent(False, 550), pushed.extend) == 400

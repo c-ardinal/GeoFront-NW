@@ -21,7 +21,12 @@ is the silence allowlist (create / extend / expire, for ACK and 抑止), see the
 
 Packet analysis (/pcap/, from the proxy): pcap_api.py, sharing this module's tokens, masking and write guards.
 
-Evidence export (/evidence/, from the proxy, GET only): evidence.py builds a zip from this module's own read paths.
+Evidence export (/evidence/, from the proxy): evidence.py builds a zip from this module's own read paths (GET); the one
+POST adds the browser's screen snapshot (PNG) to it, under the same write rules as the silences.
+
+notify-relay's records ({job="notify"}): the relay writes an address label value as a.b.c.x~<token> with this module's
+key (shared through the token-key volume, see shared_key); such a token is kept only when it checks out with the current
+key (mask_line), so the screens match the record to the same device.
 
 原因候補 (/correlate/, from the proxy, GET only): correlate.py lists what happened around a moment, read the same way.
 
@@ -153,9 +158,36 @@ REJECT_MSG = "full or partial IP/MAC addresses, regex matchers and other query f
 TOKEN_MSG = "unknown or expired address token; reload the page"
 
 # Opaque per-address tokens keep distinct addresses distinct in the UI (rows, keys, drill-downs)
-# without revealing them. The key is random per process, so tokens expire on restart.
+# without revealing them. The key is random per process, so tokens expire on restart (shared_key: shared with
+# notify-relay through a memory-only volume, and kept while that volume stays mounted).
 KEY = secrets.token_bytes(32)
+KEY_FILE = os.environ.get("OBS_TOKEN_KEY_FILE", "")  # compose: /run/obs-key/token.key (tmpfs volume token-key)
 MAX_TOKENS = 65536
+
+
+def shared_key(path, key):
+    """-> the token key of this process. A valid key already in path (written by an earlier mask-api process while the
+    memory-only volume stayed mounted) is reused, so tokens and notify-relay's records stay comparable across a restart of
+    mask-api alone; else key is written there for notify-relay (readable by it, the only other container mounting the
+    volume, read-only). No path / not writable: key stays private (notify-relay then records a.b.c.x)."""
+    if not path:
+        return key
+    try:
+        with open(path, "rb") as f:
+            old = f.read(64)
+        if len(old) == 32:
+            return old
+    except OSError:
+        pass
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"token key not shared ({type(e).__name__}): notify-relay records addresses without tokens", file=sys.stderr)
+    return key
 
 
 class TokenStore(OrderedDict):
@@ -388,12 +420,58 @@ def mask_value(s):
     return mask_text(s)
 
 
+RELAY_TOKEN = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3})\.x~([0-9a-f]{%d})" % TOKEN_LEN)
+_relay_bad = set()  # (prefix, token) pairs that did not check out (an older key): not tried again
+RELAY_BAD_MAX = 4096
+
+
+def relay_value(v):
+    """One value of a notify-relay record. a.b.c.x~<token> (the relay's form of an IPv4 label value) is kept, and its
+    token registered, only when one address a.b.c.0-255 gives that token under this process's key; else (made with an
+    older key, forged) -> a.b.c.x. Everything else is masked like any other JSON value."""
+    m = RELAY_TOKEN.fullmatch(v) if isinstance(v, str) else None
+    if not m:
+        return mask_json(v)
+    prefix, tok = m.groups()
+    known = TOKENS.get(tok)
+    if known is not None and known.rpartition(".")[0] == prefix:
+        return v
+    if (prefix, tok) not in _relay_bad:
+        for d in range(256):
+            ip = f"{prefix}.{d}"
+            if hmac.new(KEY, ip.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN] == tok:
+                TOKENS[tok] = ip
+                return v
+        if len(_relay_bad) >= RELAY_BAD_MAX:  # ponytail: dropped all at once, a few repeated searches after that
+            _relay_bad.clear()
+        _relay_bad.add((prefix, tok))
+    return f"{prefix}.x"
+
+
+def mask_line(stream, line):
+    """One Loki line. notify-relay's records ({job="notify"}, one JSON object per line) are masked value by value
+    (relay_value), so a checked address token survives; every other line (and a notify line that is not such an object)
+    as free text, like before."""
+    if isinstance(stream, dict) and stream.get("job") == "notify" and isinstance(line, str) and line.startswith("{"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            rec = None
+        if isinstance(rec, dict):
+            return json.dumps({mask_text(str(k)): relay_value(x) for k, x in rec.items()}, ensure_ascii=False)
+    return mask_text(line) if isinstance(line, str) else mask_json(line)
+
+
 def mask_json(v):
     if isinstance(v, str):
         return mask_value(v)
     if isinstance(v, list):
         return [mask_json(x) for x in v]
     if isinstance(v, dict):
+        st = v.get("stream")
+        if isinstance(st, dict) and st.get("job") == "notify" and isinstance(v.get("values"), list):  # a Loki stream of records
+            return {mask_text(k): [[mask_json(e[0]), mask_line(st, e[1]), *mask_json(e[2:])] if isinstance(e, list) and len(e) >= 2 else mask_json(e)
+                                   for e in x] if k == "values" else mask_json(x) for k, x in v.items()}
         out = {mask_text(k): pcap_api.mask_free(x) if k in FREE_LABELS and isinstance(x, str) else mask_json(x) for k, x in v.items()}
         labels, notes = v.get("labels"), v.get("annotations")
         if isinstance(labels, dict) and isinstance(notes, dict):  # an alert: its text may quote those label values
@@ -757,7 +835,7 @@ def run_count(spec, get_page=loki_page, page_size=LOKI_MAX_LINES, budget_s=SCAN_
     entries = []
     try:
         for new in scan:
-            entries += [(mask_json(st), ts, mask_text(line)) for st, ts, line in new]
+            entries += [(mask_json(st), ts, mask_line(st, line)) for st, ts, line in new]
             if scan.scanned >= SCAN_MAX_LINES:  # raw lines read (overlapping pages re-read some), not deduped
                 scan.partial.append("line cap reached")
                 break
@@ -806,7 +884,7 @@ def run_log(spec, get_page=loki_page, page_size=LOKI_MAX_LINES, budget_s=SCAN_DE
     try:
         for new in scan:
             for st, ts, line in new:
-                masked = mask_text(line)
+                masked = mask_line(st, line)
                 if passes(masked, spec.filters):
                     hits.append((ts, mask_json(st), masked))
             if len(hits) >= spec.limit and settled(hits, spec, scan, overlap_ns):
@@ -1161,7 +1239,7 @@ def respond(method, raw_path, headers, read_body, gone=None):
         if raw_path.startswith("/pcap/"):
             return pcap_api.handle(method, raw_path, headers, read_body)
         if raw_path.startswith("/evidence/"):
-            return evidence.handle(method, raw_path, headers, gone)
+            return evidence.handle(method, raw_path, headers, gone, read_body)
         if raw_path.startswith("/correlate/"):
             return correlate.handle(method, raw_path)
         url, post, err = route(method, raw_path)
@@ -1223,6 +1301,45 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):  # replaced by the single line in _handle
         pass
+
+
+def relay_selftest():
+    """notify-relay's tokens: same as mask_value's for the same key and address (golden vector, also in relay.py), kept
+    in its records only when they check out with the current key; the shared key file."""
+    global KEY
+    real = KEY
+    try:
+        KEY = bytes(range(32))
+        assert mask_value("192.0.2.10") == "192.0.2.x~141e10c52e03" and mask_value("192.0.2.11") == "192.0.2.x~65ccf18bfbf0"
+        TOKENS.pop("141e10c52e03", None)
+        rec = {"receiver": "demo-sink", "instance": "192.0.2.x~141e10c52e03", "ifName": "lan2", "detail": "HTTP 550 192.0.2.10 aa:bb:cc:dd:ee:ff",
+               "message": "【重大】 機器が応答しません (192.0.2.x)", "fingerprint": "0123456789abcdef", "t": 1.5}
+        forged = {**rec, "instance": "192.0.2.x~000000000000"}
+        page = {"status": "success", "data": {"resultType": "streams", "result": [
+            {"stream": {"job": "notify", "receiver": "demo-sink"}, "values": [["1", json.dumps(rec, ensure_ascii=False)], ["2", json.dumps(forged)], ["3", "not json 192.0.2.10"]]},
+            {"stream": {"job": "syslog"}, "values": [["4", json.dumps(rec)]]}]}}
+        out = mask_json(page)["data"]["result"]
+        got = json.loads(out[0]["values"][0][1])
+        assert got["instance"] == "192.0.2.x~141e10c52e03" and TOKENS.get("141e10c52e03") == "192.0.2.10"  # checked, registered (drill-down)
+        assert got["detail"] == "HTTP 550 192.0.2.x aa:bb:cc:xx:xx:xx" and got["t"] == 1.5 and got["message"] == rec["message"], got
+        assert json.loads(out[0]["values"][1][1])["instance"] == "192.0.2.x"  # unknown / older key: no token
+        assert out[0]["values"][2][1] == "not json 192.0.2.x" and "~141e10c52e03" not in out[1]["values"][0][1]  # other lines: free text
+        assert mask_line({"job": "notify"}, json.dumps(rec)) == json.dumps(got, ensure_ascii=False)  # the scanned paths: the same
+        assert mask_line({"job": "syslog"}, "192.0.2.10 up") == "192.0.2.x up"
+        KEY = secrets.token_bytes(32)  # mask-api restarted with a new key (and an empty token table): an old record keeps no token
+        TOKENS.pop("65ccf18bfbf0", None)
+        assert json.loads(mask_line({"job": "notify"}, json.dumps({**rec, "instance": "192.0.2.x~65ccf18bfbf0"})))["instance"] == "192.0.2.x"
+    finally:
+        KEY = real
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "token.key")
+        k1 = shared_key(path, b"1" * 32)
+        assert k1 == b"1" * 32 and open(path, "rb").read() == k1
+        assert shared_key(path, b"2" * 32) == k1  # still in the volume: reused
+        open(path, "wb").write(b"bad")
+        assert shared_key(path, b"3" * 32) == b"3" * 32 == open(path, "rb").read()
+        assert shared_key(os.path.join(d, "missing", "token.key"), b"4" * 32) == b"4" * 32 and shared_key("", b"5" * 32) == b"5" * 32
 
 
 # Adversarial probes (also replayed live by the evidence script). Every one must be rejected (400).
@@ -1855,6 +1972,7 @@ def selftest():
         mask_value(f"198.51.100.{i}")
     assert t1[-12:] not in TOKENS and len(TOKENS) <= 3 and mask_value("198.51.100.5")[-12:] in TOKENS  # LRU, bounded
     MAX_TOKENS = keep
+    relay_selftest()
     tok = mask_value("203.0.113.50")  # (re-register the token the alert tests use)
     am_selftest(tok)
     pcap_api.selftest()
@@ -1873,6 +1991,7 @@ if __name__ == "__main__":
     else:
         # The UI fires ~50 queries per refresh at once; the stdlib default backlog (5) drops SYNs,
         # which nginx reports as connect timeouts (504).
+        KEY = shared_key(KEY_FILE, KEY)
         ThreadingHTTPServer.request_queue_size = 256
         ThreadingHTTPServer.daemon_threads = True
         ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()

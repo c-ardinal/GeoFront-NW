@@ -8,6 +8,33 @@
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
 
+## P6 (docs/plans/v2/P6-SPEC.md) - implemented, uncommitted on main (HEAD 09e8cec), awaiting PM acceptance
+- N3 notify-record tokens: notify-relay records an exactly-IPv4 instance / ifName as a.b.c.x~<token> (mask-api's
+  HMAC-SHA256, 12 hex). No new secret: mask-api's per-process KEY is shared through a tmpfs volume `token-key`
+  (mask-api rw, writes /run/obs-key/token.key 0644 at start or reuses a valid one still there; notify-relay ro). No key
+  -> a.b.c.x (fail closed); exact IPv6 -> x. Outbound bodies unchanged (no tokens). mask-api masks {job="notify"} lines
+  value by value (mask_line / relay_value): a token is kept (and registered) only if it checks out against the current
+  key over a.b.c.0-255, else stripped. Evidence notify_keep matches tokens exactly, /24 fallback only for token-less
+  records (manifest note). Correlate relates them by instance equality.
+- Snapshot: drawer evidence option 「画面の画像」 (off, not stored); command-center/js/snapshot.js (no library:
+  DOM clone -> SVG foreignObject, canvases incl. WebGL globe (globe.redrawNow) as backgrounds, text re-masked + tokens
+  removed, typed inputs emptied, animations off, vertical scroll by items). POST /evidence/export (PNG body) under the
+  silence write rules (127.0.0.1 only / CSRF / same origin; Caddy 403 on LAN + 8 MB body cap); mask-api checks the PNG
+  (CRC, IHDR, <= 8192 px, <= 8 MB), keeps IHDR/PLTE/IDAT/IEND only; manifest.snapshot generated_by browser + sha256.
+  Fallback (LAN 403 / csrf / bad PNG / 413 / cannot render) -> GET export without PNG, reason in the status line.
+- Done (after the last code change): build selftests (mask-api / relay incl. golden token vector + fail closed, analyzer,
+  demo-gen, capture, tools; flowd ok in a clean container - under `compose run` its env makes an unrelated IPv6 assert
+  fail, untouched by P6), N3 E2E (relay token == HMAC(volume key), correlate 同じ機器 / other token 同時期, key reused
+  over a mask-api restart, older-key tokens stripped), export_check scopes + limits + snapshot (0 raw hits, PNG only
+  IHDR/IDAT/IEND, sha256 file = manifest, refusals 403/400/405/421), token-scoped device export (exact + /24 note),
+  browser p6/check-p6.js (shell) + probe-globe.js (gpu): option off by default, 44 px on touch widths, both themes,
+  390-2560 px, POST only when on, LAN-refused / untaintable fallbacks. Codex r1 (2 P2 fixed: X-Obs-Snapshot header,
+  truncated flag) r2 clean, r3 clean. Containers stopped (`docker compose stop`).
+- Open / limits: Caddy LAN 403 for the POST checked by selftest + route stub, not with a real LAN bind; snapshot has
+  system fonts (no web fonts), vertical scroll only; playback bar / 原因候補 「証跡」 have no snapshot option; tokens
+  change when mask-api and notify-relay both stop (tmpfs), older records then show a.b.c.x.
+- Evidence: scratchpad p6/ (final-*.log / *.txt, shots/, codex-r1..3.md).
+
 ## P5 (docs/plans/v2/P5-SPEC.md) - implemented, uncommitted on main (HEAD 6335c68), awaiting PM acceptance
 - Network map (command-center/js/topology.js): switch in the globe's controls (#g-view, localStorage cc-globe-view), same
   slot; graph = inventory (new optional parent / parent_if / uplink_if, tools/obs.py validates, config.json `links`) +

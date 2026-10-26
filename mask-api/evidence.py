@@ -9,7 +9,13 @@ and time only).
 Contents: manifest.json (window, scope, filters, sources and versions, this tool's commit (OBS_COMMIT, given at
 build time), who and when, every file with its rows / bytes / sha256 / truncation), metrics/*.csv (Prometheus range
 queries of the scope), alerts/ALERTS*.csv (+ rule.json for an alert), alerts/notifications.txt (notify-relay's
-records, Loki {job="notify"}), logs/syslog.txt (Loki, masked lines), pcap/stats.json (optional).
+records, Loki {job="notify"}), logs/syslog.txt (Loki, masked lines), pcap/stats.json (optional), snapshot.png (optional).
+
+Screen snapshot (P6): POST /evidence/export?<the same parameters> with a PNG body (Content-Type image/png) adds
+snapshot.png, made in the operator's browser from the screen as shown (command-center js/snapshot.js). It is a write
+like the silences: only while the screens are on 127.0.0.1 (or a trusted operator role), same origin + X-Obs-Csrf, the
+export's own limits (one at a time, a few per minute); size and dimensions capped; only the PNG's image chunks are
+kept (no text / time / EXIF metadata). The manifest records it as browser-generated, with its sha256.
 
 Limits: window <= 7 d, points per series, rows per CSV, log lines, total bytes, one time budget; whatever is cut is
 marked "truncated" in the manifest. One export at a time (429 while one runs), a few per minute (429).
@@ -28,6 +34,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from datetime import datetime, timedelta, timezone
 
 M = None  # mask_api (setup): read paths, masking, tokens, operator
@@ -46,6 +53,10 @@ MAX_BYTES = int(os.environ.get("EVIDENCE_MAX_MB", "24")) * 2**20  # all files, u
 BUDGET_S = int(os.environ.get("EVIDENCE_TIME_BUDGET", "60"))
 PER_MIN = int(os.environ.get("EVIDENCE_PER_MIN", "6"))
 PAGE = 5000  # Loki lines per page (its max_entries_limit_per_query)
+SNAPSHOT_MAX = int(os.environ.get("EVIDENCE_SNAPSHOT_MAX_MB", "8")) * 2**20  # the PNG body (Caddyfile: request_body)
+SNAPSHOT_MAX_SIDE = 8192  # px
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+PNG_KEEP = {b"IHDR", b"PLTE", b"IDAT", b"IEND"}  # the image itself; tEXt / iTXt / zTXt / tIME / eXIf / iCCP ... dropped
 JST = timezone(timedelta(hours=9))
 SCOPES = ("all", "device", "iface", "dest", "src", "alert")
 LABEL_PARAMS = ("instance", "ifName", "cc", "city", "ip", "host", "alertname", "severity")
@@ -381,10 +392,25 @@ class Zip:
         self.bytes += len(data)
         self.files.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), **meta})
 
+    def add_binary(self, name, data, **meta):
+        """A binary file made elsewhere (the snapshot PNG): stored as is, never cut. -> its sha256, or None (no room)."""
+        room = MAX_BYTES - self.bytes
+        if len(data) > room:
+            self.files.append({"name": name, "skipped": True, "reason": f"size cap (all files): {len(data)} bytes, {max(0, room)} left"})
+            return None
+        self.z.writestr(name, data, compress_type=zipfile.ZIP_STORED)
+        self.bytes += len(data)
+        digest = hashlib.sha256(data).hexdigest()
+        self.files.append({"name": name, "bytes": len(data), "sha256": digest, **meta})
+        return digest
+
     def close(self, manifest):
         """Everything taken from the sources (scope, queries, reasons, notes) is masked; the digests this module computed
         are added afterwards, untouched (masking would read 64 hex characters as an address)."""
         digests = [f.pop("sha256", None) for f in manifest["files"]]
+        snap = dict(manifest.get("snapshot") or {})
+        snap_digest = snap.pop("sha256", None)
+        manifest = {**manifest, "snapshot": snap}
         sources = dict(manifest["sources"])  # a copy: versions() hands out its cached dict
         rev = sources.pop("observatory", None)
         manifest = scrub_obj({**manifest, "sources": sources})
@@ -392,39 +418,53 @@ class Zip:
         for f, d in zip(manifest["files"], digests):
             if d:
                 f["sha256"] = d
+        if snap_digest:
+            manifest["snapshot"]["sha256"] = snap_digest
         self.z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode())
         self.z.close()
         return self.buf.getvalue()
 
 
-def notify_keep(req):
+def notify_keep(req, wide=None):
     """Notification records of the scope: an alert -> its alertname (+ instance / ifName / severity when given); a
-    device / interface -> its instance (+ ifName); other scopes -> all. Records are notify-relay's JSON lines."""
+    device / interface -> its instance (+ ifName); other scopes -> all. Records are notify-relay's JSON lines.
+    An address-valued label: notify-relay records it with mask-api's token (a.b.c.x~<token>, P6), matched exactly; a
+    record without one (written before the relay had the key, or with an older key: mask-api drops tokens that do not
+    check out) can only be matched by its a.b.c.x, so it is kept with the whole /24 and wide (a list) gets an entry."""
     L, scope = req["labels"], req["scope"]
     keys = {"alert": ("alertname", "instance", "ifName", "severity"), "device": ("instance",), "iface": ("instance", "ifName")}.get(scope)
     if not keys:
         return lambda e: True
-    want = {k: scrub(L[k]) for k in keys if L.get(k)}
-    # ponytail: notify-relay records an address-valued instance masked (a.b.c.x, no token), so two devices of one /24
-    # cannot be told apart there; such a scope keeps the records of the whole /24 (flagged in the manifest). Exact
-    # matching needs notify-relay to record a stable address token (follow-up outside mask-api)
+    want = {k: (L[k], scrub(L[k])) for k in keys if L.get(k)}
 
     def keep(e):
         try:
             r = json.loads(e[2])
         except ValueError:
             return False
-        return isinstance(r, dict) and all(scrub(str(r.get(k, ""))) == v for k, v in want.items())
+        if not isinstance(r, dict):
+            return False
+        loose = False
+        for k, (exact, masked) in want.items():
+            got = str(r.get(k, ""))
+            if TOKEN.search(exact) and TOKEN.search(got):
+                if got != exact:
+                    return False
+            elif scrub(got) != masked:
+                return False
+            elif TOKEN.search(exact):
+                loose = True
+        if loose and wide is not None:
+            wide.append(1)
+        return True
     return keep
 
 
-def build(req, headers, now, gone=None):
+def build(req, headers, now, gone=None, snap=None):
     budget = Budget(BUDGET_S, gone)
     t0, t1, secs = req["from"], req["to"], req["to"] - req["from"]
     step = step_for(secs)
-    z, notes = Zip(), []
-    if any(TOKEN.search(v) for v in req["labels"].values()):
-        notes.append("notification records name an address-valued device only as a.b.c.x: the records of every device in that /24 are included")
+    z, notes, wide = Zip(), [], []
 
     def skipped(name, why):
         z.files.append({"name": name, "skipped": True, "reason": why[:300]})
@@ -465,7 +505,10 @@ def build(req, headers, now, gone=None):
         logs("logs/syslog.txt", sl, lambda e: f"{jst(e[0] / 1e9)}\t{e[1].get('host', '?')}\t{e[1].get('severity', '?')}\t{e[2]}")
     else:
         notes.append("no syslog in this export: a destination / source host has no syslog stream of its own")
-    logs("alerts/notifications.txt", '{job="notify"}', lambda e: f"{jst(e[0] / 1e9)}\t{e[2]}", keep=notify_keep(req))
+    logs("alerts/notifications.txt", '{job="notify"}', lambda e: f"{jst(e[0] / 1e9)}\t{e[2]}", keep=notify_keep(req, wide))
+    if wide:
+        notes.append(f"{len(wide)} notification record(s) name an address-valued device only as a.b.c.x (no address token: recorded "
+                     "before notify-relay had mask-api's key, or with an older key): the records of every device in that /24 are included")
     if req["pcap"]:
         try:
             st = _pcap_stats(req["pcap"], req["pcap_filter"], budget.left() - 1)
@@ -473,6 +516,9 @@ def build(req, headers, now, gone=None):
                   file_kind=req["pcap"].split(":")[0], filter=req["pcap_filter"])
         except (P.Refused, P.Busy, P.AnalyzerDown, ValueError, OSError, Stop) as e:
             skipped("pcap/stats.json", P.mask_message(str(e)))
+    snapshot = snapshot_entry(z, snap)  # before "truncated": a snapshot left out under the size cap counts
+    if snap is not None:
+        snap["included"] = snapshot["included"]  # for the answer's X-Obs-Snapshot header
     manifest = {
         "format": "obs-evidence/1",
         "generated_at": jst(now), "generated_by": M.operator(headers),
@@ -485,10 +531,81 @@ def build(req, headers, now, gone=None):
                     "address-like text becomes x; address tokens removed; no raw packets"),
         "limits": {"max_rows_per_csv": req["max_rows"], "max_log_lines": req["max_lines"], "max_bytes": MAX_BYTES, "time_budget_s": BUDGET_S},
         "truncated": any(f.get("truncated") or f.get("skipped") for f in z.files),
-        "snapshot": "not included (a browser-side PNG of the screen would need an extra library; see README)",
+        "snapshot": snapshot,
         "files": z.files, "notes": notes,
     }
     return z.close(manifest)
+
+
+def snapshot_entry(z, snap):
+    """The snapshot PNG into the zip (last: the data files come first under the size cap) -> its manifest entry."""
+    if snap is None:
+        return {"included": False, "reason": "not requested"}
+    digest = z.add_binary("snapshot.png", snap["data"], source="browser", width=snap["width"], height=snap["height"])
+    if digest is None:
+        return {"included": False, "reason": "size cap (all files)"}
+    return {"included": True, "file": "snapshot.png", "generated_by": "browser", "sha256": digest, "bytes": len(snap["data"]),
+            "width": snap["width"], "height": snap["height"],
+            "note": ("made in the operator's browser from the screen as shown (already masked; there its text was masked once more and "
+                     "address tokens removed); the server only checked that it is a PNG and kept its image chunks (no text / time / EXIF "
+                     "metadata). It is a picture of the screen, not derived from the data files of this zip")}
+
+
+def clean_png(data):
+    """A PNG from the browser -> {"data": the PNG with only its image chunks, "width", "height"}; Refused otherwise."""
+    if not data.startswith(PNG_SIG):
+        raise Refused("snapshot: not a PNG")
+    out, pos, size, idat = [PNG_SIG], len(PNG_SIG), None, False
+    while pos + 12 <= len(data):
+        n = int.from_bytes(data[pos:pos + 4], "big")
+        kind, end = data[pos + 4:pos + 8], pos + 12 + n
+        if end > len(data) or zlib.crc32(data[pos + 4:pos + 8 + n]) != int.from_bytes(data[pos + 8 + n:end], "big"):
+            raise Refused("snapshot: damaged PNG")
+        if size is None:
+            if kind != b"IHDR" or n != 13:
+                raise Refused("snapshot: damaged PNG")
+            size = (int.from_bytes(data[pos + 8:pos + 12], "big"), int.from_bytes(data[pos + 12:pos + 16], "big"))
+            if not all(0 < x <= SNAPSHOT_MAX_SIDE for x in size):
+                raise Refused(f"snapshot: at most {SNAPSHOT_MAX_SIDE} x {SNAPSHOT_MAX_SIDE} px")
+        idat = idat or kind == b"IDAT"
+        if kind in PNG_KEEP:
+            out.append(data[pos:end])
+        pos = end
+        if kind == b"IEND":
+            break
+    else:
+        raise Refused("snapshot: damaged PNG")
+    if not idat:
+        raise Refused("snapshot: damaged PNG")
+    return {"data": b"".join(out), "width": size[0], "height": size[1]}
+
+
+def read_upload(headers, read_body):
+    """The POST body (read before any answer, so that a refusal reaches the client instead of a reset upload), or None
+    when its length is missing or over the cap (left unread: the connection is closed after the answer)."""
+    length = headers.get("Content-Length") or ""
+    if not length.isdigit() or not 0 < int(length) <= SNAPSHOT_MAX:
+        return None
+    data = read_body(int(length))
+    return data if len(data) == int(length) else None
+
+
+def read_snapshot(headers, data):
+    if (headers.get("Content-Type") or "").split(";")[0].strip().lower() != "image/png":
+        raise Refused("snapshot: Content-Type image/png required")
+    if data is None:
+        raise Refused(f"snapshot: 1 byte to {SNAPSHOT_MAX // 2**20} MB, complete")
+    return clean_png(data)
+
+
+def snapshot_refused(headers):
+    """The write rules of the silences (mask_api.writable / same_origin) -> an error body, or None."""
+    if not M.writable(headers)[0]:
+        return {"status": "error", "errorType": "forbidden",
+                "error": "LAN 公開中はスナップショット付きの証跡出力はできません (認証がありません)。スナップショットなしで出力できます"}
+    if headers.get(M.CSRF_HEADER) != "1" or not M.same_origin(headers):
+        return {"status": "error", "errorType": "csrf", "error": "cross-site or scripted request refused (same origin + X-Obs-Csrf required)"}
+    return None
 
 
 def filename(req):
@@ -510,11 +627,18 @@ def js(status, obj):
     return status, json.dumps(obj, ensure_ascii=False).encode(), "application/json"
 
 
-def handle(method, raw_path, headers, gone=None):
-    """-> (status, body, content type[, extra headers]). gone(): the client has disconnected (stop, free the slot)."""
-    if method not in ("GET", "HEAD"):
-        return js(405, {"status": "error", "error": "read-only"})
+def handle(method, raw_path, headers, gone=None, read_body=None):
+    """-> (status, body, content type[, extra headers]). gone(): the client has disconnected (stop, free the slot).
+    POST /evidence/export: the same export with the browser's snapshot PNG as the body."""
     parts = urllib.parse.urlsplit(raw_path)
+    post = method == "POST" and parts.path == "/evidence/export" and read_body is not None
+    if method not in ("GET", "HEAD") and not post:
+        return js(405, {"status": "error", "error": "read-only (POST only to /evidence/export, with a snapshot)"})
+    if post:
+        upload = read_upload(headers, read_body)
+        refused = snapshot_refused(headers)
+        if refused:
+            return js(403, refused)
     if parts.path == "/evidence/info":
         return js(200, info())
     if parts.path != "/evidence/export":
@@ -524,21 +648,41 @@ def handle(method, raw_path, headers, gone=None):
         req = parse(parts.query, now)
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "rejected", "error": str(e)})
+    snap = None
+    if post:
+        try:
+            snap = read_snapshot(headers, upload)
+        except Refused as e:
+            return js(400, {"status": "error", "errorType": "snapshot", "error": str(e)})
     if not LOCK.acquire(blocking=False):
         return js(429, {"status": "error", "errorType": "busy", "error": "別の証跡出力が実行中です。終わってからもう一度試してください"})
     try:
         if not allow(time.monotonic()):
             return js(429, {"status": "error", "errorType": "rate", "error": "証跡出力の回数が多すぎます。1 分待ってください"})
         try:
-            body = build(req, headers, now, gone)
+            body = build(req, headers, now, gone, snap)
         except Gone as e:
             return js(499, {"status": "error", "error": str(e)})
     finally:
         LOCK.release()
-    return 200, body, "application/zip", {"Content-Disposition": f'attachment; filename="{filename(req)}"'}
+    extra = {"Content-Disposition": f'attachment; filename="{filename(req)}"'}
+    if snap is not None:  # the screen says whether the zip really holds it (it may not fit under the size cap)
+        extra["X-Obs-Snapshot"] = "included" if snap.get("included") else "omitted (size cap)"
+    return 200, body, "application/zip", extra
 
 
 # ---- self-test (no services needed: reads are faked) -----------------------------------------------------------------
+
+def png_chunk(kind, payload):
+    return len(payload).to_bytes(4, "big") + kind + payload + zlib.crc32(kind + payload).to_bytes(4, "big")
+
+
+def png_fixture(w, h):
+    """A valid w x h greyscale PNG (selftest)."""
+    raw = b"".join(b"\x00" + b"\x80" * w for _ in range(h))
+    return PNG_SIG + png_chunk(b"IHDR", w.to_bytes(4, "big") + h.to_bytes(4, "big") + b"\x08\x00\x00\x00\x00") + \
+        png_chunk(b"IDAT", zlib.compress(raw)) + png_chunk(b"IEND", b"")
+
 
 def selftest():
     global _get, _pcap_stats, MAX_BYTES, BUDGET_S
@@ -584,6 +728,11 @@ def selftest():
     notify = [{"alertname": "LinkDown", "instance": "rtx1300", "ifName": "lan1", "severity": "warning", "status": "firing"},
               {"alertname": "LinkDown", "instance": "rtx1300", "ifName": "lan2", "severity": "warning"},
               {"alertname": "DeviceDown", "instance": "wlx222", "severity": "critical"}]
+    # P6: notify-relay's records of address-valued devices: with the token (exact match), and an old one without (/24)
+    t50, t51 = M.mask_value("203.0.113.50"), M.mask_value("203.0.113.51")
+    notify += [{"alertname": "DeviceDown", "instance": t50, "severity": "critical", "receiver": "r50"},
+               {"alertname": "DeviceDown", "instance": t51, "severity": "critical", "receiver": "r51"},
+               {"alertname": "DeviceDown", "instance": "203.0.113.x", "severity": "critical", "receiver": "rold"}]
 
     def fake(path, timeout):
         assert 0 < timeout <= M.TIMEOUT_S, timeout
@@ -629,6 +778,61 @@ def selftest():
         lm = json.loads(late.read("manifest.json"))
         assert all(x.get("skipped") and "time budget" in x["reason"] for x in lm["files"]) and lm["truncated"], lm["files"][:2]
         BUDGET_S = keep[4]
+        # notification records of an address-valued device: its own token exactly, token-less records by their /24
+        dev = zipfile.ZipFile(io.BytesIO(build(parse(f"from={now - 3600}&to={now}&scope=device&instance={t50}", now), {}, now)))
+        nt = dev.read("alerts/notifications.txt").decode()
+        dm = json.loads(dev.read("manifest.json"))
+        assert '"r50"' in nt and '"r51"' not in nt and '"rold"' in nt and "~" not in nt, nt
+        assert any("1 notification record(s)" in n for n in dm["notes"]) and dm["snapshot"] == {"included": False, "reason": "not requested"}, dm["notes"]
+        # snapshot: PNG checked, metadata chunks dropped, recorded as browser-generated with its sha256
+        png = png_fixture(4, 3)
+        tagged = png[:33] + png_chunk(b"tEXt", b"Comment\x00192.0.2.10") + png[33:] + b"trailing 192.0.2.10"
+        snap = clean_png(tagged)
+        assert snap["data"] == png and (snap["width"], snap["height"]) == (4, 3)
+        sz = zipfile.ZipFile(io.BytesIO(build(r, {}, now, snap=snap)))
+        sman = json.loads(sz.read("manifest.json"))
+        assert sz.read("snapshot.png") == png and sman["snapshot"]["included"] and sman["snapshot"]["generated_by"] == "browser"
+        assert sman["snapshot"]["sha256"] == hashlib.sha256(png).hexdigest() == next(x for x in sman["files"] if x["name"] == "snapshot.png")["sha256"]
+        assert next(x for x in sman["files"] if x["name"] == "snapshot.png")["source"] == "browser"
+        for bad_png in (b"GIF89a", png[:20], png[:-12], png.replace(b"IHDR", b"IHDX"), png_fixture(SNAPSHOT_MAX_SIDE + 1, 1),
+                        PNG_SIG + png_chunk(b"IHDR", png[16:29]) + png_chunk(b"IEND", b"")):
+            try:
+                clean_png(bad_png)
+                raise AssertionError(bad_png[:40])
+            except Refused:
+                pass
+        MAX_BYTES = 40000
+        big = json.loads(zipfile.ZipFile(io.BytesIO(build(r, {}, now, snap=snap))).read("manifest.json"))
+        assert big["snapshot"] == {"included": False, "reason": "size cap (all files)"} and big["truncated"], big["snapshot"]
+        MAX_BYTES = keep[3]
+        # the write rules: 127.0.0.1 only, same origin + X-Obs-Csrf; body checked; GET as before
+        env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_PUBLIC_URL", "OBS_OPS_TRUST_ROLE")}
+        os.environ.update(OBS_BIND="127.0.0.1", OBS_PUBLIC_URL="http://127.0.0.1:8080", OBS_OPS_TRUST_ROLE="0")
+        try:
+            ok_h = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080", "Sec-Fetch-Site": "same-origin", M.CSRF_HEADER: "1",
+                    "Content-Type": "image/png", "Content-Length": str(len(tagged))}
+            q = f"/evidence/export?from={time.time() - 60}&to={time.time()}"
+            body = lambda n: tagged[:n]
+            st, zbytes, ctype, extra = handle("POST", q, ok_h, None, body)
+            assert st == 200 and ctype == "application/zip" and zipfile.ZipFile(io.BytesIO(zbytes)).read("snapshot.png") == png
+            assert extra["X-Obs-Snapshot"] == "included"
+            assert "192.0.2" not in extra["Content-Disposition"]
+            _recent.clear()
+            assert handle("POST", q, {**ok_h, M.CSRF_HEADER: ""}, None, body)[0] == 403
+            assert handle("POST", q, {**ok_h, "Origin": "http://evil.example"}, None, body)[0] == 403
+            assert handle("POST", q, {**ok_h, "Content-Type": "image/jpeg"}, None, body)[0] == 400
+            assert handle("POST", q, {**ok_h, "Content-Length": str(SNAPSHOT_MAX + 1)}, None, body)[0] == 400
+            assert handle("POST", "/evidence/info", ok_h, None, body)[0] == 405 and handle("PUT", q, ok_h, None, body)[0] == 405
+            os.environ["OBS_BIND"] = "192.168.100.10"  # LAN: no snapshot writes (no authentication)
+            st, msg, _ = handle("POST", q, ok_h, None, body)
+            assert st == 403 and "LAN" in json.loads(msg)["error"]
+        finally:
+            for k, v in env_was.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            _recent.clear()
         # a client that went away: 499, and the export slot is free again at once
         assert handle("GET", f"/evidence/export?from={time.time() - 60}&to={time.time()}", {}, gone=lambda: True)[0] == 499
         assert LOCK.acquire(blocking=False)

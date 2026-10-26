@@ -1,13 +1,18 @@
 // "証跡を出力": downloads the evidence zip that mask-api assembles server-side (/evidence/export, read-only, masked).
 // The window is the playback window while playing back, else the last hour (an alert: from 10 min before it fired).
-// No screen snapshot: a PNG of the page would need an extra library (README).
+// Optional screen snapshot (P6, drawer only, off by default): a PNG made in this browser (snapshot.js) is sent with the
+// request (POST, the write rules of the silences); when it cannot be made or sent, the zip is exported without it and the
+// reason is shown.
 import { el, now, fmtBytes, maskText } from './util.js';
+import { snapshotPng } from './snapshot.js';
 import { section } from './views-common.js';
 import { pbWindow } from './playback.js';
 
 const LIVE_S = 3600;
 const BEFORE_ALERT_S = 600;
 const MAX_S = 7 * 86400; // mask-api's window cap
+const SNAP_MAX = 8000000; // bytes: the proxy's body cap (EVIDENCE_SNAPSHOT_MAX_MB, 8 MB)
+const SNAP_FALLBACK = new Set(['forbidden', 'csrf', 'snapshot']); // refused snapshot: export without it
 
 // scope: { scope, instance?, ifName?, cc?, city?, ip?, host?, alertname?, severity? }; since: ms (alert activation)
 export function windowFor(since) {
@@ -18,12 +23,36 @@ export function windowFor(since) {
   return { from, to };
 }
 
-export async function downloadEvidence(params, button, status) {
+const exportReq = (q, png) => fetch(`/evidence/export?${q}`, png
+  ? { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'image/png', 'X-Obs-Csrf': '1' }, body: png }
+  : { cache: 'no-store' });
+
+// -> { png, why }: the screen as it is now (the page is cloned before anything here changes it)
+async function takeSnapshot() {
+  try {
+    const png = await snapshotPng();
+    return png.size > SNAP_MAX ? { png: null, why: `画像が大きすぎます (${fmtBytes(png.size)})` } : { png, why: '' };
+  } catch (e) {
+    return { png: null, why: String(e.message || e) };
+  }
+}
+
+export async function downloadEvidence(params, button, status, { snapshot = false } = {}) {
   const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+  const shot = snapshot ? takeSnapshot() : null;
   button.disabled = true;
   status.textContent = '証跡を作成中… (サーバ側で伏せ字済みのデータを集めています)';
   try {
-    const r = await fetch(`/evidence/export?${q}`, { cache: 'no-store' });
+    let { png, why } = shot ? await shot : { png: null, why: '' };
+    let r = await exportReq(q, png);
+    if (png && !r.ok) {
+      const j = await r.clone().json().catch(() => null);
+      if (r.status === 413 || SNAP_FALLBACK.has(j?.errorType)) {
+        why = j?.error || `HTTP ${r.status}`;
+        png = null;
+        r = await exportReq(q, null);
+      }
+    }
     if (!r.ok) {
       const j = await r.json().catch(() => null);
       throw new Error(j?.error || `HTTP ${r.status}`);
@@ -37,7 +66,10 @@ export async function downloadEvidence(params, button, status) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    status.textContent = `出力しました: ${name} (${fmtBytes(blob.size)})`;
+    const sent = png ? r.headers.get('X-Obs-Snapshot') || '' : ''; // what the server put in the zip
+    if (png && sent !== 'included') why = sent ? `サーバが入れませんでした (${sent})` : 'サーバの応答に記録がありません';
+    const snapNote = !snapshot ? '' : sent === 'included' ? ' · スナップショットあり' : ` · スナップショットなし: ${maskText(why)}`;
+    status.textContent = `出力しました: ${name} (${fmtBytes(blob.size)})${snapNote}`;
     status.title = status.textContent;
   } catch (e) {
     status.textContent = `出力できません: ${maskText(String(e.message || e))}`;
@@ -71,15 +103,20 @@ export function evidenceSection(scopeOf, sinceOf = () => undefined) {
   none.value = '';
   sel.append(none);
   l.append(sel);
-  row.append(b, l);
+  const sl = el('label', 'fld chk');
+  const snap = el('input');
+  snap.type = 'checkbox'; // off by default, not remembered
+  sl.title = '画面のスナップショット (PNG) を含める: このブラウザで今の画面 (伏せ字済み) を画像にします';
+  sl.append(snap, document.createTextNode(' 画面の画像'));
+  row.append(b, l, sl);
   const status = el('p', 'ops-note ops-status');
   status.setAttribute('role', 'status');
-  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip にします。期間は履歴再生中はその範囲、ライブでは直近 1 時間です。生アドレス・生 pcap は含みません。');
+  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip にします。期間は履歴再生中はその範囲、ライブでは直近 1 時間です。生アドレス・生 pcap は含みません。「画面の画像」で今の画面の PNG (snapshot.png) も入れます (LAN 公開中は入れられません)。');
   s.body.append(row, status, note);
   pcapOptions(sel); // listed when the drawer opens
   b.addEventListener('click', () => {
     const w = windowFor(sinceOf());
-    downloadEvidence({ ...scopeOf(), from: w.from.toFixed(3), to: w.to.toFixed(3), pcap: sel.value }, b, status);
+    downloadEvidence({ ...scopeOf(), from: w.from.toFixed(3), to: w.to.toFixed(3), pcap: sel.value }, b, status, { snapshot: snap.checked });
   });
   return s;
 }

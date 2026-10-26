@@ -587,11 +587,16 @@ services:
       ANALYZER_TIMEOUT: ${PCAP_ANALYZE_TIMEOUT:-60}
       ANALYZER_VALIDATE_TIMEOUT: ${PCAP_VALIDATE_TIMEOUT:-180}  # an upload is read to its end before it is accepted
       PCAP_READS_PER_MIN: ${PCAP_READS_PER_MIN:-120}
+      # its address-token key, shared with notify-relay (which writes the same tokens into its records): memory only
+      OBS_TOKEN_KEY_FILE: /run/obs-key/token.key
+      # evidence export with the browser's screen snapshot (POST, same write rules as silences): the PNG's size cap
+      EVIDENCE_SNAPSHOT_MAX_MB: ${EVIDENCE_SNAPSHOT_MAX_MB:-8}
     volumes:
       - capture-ring:/capture:ro
       - pcap-uploads:/uploads
       - ./demo:/demo:ro
       - analyzer-run:/run/analyzer
+      - token-key:/run/obs-key
     depends_on:
       <<: *setup-done
       prometheus: {condition: service_started}
@@ -679,6 +684,7 @@ services:
       additional_contexts: *python-base
     volumes:
       - generated:/etc/obs-generated:ro
+      - token-key:/run/obs-key:ro  # mask-api's address-token key (records carry the screens' tokens; none -> a.b.c.x)
     depends_on:
       <<: *setup-done
       loki: {condition: service_started}
@@ -716,6 +722,7 @@ services:
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
       OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
       PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
+      EVIDENCE_SNAPSHOT_MAX_MB: ${EVIDENCE_SNAPSHOT_MAX_MB:-8}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -766,3 +773,7 @@ volumes:
   # the analyzer's Unix socket: memory only, owned by the analyzer user
   analyzer-run:
     driver_opts: {type: tmpfs, device: tmpfs, o: "uid=10001,gid=10001,mode=0755,size=1m"}
+  # mask-api's address-token key for notify-relay: memory only (never on disk, gone when both containers stop: new tokens),
+  # written by mask-api (nobody), read-only in notify-relay; no other container mounts it
+  token-key:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=65534,gid=65534,mode=0755,size=64k"}

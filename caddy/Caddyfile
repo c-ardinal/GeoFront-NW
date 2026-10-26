@@ -77,13 +77,31 @@
 		}
 		reverse_proxy mask-api:8000
 	}
-	# Evidence export (mask-api evidence.py): read-only, GET / HEAD only. The zip is assembled by mask-api from its own
-	# masked read paths; it limits the window / rows / lines / bytes / time itself, runs one export at a time and a few
-	# per minute (429). Same Host allowlist as every route of this site.
+	# Evidence export (mask-api evidence.py): GET / HEAD, plus one POST: the same export with the browser's screen snapshot
+	# (PNG body). The zip is assembled by mask-api from its own masked read paths; it limits the window / rows / lines /
+	# bytes / time itself, runs one export at a time and a few per minute (429). The POST is checked by mask-api like the
+	# silences (same origin + X-Obs-Csrf, PNG size / dimensions) and refused here as well while the screens are on the LAN
+	# (the screen then exports without the snapshot). Same Host allowlist as every route of this site.
 	handle /evidence/* {
-		@evidenceWrite not method GET HEAD
+		@evidenceWrite {
+			not method GET HEAD
+			not {
+				method POST
+				path /evidence/export
+			}
+		}
 		header @evidenceWrite Content-Type application/json
-		respond @evidenceWrite `\{"status":"error","error":"read-only"\}` 405
+		respond @evidenceWrite `\{"status":"error","error":"read-only (POST only to /evidence/export, with a snapshot)"\}` 405
+		@evidenceLanWrite {
+			method POST
+			path /evidence/export
+			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
+		}
+		header @evidenceLanWrite Content-Type application/json
+		respond @evidenceLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中はスナップショット付きの証跡出力はできません (認証がありません)。スナップショットなしで出力できます"\}` 403
+		request_body {
+			max_size {$EVIDENCE_SNAPSHOT_MAX_MB:8}MB
+		}
 		# above mask-api's export time budget (EVIDENCE_TIME_BUDGET, 60 s): the zip, or its own error, always arrives;
 		# a client that gives up closes the upstream connection and mask-api abandons the export (its slot is freed)
 		reverse_proxy mask-api:8000 {

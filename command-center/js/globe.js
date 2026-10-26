@@ -44,6 +44,10 @@ let hidePoints = 0; // frames left to look for new point meshes to hide (see onB
 const draw = { probe: null, choice: 'auto', mode: 'gpu' };
 const animated = () => draw.mode === 'gpu' && !REDUCED_MOTION;
 export const renderInfo = () => ({ ...draw, animated: animated(), label: choiceLabel(draw.choice, draw.mode), frames: globe?.renderer().info.render.frame ?? 0 });
+// one frame now, so the canvas can be read in this same task (screen snapshot; the drawing buffer is not preserved)
+export function redrawNow() {
+  if (globe && shown) globe.renderer().render(globe.scene(), globe.camera());
+}
 export function cycleRender() {
   draw.choice = nextChoice(draw.choice);
   storeChoice(draw.choice);
