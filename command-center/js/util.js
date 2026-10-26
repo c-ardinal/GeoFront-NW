@@ -11,6 +11,11 @@ export const isPlayback = () => cursorMs !== null;
 export function setCursor(ms) { cursorMs = ms === null ? null : Math.round(ms); }
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 export const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// static page: reduced motion, or the LITE drawing mode (globe.js sets data-render): the same information, no motion
+export const motionOff = () => REDUCED_MOTION || document.documentElement.dataset.render === 'lite';
+// Prometheus scrape interval (prometheus/prometheus.yml, 30 s for small hosts): rate windows are at least 4 of them
+export const SCRAPE_S = 30;
+export const RATE_WIN = `${4 * SCRAPE_S}s`;
 
 // ---- screen tiers (keep in sync with the @media blocks in style.css) ---------------------
 // WALLBOARD: >= 1280 px wide, fixed-height panels, no page scroll. LARGE: wallboard on big screens, page is zoomed.
@@ -28,7 +33,7 @@ export function fitRows(box, rowH) {
 
 // ---- ticker: must-see text on one line, never silently cut --------------------------------
 // Static when the text fits. When it overflows, two copies scroll as a seamless loop (the copy is aria-hidden, so a
-// live region announces the text once, not per loop; hover/focus pauses it). Reduced motion: the text wraps instead.
+// live region announces the text once, not per loop; hover/focus pauses it). Static page (motionOff): the text wraps.
 // The ticker never changes the box's focusability or roles: those belong to whoever owns the box.
 const TICKER_PX_S = 60;
 const tickerRO = new ResizeObserver((entries) => entries.forEach((e) => fitTicker(e.target)));
@@ -47,6 +52,16 @@ export function setTicker(box, lead, text) {
   box.classList.remove('ticking', 'tk-wrap');
   tickerRO.observe(box);
   fitTicker(box);
+}
+// after a motion switch (drawing mode): every ticker starts over (scrolling <-> wrapped)
+export function refitTickers() {
+  for (const box of document.querySelectorAll('.ticker')) {
+    const track = box.querySelector('.tk-track');
+    if (!track) continue;
+    box.classList.remove('ticking', 'tk-wrap');
+    track.replaceChildren(track.firstChild);
+    fitTicker(box);
+  }
 }
 export function clearTicker(box) {
   tickerRO.unobserve(box);
@@ -69,7 +84,7 @@ function fitTicker(box) {
     track.replaceChildren(item);
     return;
   }
-  if (REDUCED_MOTION) { box.classList.add('tk-wrap'); return; } // stays wrapped until the text changes
+  if (motionOff()) { box.classList.add('tk-wrap'); return; } // stays wrapped until the text changes
   box.classList.add('ticking');
   const copy = item.cloneNode(true);
   copy.setAttribute('aria-hidden', 'true');

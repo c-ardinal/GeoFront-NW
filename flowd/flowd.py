@@ -46,6 +46,8 @@ REPLAY_SCALE = float(os.environ.get("FLOWD_REPLAY_SCALE", "1"))
 DELAY_S = float(os.environ.get("FLOWD_DELAY_S", "90"))
 MAX_SERIES = int(os.environ.get("FLOWD_MAX_SERIES", "3000"))
 IDLE_EXPIRE_S = float(os.environ.get("FLOWD_IDLE_EXPIRE_S", "3600"))
+EXPIRE_EVERY_S = 60
+TICK_S = 5  # release pending bytes into the counters this often (Prometheus scrapes every 30 s)
 RDNS = os.environ.get("FLOWD_RDNS", "0") == "1"
 NAMES_MAX = 4096  # host-name maps (DHCP names, IP -> MAC, reverse DNS)
 MAX_PENDING = 500000  # scheduled (not yet released) items; bytes beyond go to the overflow series
@@ -322,6 +324,7 @@ class Flows:
         self.files_ok = self.files_failed = self.files_skipped = self.retries = 0
         self.overflow_bytes = 0.0
         self.last_file = 0.0
+        self.expired_at = 0.0
 
     def key_of(self, src, dst):
         a, b = addr(src), addr(dst)
@@ -361,6 +364,9 @@ class Flows:
                     self.overflow_bytes += v
                 self.counters[k] = self.counters.get(k, 0.0) + v
                 self.seen[k] = now
+            if now - self.expired_at < EXPIRE_EVERY_S:  # a scan of every series: not on each tick
+                return
+            self.expired_at = now
             for k in [k for k, t in self.seen.items() if now - t > IDLE_EXPIRE_S]:
                 self.counters.pop(k, None)
                 self.seen.pop(k, None)
@@ -558,7 +564,7 @@ def main():
             flows.release(now)
             geo.refresh(now)
             names.load_inventory(now)
-            time.sleep(1)
+            time.sleep(TICK_S)
     threading.Thread(target=tick, daemon=True).start()
 
     class H(BaseHTTPRequestHandler):

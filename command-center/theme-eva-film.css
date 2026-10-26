@@ -142,8 +142,10 @@
 [data-theme="eva-film"] .st-unknown::before { content: '?\2009'; }
 [data-theme="eva-film"] .st-info::before { content: '\25C6\00A0'; }
 /* DOWN: slow 2.4 s dim pulse of the whole cell (text keeps >= 4.5:1 at both ends) */
-[data-theme="eva-film"] .st-down { animation: film-dim 2.4s ease-in-out infinite; }
-@keyframes film-dim { 50% { filter: brightness(0.7); } }
+/* (a black layer at 30 % over the cell = brightness 0.7, animated by opacity only) */
+[data-theme="eva-film"] .st-down { background: var(--crit-fill); }
+[data-theme="eva-film"] .st-down::after { z-index: 1; background: #000; opacity: 0; animation: film-dim 2.4s ease-in-out infinite; }
+@keyframes film-dim { 50% { opacity: 0.3; } }
 
 /* ---- segmented bar gauges ---- */
 [data-theme="eva-film"] .bar { height: 10px; background: repeating-linear-gradient(90deg, var(--track) 0 5px, transparent 5px 7px); }
@@ -178,9 +180,9 @@
     linear-gradient(var(--frame) 0 1px, transparent 1px) right 0 top 0 / 5px 16px repeat-y;
 }
 
-/* globe HTML labels (only the tactical globe of this theme creates them; globe.js thins them in screen space) */
-.glabel { pointer-events: none; transition: opacity 0.2s; }
-.glabel-hidden { visibility: hidden; }
+/* globe labels of this theme's tactical globe: drawn into one canvas over the globe (globe-layers.js) with the look and
+   geometry of these rules, read from a hidden sample .glabel element */
+.glabel { pointer-events: none; }
 .glabel span {
   position: relative; left: 10px; display: inline-block; white-space: nowrap;
   font: 600 13px/16px var(--display); letter-spacing: 0.08em;
@@ -190,7 +192,6 @@
 .glabel::before { content: ''; position: absolute; left: -3px; top: 5px; width: 6px; height: 6px; background: var(--accent); }
 .glabel-home span { color: var(--text); border-left-color: var(--warn); font-size: 14px; }
 .glabel-home::before { background: var(--warn); }
-@media (prefers-reduced-motion: reduce) { .glabel { transition: none; } }
 /* black chip, orange code bar */
 [data-theme="eva-film"] .glabel span { color: var(--text); border-left: 3px solid var(--accent); letter-spacing: 0.1em; }
 [data-theme="eva-film"] .glabel-home span { color: #000; background: var(--warn); border-left-color: #000; }
@@ -222,10 +223,12 @@
   animation: film-scroll 18s linear infinite;
 }
 [data-theme="eva-film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
-@keyframes film-band { 50% { background-color: #7a0804; } }
+/* the band dims to ~#7a0804 (69 % of the banner red over the dark panel) by opacity: no repaint per frame */
+@keyframes film-band { 50% { opacity: 0.69; } }
 @keyframes film-scroll { from { transform: scaleY(1.35); } to { transform: translateX(-50%) scaleY(1.35); } }
 
-[data-theme="eva-film"] #theme-toggle { border-color: var(--accent); color: var(--text); font-family: var(--display); }
+[data-theme="eva-film"] :is(#theme-toggle, #render-toggle) { border-color: var(--accent); color: var(--text); font-family: var(--display); }
+[data-theme="eva-film"] #pb-enter { border-color: var(--accent); color: var(--text); } /* kana: keeps the sans face (Oswald has none) */
 
 /* ---- drawer / modal frames ---- */
 [data-theme="eva-film"] #drawer, [data-theme="eva-film"] #modal {

@@ -8,7 +8,7 @@ datasources:
     isDefault: true
     jsonData:
       manageAlerts: true
-      timeInterval: 15s
+      timeInterval: 30s  # = the scrape interval (prometheus/prometheus.yml): $__rate_interval >= 4 x 30 s
   - name: Loki
     uid: loki
     type: loki

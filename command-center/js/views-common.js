@@ -1,7 +1,7 @@
 // Building blocks shared by modal and drawer views: sections, stat tiles, charts (canvas line charts plus HTML/SVG
 // bars, sparklines, timelines, stacked columns) and the table / card list. Layout order in every view:
 // summary tiles -> charts -> detail list.
-import { el, clickable, lineChart, legend, chartColors, has, fixed, badge, refocus, jstHm, maskText, SEV_KEYS, SEV_LEVELS, SEV_BAD, sevKey, now } from './util.js';
+import { el, clickable, lineChart, legend, chartColors, has, fixed, badge, refocus, jstHm, maskText, SEV_KEYS, SEV_LEVELS, SEV_BAD, sevKey, now, SCRAPE_S } from './util.js';
 import { promRange, getJson } from './api.js';
 import { sevKind, totalBps, FLOW_TEXT } from './panels.js';
 
@@ -54,7 +54,6 @@ export const putIn = (box, ...nodes) => refocus(box, () => box.replaceChildren(.
 const stepFor = (secs) => Math.max(15, Math.round(secs / 240 / 15) * 15);
 // `$RATE` in a query becomes the rate window, Grafana $__rate_interval style: max(step + 1 scrape, 4 scrapes), so
 // consecutive windows overlap by one scrape and no counter increase falls between two evaluation points.
-const SCRAPE_S = 15;
 // Scrape gates: `and` is evaluated per step of a range query, so points where the source's latest scrape failed become
 // gaps (rate() over a look-back window would otherwise keep drawing decaying values for a DOWN target).
 export const SNMP_UP = 'and on (instance) (up{job="snmp"} == 1)';

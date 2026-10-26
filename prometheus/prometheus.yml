@@ -1,6 +1,7 @@
+# 30 s (Raspberry Pi default): every rate window in the screens, rules and dashboards is >= 4 intervals (2m)
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 30s
+  evaluation_interval: 30s
 
 # every alert goes to Alertmanager (routing by severity, repeats, silences / ACK); it calls notify-relay
 alerting:
@@ -44,12 +45,20 @@ scrape_configs:
         target_label: __name__
         replacement: obs_flow_bytes_total
 
+  # Self-monitoring: `up` / scrape_duration_seconds (COLLECTION HEALTH) come with every target; of the components' own
+  # thousands of series only the ones the screens read are stored (less TSDB work and disk on a Pi).
   - job_name: prometheus
     static_configs:
       - targets: [localhost:9090]
+    metric_relabel_configs:
+      - {source_labels: [__name__], regex: prometheus_build_info, action: keep}
   - job_name: loki
     static_configs:
       - targets: [loki:3100]
+    metric_relabel_configs:
+      - {source_labels: [__name__], regex: loki_distributor_lines_received_total|loki_build_info, action: keep}
   - job_name: alloy
     static_configs:
       - targets: [alloy:12345]
+    metric_relabel_configs:
+      - {source_labels: [__name__], regex: loki_source_syslog_entries_total|alloy_build_info, action: keep}

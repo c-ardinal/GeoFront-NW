@@ -16,7 +16,7 @@ groups:
 
       - alert: InterfaceErrors
         expr: increase(ifInErrors{job="snmp"}[2m]) + increase(ifOutErrors{job="snmp"}[2m]) > 5
-        for: 15s
+        for: 30s
         labels: {severity: warning}
         annotations:
           summary: "{{ $labels.instance }} {{ $labels.ifName }} interface errors increasing"

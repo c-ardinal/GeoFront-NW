@@ -45,6 +45,7 @@ x-tools-env: &tools-env
   SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
   SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
   OBS_GRAFANA_ANON_ON_LAN: ${OBS_GRAFANA_ANON_ON_LAN:-0}
+  OBS_GRAFANA: ${OBS_GRAFANA:-1}
   TZ: ${TZ:-Asia/Tokyo}
   OBS_CAPTURE: ${OBS_CAPTURE:-0}
   DEMO_PCAP_REPLAY: ${DEMO_PCAP_REPLAY:-1}
@@ -100,9 +101,11 @@ x-flowd: &flowd
   security_opt: [no-new-privileges:true]
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9100/health', timeout=3)"]
-    interval: 30s
+    interval: 60s
     timeout: 5s
     retries: 3
+    start_period: 60s
+    start_interval: 5s
   mem_limit: ${FLOWD_MEM:-192m}
   cpus: ${FLOWD_CPUS:-0.5}
 
@@ -156,9 +159,10 @@ services:
   # grafana.db; it never logs in) that no Grafana server admin has a default password (the .env value only applies when
   # Grafana creates its database), and answers the proxy's forward_auth for /grafana/ on a LAN exposure on :8099
   # (internal network only): 200 only after a positive check at most two intervals old. Guard down = Grafana closed.
-  # Unhealthy = a LAN exposure is being kept closed (reason in its log).
+  # Unhealthy = a LAN exposure is being kept closed (reason in its log). Runs only with Grafana (OBS_GRAFANA).
   grafana-guard:
     <<: *tools
+    scale: ${OBS_GRAFANA:-1}
     command: [grafana-guard]
     environment:
       <<: *tools-env
@@ -177,11 +181,12 @@ services:
         max-file: "${LOG_MAX_FILE:-3}"
     healthcheck:
       test: ["CMD", "python", "/app/obs.py", "guard-health"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 2
       start_period: 30s
-    mem_limit: 64m
+      start_interval: 5s
+    mem_limit: 96m  # peak ~41 MiB measured (sqlite copy + checks): 2x headroom
     cpus: 0.25
 
   tools:
@@ -222,9 +227,11 @@ services:
       - "127.0.0.1:9116:9116"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9116/fault/status', timeout=3)"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${DEMO_GEN_MEM:-128m}
     cpus: ${DEMO_GEN_CPUS:-0.5}
 
@@ -267,9 +274,11 @@ services:
       prod-setup: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9116/"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${SNMP_EXPORTER_MEM:-96m}
     cpus: ${SNMP_EXPORTER_CPUS:-0.5}
 
@@ -305,10 +314,11 @@ services:
       capture-setup: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/capture/status.json')); assert s['running'] and time.time()-s['updated']<30"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 20s
+      start_interval: 5s
     mem_limit: ${CAPTURE_MEM:-128m}
     cpus: ${CAPTURE_CPUS:-0.5}
 
@@ -350,9 +360,11 @@ services:
       SYSLOG_INTERVAL: "5"
     healthcheck: &testbed-health
       test: ["CMD", "python", "device.py", "--health"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: 160m
     cpus: 0.5
 
@@ -394,9 +406,11 @@ services:
     command: [python, -u, notifymock.py]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: 96m
     cpus: 0.25
 
@@ -414,6 +428,8 @@ services:
       - --web.enable-admin-api
       # /-/reload for `tools targets` (rule files are not watched); internal network only like the admin API
       - --web.enable-lifecycle
+      # small host: at most 4 queries evaluated at once (a wallboard poll queues instead of using every core)
+      - --query.max-concurrency=4
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
@@ -422,11 +438,12 @@ services:
     depends_on: *setup-done
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 30s
-    mem_limit: ${PROM_MEM:-768m}
+      start_interval: 5s
+    mem_limit: ${PROM_MEM:-512m}  # ~80 MiB measured with 3 devices; compaction of a 30 d TSDB fits
     cpus: ${PROM_CPUS:-1.0}
 
   loki:
@@ -440,10 +457,11 @@ services:
       - loki-data:/loki
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 5
       start_period: 60s
+      start_interval: 5s
     mem_limit: ${LOKI_MEM:-512m}
     cpus: ${LOKI_CPUS:-1.0}
 
@@ -455,6 +473,7 @@ services:
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/var/lib/alloy/data
       - --stability.level=experimental  # loki.source.syslog syslog_format = "raw"
+      - --disable-reporting
       - /etc/alloy/config.alloy
     environment:
       SYSLOG_DROP_UNKNOWN: ${SYSLOG_DROP_UNKNOWN:-0}  # 1 = drop lines from senders that are not in the inventory
@@ -473,14 +492,19 @@ services:
       testbed-wlx: {condition: service_started, required: false, restart: true}
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/12345 && printf 'GET /-/ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${ALLOY_MEM:-256m}
     cpus: ${ALLOY_CPUS:-0.5}
 
+  # Optional: OBS_GRAFANA=0 leaves Grafana (and grafana-guard) out; the command-center does not need it (/grafana/ then
+  # answers 502, evidence exports say grafana "unknown"). Raspberry Pi: saves ~100 MB and its background work.
   grafana:
     <<: *ops
+    scale: ${OBS_GRAFANA:-1}
     image: grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
     # Anonymous Viewer (no login) only while the screens are on 127.0.0.1. Published beyond localhost (OBS_BIND) Grafana
     # requires a login, unless OBS_GRAFANA_ANON_ON_LAN=1 opts back in (with a warning): its views are not masked.
@@ -507,6 +531,11 @@ services:
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /dashboards/wallboard.json
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # small host: no Grafana-side alert evaluation (alerts are Prometheus + Alertmanager), no Live websocket push
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+      GF_LIVE_MAX_CONNECTIONS: "0"
+      GF_LOG_LEVEL: warn
       # served by the proxy under /grafana/
       GF_SERVER_ROOT_URL: "${OBS_PUBLIC_URL:-http://127.0.0.1:8080}/grafana/"  # absolute links (share / goto) use it
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
@@ -517,10 +546,11 @@ services:
     depends_on: [prometheus, loki]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 300s  # first start on a fresh volume runs ~700 DB migrations (2+ min measured, longer on a Pi)
+      start_interval: 5s
     mem_limit: ${GRAFANA_MEM:-384m}
     cpus: ${GRAFANA_CPUS:-0.5}
 
@@ -560,9 +590,11 @@ services:
       analyzer: {condition: service_started}
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${MASK_API_MEM:-320m}
     cpus: ${MASK_API_CPUS:-0.5}
 
@@ -596,9 +628,11 @@ services:
       - analyzer-run:/run/analyzer
     healthcheck:
       test: ["CMD", "python", "-c", "import analyzer; assert analyzer.call({'op': 'ping'}, timeout=5)['ok']"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${ANALYZER_MEM:-896m}
     cpus: ${ANALYZER_CPUS:-1.0}
 
@@ -619,9 +653,11 @@ services:
     depends_on: *setup-done
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${ALERTMANAGER_MEM:-64m}
     cpus: ${ALERTMANAGER_CPUS:-0.25}
 
@@ -639,9 +675,11 @@ services:
       loki: {condition: service_started}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9095/health', timeout=3)"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${NOTIFY_RELAY_MEM:-64m}
     cpus: ${NOTIFY_RELAY_CPUS:-0.25}
 
@@ -654,9 +692,11 @@ services:
     depends_on: [mask-api]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${COMMAND_CENTER_MEM:-64m}
     cpus: ${COMMAND_CENTER_CPUS:-0.25}
 
@@ -688,12 +728,17 @@ services:
       - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:80"
       - "127.0.0.1:${PROM_LOCAL_PORT:-9090}:9090"
       - "127.0.0.1:${GRAFANA_LOCAL_PORT:-3000}:3000"
-    depends_on: [command-center, grafana, mask-api]
+    depends_on:
+      command-center: {condition: service_started}
+      mask-api: {condition: service_started}
+      grafana: {condition: service_started, required: false}  # OBS_GRAFANA=0
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s
+      start_interval: 5s
     mem_limit: ${PROXY_MEM:-128m}
     cpus: ${PROXY_CPUS:-0.5}
 

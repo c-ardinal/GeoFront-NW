@@ -2,23 +2,46 @@
 // Every window ends at now() (util.js): the wall clock live, the playback cursor in PLAYBACK.
 import { now, isPlayback } from './util.js';
 
-export async function getJson(url) {
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) {
+// Every request has a deadline: a hung one fails (the freshness badge says DEGRADED, then STALE) instead of keeping a
+// poll open. Instant queries are small (8 s, below the 10 s poll); ranges and log scans may use mask-api's whole scan
+// budget, which nginx caps at 15 s (16 s: the server's own answer always arrives first).
+const QUERY_TIMEOUT_MS = 8000;
+const SCAN_TIMEOUT_MS = 16000;
+const timeoutError = (url) => new Error(`${url.split('?')[0]} timeout`);
+export function fetchWithTimeout(url, opts = {}, ms = SCAN_TIMEOUT_MS) {
+  return fetch(url, { cache: 'no-store', ...opts, signal: AbortSignal.timeout(ms) })
+    .catch((e) => { throw e?.name === 'TimeoutError' ? timeoutError(url) : e; });
+}
+// The same URL asked again within REUSE_MS (the wallboard and an open view in one refresh, a second poll right after a
+// theme switch) shares one request; each caller gets its own parsed copy. Failures are never reused.
+const REUSE_MS = 4000;
+const recent = new Map(); // url -> { at, text: Promise<string> }
+function bodyOf(url, ms) {
+  const t = performance.now();
+  for (const [k, v] of recent) if (t - v.at >= REUSE_MS) recent.delete(k);
+  const hit = recent.get(url);
+  if (hit) return hit.text;
+  const text = fetchWithTimeout(url, {}, ms).then(async (r) => {
+    if (r.ok) return r.text();
     // mask-api refuses queries that could reveal a hidden address (errorType masked_query).
     const body = r.status === 400 ? await r.json().catch(() => null) : null;
     const err = new Error(body?.error || `${url.split('?')[0]} HTTP ${r.status}`);
     err.rejected = body?.errorType === 'masked_query';
     throw err;
-  }
-  const j = await r.json();
+  });
+  recent.set(url, { at: t, text });
+  text.catch(() => { if (recent.get(url)?.text === text) recent.delete(url); });
+  return text;
+}
+export async function getJson(url, ms = SCAN_TIMEOUT_MS) {
+  const j = JSON.parse(await bodyOf(url, ms));
   if (j.status && j.status !== 'success') throw new Error(j.error || 'query failed');
   return j.data;
 }
 const nowS = () => now() / 1000;
 const nowNs = () => BigInt(now()) * 1000000n;
 // live instant queries stay exactly as before (Prometheus' own "now"); playback pins them to the cursor
-export const promQuery = (q) => getJson(`/prom/api/v1/query?query=${encodeURIComponent(q)}${isPlayback() ? `&time=${nowS().toFixed(3)}` : ''}`).then((d) => d.result);
+export const promQuery = (q) => getJson(`/prom/api/v1/query?query=${encodeURIComponent(q)}${isPlayback() ? `&time=${nowS().toFixed(3)}` : ''}`, QUERY_TIMEOUT_MS).then((d) => d.result);
 export function promRange(q, seconds, step) {
   const end = nowS();
   return getJson(`/prom/api/v1/query_range?query=${encodeURIComponent(q)}&start=${end - seconds}&end=${end}&step=${step}`).then((d) => d.result);
@@ -70,7 +93,7 @@ export function flattenStreams(streams) {
 // ---- Alertmanager through mask-api (/am/): masked reads; silences are the only writes ----------------------------
 // Writes carry X-Obs-Csrf (and the browser's Origin): mask-api refuses any write without both.
 async function amJson(url, opts = {}) {
-  const r = await fetch(url, { cache: 'no-store', ...opts });
+  const r = await fetchWithTimeout(url, opts, opts.method ? SCAN_TIMEOUT_MS : QUERY_TIMEOUT_MS);
   const body = await r.json().catch(() => null);
   if (!r.ok) throw new Error(body?.error || `${url} HTTP ${r.status}`);
   return body;

@@ -9,7 +9,7 @@ import { $, el, isPlayback, jstFull } from './util.js';
 import { evidenceInfo } from './api.js';
 import * as UI from './ui.js';
 
-const STEP_S = 15; // one scrape interval: the "コマ送り" step and the slider resolution
+const STEP_S = 15; // the "コマ送り" step, the slider resolution and the 1x pacing (kept at 15 s with the 30 s scrape interval)
 const MIN_BATCH_MS = 1000;
 const MAX_RANGE_S = 7 * 86400; // mask-api's evidence window cap, and the longest preset
 const SPEEDS = [0.5, 1, 2, 4, 8];

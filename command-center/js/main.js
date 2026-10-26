@@ -1,6 +1,6 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
-import { $, el, vmap, scalar, has, jstClock, jstFull, REDUCED_MOTION, LARGE, WALLBOARD, now, isPlayback, setCursor } from './util.js';
+import { $, el, vmap, scalar, has, jstClock, jstFull, REDUCED_MOTION, LARGE, WALLBOARD, now, isPlayback, setCursor, SCRAPE_S, RATE_WIN } from './util.js';
 import { promQuery, promRange, promAlerts, promAlertsAt, lokiRange, lokiMetric, flattenStreams } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
@@ -18,7 +18,7 @@ const STALE_AFTER_MS = POLL_MS * 2;
 const PROM_PANELS = ['p-devices', 'p-dest', 'p-src', 'p-unknown', 'p-globe', 'p-wan', 'p-if', 'p-wlan', 'p-alerts', 'p-health'];
 const LOKI_PANELS = ['p-logs', 'p-sev'];
 const FLOW_PANELS = ['p-dest', 'p-src', 'p-unknown', 'p-globe'];
-const FLOW_MAX_AGE_S = 60; // 4 scrape intervals
+const FLOW_MAX_AGE_S = 4 * SCRAPE_S;
 
 // ---- theme: default (v3) or "eva-film"; ?theme= overrides, choice persisted when storage is available ----
 const THEMES = ['default', 'eva-film']; // toggle cycles in this order
@@ -115,18 +115,17 @@ function wirePanelTitles() {
 // keeps returning decaying numbers (and 0 errors) for ~1-2 min after a target goes DOWN, which must not be shown.
 const UP = 'on (instance) (up{job="snmp"} == 1)';
 const gate = (expr) => `(${expr}) and ${UP}`;
-const ERR_EXPR = '(rate(ifInErrors{job="snmp"}[2m]) + rate(ifOutErrors{job="snmp"}[2m])) * 60';
+const ERR_EXPR = `(rate(ifInErrors{job="snmp"}[${RATE_WIN}]) + rate(ifOutErrors{job="snmp"}[${RATE_WIN}])) * 60`;
 const Q = {
   // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
-  flows: '(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(obs_flow_bytes_total[2m])) * 8) and on () (up{job="flows"} == 1)',
-  up: 'up{job="snmp"}',
+  flows: `(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(obs_flow_bytes_total[${RATE_WIN}])) * 8) and on () (up{job="flows"} == 1)`,
   uptime: gate('sysUpTime{job="snmp"} / 100'),
-  devIn: gate('sum by (instance) (rate(ifHCInOctets{job="snmp"}[1m])) * 8 / 1e6'),
-  devOut: gate('sum by (instance) (rate(ifHCOutOctets{job="snmp"}[1m])) * 8 / 1e6'),
+  devIn: gate(`sum by (instance) (rate(ifHCInOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
+  devOut: gate(`sum by (instance) (rate(ifHCOutOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
   devErr: gate(`sum by (instance) (${ERR_EXPR})`),
   clients: gate('sum by (instance) (demo_wlan_clients)'),
-  ifIn: gate('rate(ifHCInOctets{job="snmp"}[1m]) * 8 / 1e6'),
-  ifOut: gate('rate(ifHCOutOctets{job="snmp"}[1m]) * 8 / 1e6'),
+  ifIn: gate(`rate(ifHCInOctets{job="snmp"}[${RATE_WIN}]) * 8 / 1e6`),
+  ifOut: gate(`rate(ifHCOutOctets{job="snmp"}[${RATE_WIN}]) * 8 / 1e6`),
   ifSpeed: gate('ifHighSpeed{job="snmp"}'),
   ifOper: gate('ifOperStatus{job="snmp"}'),
   ifErr: gate(ERR_EXPR),
@@ -140,8 +139,8 @@ const Q = {
   // timestamp() must wrap the raw selector to get sample times; `and up == 1` keeps UP targets only
   // newest successful scrape: the age of the freshest data on screen, measured by Prometheus (no browser clock involved)
   freshMin: 'min(time() - (timestamp(up) and up == 1))',
-  alloyRx: 'sum(rate(loki_source_syslog_entries_total[1m]))',
-  lokiRx: 'sum(rate(loki_distributor_lines_received_total[1m]))',
+  alloyRx: `sum(rate(loki_source_syslog_entries_total[${RATE_WIN}]))`,
+  lokiRx: `sum(rate(loki_distributor_lines_received_total[${RATE_WIN}]))`,
   // flowd: is its input live (capture running / replay loaded); the capture service and the GeoIP databases
   flowSrc: 'max(obs_flow_source_up)',
   capUp: 'max(obs_capture_up)',
@@ -165,14 +164,28 @@ function normFlows(res) {
   });
 }
 
+// inventories over the last hour and the GeoIP versions change slowly: LIVE asks for them once a minute (PLAYBACK at
+// every position, as before)
+const SLOW_Q = new Set(['ifInv', 'wlanInv', 'geoBuild', 'geoInfo']);
+const SLOW_EVERY_MS = 60000;
+const slow = { at: -Infinity, gen: -1, vals: {} };
+async function promAll(pb, gen) {
+  const reuse = !pb && slow.gen === gen && performance.now() - slow.at < SLOW_EVERY_MS;
+  const names = Object.keys(Q).filter((n) => !(reuse && SLOW_Q.has(n)));
+  const vals = await Promise.all(names.map((n) => promQuery(Q[n])));
+  const res = { ...(reuse ? slow.vals : {}), ...Object.fromEntries(names.map((n, i) => [n, vals[i]])) };
+  if (!reuse && !pb) Object.assign(slow, { at: performance.now(), gen, vals: Object.fromEntries([...SLOW_Q].map((n) => [n, res[n]])) });
+  res.up = res.upAll.filter((r) => r.metric.job === 'snmp'); // = up{job="snmp"}, without a query of its own
+  return res;
+}
+
 async function pollProm() {
   const gen = state.gen;
   const pb = isPlayback();
-  const names = Object.keys(Q);
   const [res, sDown, sUp, alerts] = await Promise.all([
-    Promise.all(names.map((n) => promQuery(Q[n]))).then((vals) => Object.fromEntries(names.map((n, i) => [n, vals[i]]))),
-    P.WAN.instance ? promRange(gate(`rate(ifHCInOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [], // no WAN configured: nothing to ask
-    P.WAN.instance ? promRange(gate(`rate(ifHCOutOctets{${P.wanSel()}}[1m]) * 8 / 1e6`), 900, 15) : [],
+    promAll(pb, gen),
+    P.WAN.instance ? promRange(gate(`rate(ifHCInOctets{${P.wanSel()}}[${RATE_WIN}]) * 8 / 1e6`), 900, 15) : [], // no WAN configured: nothing to ask
+    P.WAN.instance ? promRange(gate(`rate(ifHCOutOctets{${P.wanSel()}}[${RATE_WIN}]) * 8 / 1e6`), 900, 15) : [],
     pb ? promAlertsAt() : promAlerts(), // playback: the alert list of that time, from the TSDB (ALERTS)
     pb ? null : AL.pollAlerting(), // notification state (Alertmanager / notify records): never fails, its own state says "unknown"
   ]);
@@ -235,20 +248,35 @@ async function pollLoki() {
   if (state.seenLogs.size > 2000) state.seenLogs = new Set([...state.seenLogs].slice(-500));
 }
 
-async function poll() {
+// Each source records its own answer as soon as it arrives: a slow Loki never delays the metrics freshness (and the
+// reverse). Timed live polls never stack: a source still waiting for its previous answer (small host) is skipped this
+// cycle; every other caller (playback batches, theme switch, resume, ACK) always asks both.
+const busy = { prom: false, loki: false };
+function recordProm(r) {
+  if (!r.ok) { state.promErr = String(r.e); return; }
+  state.promOkAt = mono(); state.promOkWall = Date.now(); state.promErr = null;
+  // data age at this success, measured by Prometheus itself (no browser/host clock skew): newest sample of any UP target
+  state.dataAgeAtOk = Math.max(0, Number.isFinite(state.snap?.freshMin) ? state.snap.freshMin : 0);
+  armDeadman();
+  state.waitFresh = false; // only a successful metrics update ends the resume guard
+}
+function recordLoki(r) {
+  if (r.ok) { state.lokiOkAt = mono(); state.lokiErr = null; } else state.lokiErr = String(r.e);
+}
+async function poll(timed = false) {
   const gen = state.gen;
-  const [p, l] = await Promise.allSettled([pollProm(), pollLoki()]);
-  if (gen !== state.gen) return; // the data time changed meanwhile: its own poll reports
-  const now = mono();
-  if (p.status === 'fulfilled') {
-    state.promOkAt = now; state.promOkWall = Date.now(); state.promErr = null;
-    // data age at this success, measured by Prometheus itself (no browser/host clock skew): newest sample of any UP target
-    state.dataAgeAtOk = Math.max(0, Number.isFinite(state.snap?.freshMin) ? state.snap.freshMin : 0);
-    armDeadman();
-    state.waitFresh = false; // only a successful metrics update ends the resume guard
-  } else state.promErr = String(p.reason);
-  if (l.status === 'fulfilled') { state.lokiOkAt = now; state.lokiErr = null; } else state.lokiErr = String(l.reason);
-  updateHealth();
+  const run = (key, fetchFn, record) => {
+    if (timed && busy[key]) return null;
+    busy[key] = true;
+    return fetchFn().then((v) => ({ ok: true, v }), (e) => ({ ok: false, e })).then((r) => {
+      busy[key] = false;
+      if (gen !== state.gen) return; // the data time changed meanwhile: its own poll reports
+      record(r);
+      updateHealth();
+    });
+  };
+  await Promise.all([run('prom', pollProm, recordProm), run('loki', pollLoki, recordLoki)]);
+  if (gen !== state.gen) return;
   // header info slots may be cut to an ellipsis on narrow panels: the full text stays available as a tooltip
   for (const h of document.querySelectorAll('.panel > h2 .h-r')) h.title = h.textContent;
   // playback paces its batches on the whole refresh, open detail views included (their own range queries)
@@ -483,6 +511,15 @@ $('alert-banner').addEventListener('click', openAlerts);
 $('alert-banner').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAlerts(); } });
 AL.setOnChange(() => poll()); // after an ACK / silence change: show its effect now, not at the next poll
 G.initGlobe({ onDest: (key) => { const [cc, city] = key.split('|'); nav.dest({ cc, city }); }, onInteract: () => UI.touched() });
+// globe drawing mode (settings menu only): GPU / LITE, picked automatically or by hand (globe.js, render-mode.js)
+function showRender(r) {
+  const b = $('render-toggle');
+  if (!r.probe) { b.textContent = 'RENDER: —'; b.disabled = true; b.title = 'globe unavailable'; return; }
+  b.textContent = r.label;
+  b.title = `Globe drawing (data unchanged): GPU = animated, at most 30 fps · LITE = static, drawn only on change · AUTO = LITE when WebGL is software-rendered. This browser: ${r.probe.gpu ? 'hardware' : 'software / none'} (${r.probe.renderer})`;
+}
+showRender(G.renderInfo());
+$('render-toggle').addEventListener('click', () => showRender(G.cycleRender()));
 wirePanelTitles();
 // ---- playback: main.js owns the data time (util.now()); playback.js moves the cursor and paces the fetches ---------
 const resetFeed = () => { state.gen++; P.resetLogs(state.seenLogs); };
@@ -510,6 +547,6 @@ setInterval(tickClock, 1000);
 poll().then(() => { // link in the notifications (OBS_PUBLIC_URL/?open=alerts): the alert list, once there is data
   if (new URLSearchParams(location.search).get('open') === 'alerts') openAlerts();
 });
-setInterval(() => { if (!isPlayback()) poll(); }, POLL_MS); // live polling is off during playback
+setInterval(() => { if (!isPlayback()) poll(true); }, POLL_MS); // live polling is off during playback
 // scripted-test hook (read-only): screen position of a destination on the globe
-window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode, playback: PB.testState, enterPlayback: PB.enter };
+window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode, playback: PB.testState, enterPlayback: PB.enter, render: G.renderInfo };

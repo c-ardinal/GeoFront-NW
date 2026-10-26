@@ -1,5 +1,8 @@
-// Globe: rendering (default photo style / eva-film tactical style), selection highlight, zoom, click & hover.
-import { $, el, esc, fmtBps, maskIp, distKm, REDUCED_MOTION } from './util.js';
+// Globe: rendering (default photo style / eva-film tactical style), selection highlight, zoom, click & hover,
+// drawing mode (GPU: animated, at most 30 fps / LITE: static, drawn on change; render-mode.js) and frame pacing.
+import { $, el, esc, fmtBps, maskIp, distKm, REDUCED_MOTION, uiZoom, refitTickers } from './util.js';
+import { probeGpu, storedChoice, storeChoice, nextChoice, resolveMode, choiceLabel } from './render-mode.js';
+import { pulseLayer, labelLayer } from './globe-layers.js';
 
 export const ORIGIN = { lat: 35.68, lng: 139.77, label: 'HOME' }; // logical origin: coarse home region, NOT an address
 const TEXTURE = 'https://cdn.jsdelivr.net/npm/three-globe@2.45.6/example/img/';
@@ -7,6 +10,7 @@ const MAX_ARCS = 30;
 const LABEL_MIN_KM = 500;
 const DEFAULT_POV = { lat: 25, lng: 150, altitude: 1.9 };
 const FLY_MS = 900;
+const ARC_DASH_MS = 2200;
 
 // Per-theme palette. The default entries are exactly the original constants.
 const STYLES = {
@@ -17,7 +21,7 @@ const STYLES = {
     ranges: [
       ...[4, 8, 12].map((deg) => ({ deg, color: 'rgba(61,242,154,0.55)', dash: 0.01, gap: 0.01 })),
       { deg: 16, color: 'rgba(61,242,154,0.8)', dash: 1, gap: 0 },
-      ...[8, 16].map((deg) => ({ deg, color: 'rgba(255,212,0,0.95)', dash: 0.08, gap: 0.92, anim: REDUCED_MOTION ? 0 : 5000 })),
+      ...[8, 16].map((deg) => ({ deg, color: 'rgba(255,212,0,0.95)', dash: 0.08, gap: 0.92, anim: 5000 })),
     ] },
 };
 const theme = () => document.documentElement.dataset.theme;
@@ -33,6 +37,86 @@ let globe = null;
 let hooks = { onDest: () => {}, onInteract: () => {} };
 let last = { arcs: [], cities: [] };
 let selection = null; // { type: 'dest', key } | { type: 'src', host }
+let pulses = null, labels = null;
+let hidePoints = 0; // frames left to look for new point meshes to hide (see onBeforeRender)
+
+// ---- drawing mode ---------------------------------------------------------------------------------------------------
+const draw = { probe: null, choice: 'auto', mode: 'gpu' };
+const animated = () => draw.mode === 'gpu' && !REDUCED_MOTION;
+export const renderInfo = () => ({ ...draw, animated: animated(), label: choiceLabel(draw.choice, draw.mode), frames: globe?.renderer().info.render.frame ?? 0 });
+export function cycleRender() {
+  draw.choice = nextChoice(draw.choice);
+  storeChoice(draw.choice);
+  draw.mode = resolveMode(draw.choice, draw.probe);
+  applyMotion();
+  return renderInfo();
+}
+
+// ---- frame pacing -----------------------------------------------------------------------------------------------------
+// globe.gl renders on every animation frame. Animated: at most FPS, IDLE_FPS after IDLE_AFTER_MS without any input.
+// Static (LITE / reduced motion): the loop runs only while something changes (wake), otherwise it is paused.
+// Hidden tab: paused. globe.gl's loop schedules its next frame through the instance property _animationCycle, so the
+// wrapper below decides per frame whether to render.
+const FPS = 30;
+const IDLE_FPS = 15;
+const IDLE_AFTER_MS = 60000;
+const loop = { running: true, paced: false, skip: 0, last: 0, until: 0, timer: 0, dragging: false, stopped: false, input: performance.now() };
+function initPacing() {
+  const cycle = globe._animationCycle;
+  if (typeof cycle !== 'function') return; // another globe.gl build: its own loop, unpaced
+  loop.paced = true;
+  globe._animationCycle = () => {
+    loop.skip = 0;
+    if (!loop.running) return;
+    const t = performance.now();
+    const fps = t - loop.input > IDLE_AFTER_MS ? IDLE_FPS : FPS;
+    if (t - loop.last >= 1000 / fps - 4) { loop.last = t; cycle(); } else loop.skip = requestAnimationFrame(globe._animationCycle);
+  };
+  for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel']) window.addEventListener(ev, () => { loop.input = performance.now(); }, { capture: true, passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) setRunning(false);
+    else if (animated()) setRunning(true);
+    else wake(400);
+  });
+}
+function setRunning(on) {
+  if (!globe || on === loop.running) return;
+  loop.running = on;
+  if (on) { globe.resumeAnimation(); return; }
+  globe.pauseAnimation();
+  cancelAnimationFrame(loop.skip);
+  loop.skip = 0;
+}
+// static mode: keep drawing for ms (a data update needs a few frames, a camera move its duration)
+function wake(ms) {
+  if (!globe || animated() || document.hidden) return;
+  loop.until = Math.max(loop.until, performance.now() + ms);
+  setRunning(true);
+  clearTimeout(loop.timer);
+  loop.timer = setTimeout(sleepCheck, loop.until - performance.now() + 20);
+}
+function sleepCheck() {
+  if (animated() || loop.dragging) return;
+  if (performance.now() >= loop.until) setRunning(false); else loop.timer = setTimeout(sleepCheck, loop.until - performance.now() + 20);
+}
+// mode switch / start: motion on or off everywhere
+function applyMotion() {
+  if (!globe) return;
+  const on = animated();
+  // LITE: the whole page is static, as with reduced motion (style.css; tickers wrap instead of scrolling)
+  if (document.documentElement.dataset.render !== draw.mode) {
+    document.documentElement.dataset.render = draw.mode;
+    refitTickers();
+  }
+  const ms = on ? undefined : 0; // static: no grow-in transitions (only a few frames are drawn per change)
+  globe.arcDashAnimateTime(on ? ARC_DASH_MS : 0)
+    .arcsTransitionDuration(ms ?? 1000).pointsTransitionDuration(ms ?? 1000).labelsTransitionDuration(ms ?? 1000);
+  globe.controls().autoRotate = on && !loop.stopped;
+  pulses?.setStatic(!on);
+  if (isEva()) globe.pathsData(evaPaths(style()));
+  applyData();
+  if (on) setRunning(true); else wake(600);
+}
 
 export function initGlobe(h) {
   hooks = { ...hooks, ...h };
@@ -41,6 +125,9 @@ export function initGlobe(h) {
     host.appendChild(el('div', 'globe-error', 'GLOBE LIBRARY UNAVAILABLE (CDN unreachable)'));
     return;
   }
+  draw.probe = probeGpu();
+  draw.choice = storedChoice();
+  draw.mode = resolveMode(draw.choice, draw.probe);
   globe = Globe()(host)
     .backgroundColor('rgba(0,0,0,0)')
     .showAtmosphere(true).atmosphereColor('#33d6ff').atmosphereAltitude(0.22)
@@ -53,20 +140,19 @@ export function initGlobe(h) {
     .ringColor((d) => d.ringFn)
     .arcDashLength(0.35).arcDashGap(0.15)
     .arcDashInitialGap((d) => d.phase)
-    .arcDashAnimateTime(REDUCED_MOTION ? 0 : 2200)
     .arcLabel((d) => { const c = cityUnderPointer(); return c ? cityTip(c) : tooltip(d.city, d.cc, d.asn, `${d.dir} ${fmtBps(d.bps)}`, d.srcs.size, d.ip); })
     // a click on an arc that lies over another destination's point selects that destination (points win)
     .onArcClick((d, ev, c) => pick(pointAt(c) || d.key))
     .onArcHover((d) => { host.style.cursor = d ? 'pointer' : ''; })
-    .ringMaxRadius((d) => d.r).ringPropagationSpeed(2.2)
-    .ringRepeatPeriod(REDUCED_MOTION ? 0 : 1400)
+    // library ring layer: only until the shader pulses (globe-layers.js) can be built
+    .ringMaxRadius((d) => d.r).ringPropagationSpeed(2.2).ringRepeatPeriod(() => (animated() ? 1400 : 0))
     .labelText((d) => d.text).labelSize((d) => d.size).labelDotRadius((d) => d.dot)
     .labelColor((d) => d.color).labelResolution(2).labelAltitude(0.006)
     // city labels are 3D text that sits over the destination point; route their hover/click to the destination
     .labelLabel((d) => { const c = cityUnderPointer() || (d.key ? d : null); return c ? cityTip(c) : ''; })
     .onLabelClick((d, ev, c) => { const u = cityUnderPointer(); const k = u?.key || pointAt(c) || d.key; if (k) pick(k); }) // a label may overlap a neighbouring point: the point wins
     .onLabelHover((d) => { host.style.cursor = d?.key ? 'pointer' : ''; })
-    // invisible hit targets at each destination for hover tooltip + click
+    // invisible hit targets at each destination for hover tooltip + click (their meshes are not drawn: see hidePoints)
     .pointLat((d) => d.lat).pointLng((d) => d.lng).pointAltitude(0.004).pointRadius(2)
     .pointColor(() => 'rgba(255,255,255,0.01)').pointsMerge(false)
     .pointLabel(cityTip)
@@ -80,47 +166,31 @@ export function initGlobe(h) {
     .pathTransitionDuration(0)
     .hexPolygonResolution(3).hexPolygonMargin(0.35).hexPolygonAltitude(0.004)
     .hexPolygonColor(() => style().hex).hexPolygonsTransitionDuration(0)
-    .htmlElement((d) => {
-      const outer = el('div', `glabel${d.home ? ' glabel-home' : ''}${d.sel ? ' glabel-sel' : ''}`);
-      outer.dataset.prio = d.prio;
-      outer.appendChild(el('span', '', d.text));
-      return outer;
-    })
-    .htmlAltitude(0.01)
-    .htmlElementVisibilityModifier((e, visible) => { e.style.opacity = visible ? '' : '0'; });
-  host.addEventListener('pointermove', (e) => { const r = host.getBoundingClientRect(); pointer = { x: e.clientX - r.left, y: e.clientY - r.top }; }, { passive: true });
+    .onGlobeReady(() => wake(800));
+  host.addEventListener('pointermove', (e) => { const r = host.getBoundingClientRect(); pointer = { x: e.clientX - r.left, y: e.clientY - r.top }; wake(400); }, { passive: true });
+  pulses = pulseLayer(globe);
+  labels = labelLayer(globe, host);
+  // per rendered frame: hide the hit-target point meshes once they exist; redraw the eva labels if the camera moved
+  globe.scene().onBeforeRender = () => {
+    if (hidePoints > 0) {
+      let n = 0;
+      globe.scene().traverse((o) => { if (o.__globeObjType === 'point' && o.material) { o.material.visible = false; n++; } });
+      hidePoints = n ? 0 : hidePoints - 1;
+    }
+  };
+  globe.scene().onAfterRender = () => labels.draw();
   const controls = globe.controls();
-  controls.autoRotate = !REDUCED_MOTION;
+  controls.autoRotate = animated();
   controls.autoRotateSpeed = 0.35;
   controls.enableZoom = true;
-  controls.addEventListener('start', () => { controls.autoRotate = false; hooks.onInteract(); });
-  controls.addEventListener('change', scheduleDeclutter);
+  controls.addEventListener('start', () => { controls.autoRotate = false; loop.stopped = true; loop.dragging = true; setRunning(true); hooks.onInteract(); });
+  controls.addEventListener('end', () => { loop.dragging = false; wake(800); });
   new ResizeObserver(fit).observe(host);
+  initPacing();
   fit();
   styleGlobe();
   initZoomButtons();
-}
-
-// Screen-space thinning of the HTML labels (eva themes): the 500 km rule is zoom-independent, so at a wide view two
-// labels can still overlap; a lower-priority label whose box hits an already-shown one is hidden. Runs at most
-// every DECLUTTER_MS while the camera moves (a layout read, no per-frame DOM work) and after each data update.
-const DECLUTTER_MS = 250;
-const LABEL_PAD = 3;
-let declutterTimer = 0;
-function scheduleDeclutter() {
-  if (!declutterTimer) declutterTimer = setTimeout(() => { declutterTimer = 0; declutter(); }, DECLUTTER_MS);
-}
-function declutter() {
-  if (!isEva()) return;
-  const shown = [];
-  const labels = [...$('globe').querySelectorAll('.glabel')].sort((a, b) => a.dataset.prio - b.dataset.prio);
-  for (const lab of labels) {
-    const front = lab.style.opacity !== '0'; // the visibility modifier fades labels on the far side to 0
-    const r = lab.firstChild.getBoundingClientRect();
-    const hit = front && shown.some((s) => r.left - LABEL_PAD < s.right && r.right + LABEL_PAD > s.left && r.top - LABEL_PAD < s.bottom && r.bottom + LABEL_PAD > s.top);
-    if (lab.classList.contains('glabel-hidden') !== hit) lab.classList.toggle('glabel-hidden', hit);
-    if (front && !hit) shown.push(r);
-  }
+  applyMotion();
 }
 
 // Arcs leaving HOME pass over nearby destinations; when the pointer is over a destination point, that point wins
@@ -170,6 +240,7 @@ export function fit() {
   const host = $('globe');
   if (globe && (globe.width() !== host.clientWidth || globe.height() !== host.clientHeight)) {
     globe.width(host.clientWidth).height(host.clientHeight);
+    wake(300);
   }
 }
 
@@ -177,6 +248,7 @@ function initZoomButtons() {
   const zoom = (f) => {
     const p = globe.pointOfView();
     globe.controls().autoRotate = false;
+    loop.stopped = true;
     moveCamera({ ...p, altitude: Math.min(4, Math.max(0.4, p.altitude * f)) }, REDUCED_MOTION ? 0 : 400);
     hooks.onInteract();
   };
@@ -189,18 +261,19 @@ export function resetView() {
   hideCard();
   if (!globe) return;
   moveCamera(DEFAULT_POV, REDUCED_MOTION ? 0 : 800);
-  globe.controls().autoRotate = !REDUCED_MOTION;
+  loop.stopped = false;
+  globe.controls().autoRotate = animated();
 }
 
 export function flyTo(lat, lng) {
   if (!globe) return;
   globe.controls().autoRotate = false;
+  loop.stopped = true;
   moveCamera({ lat, lng, altitude: 1.5 }, REDUCED_MOTION ? 0 : FLY_MS);
 }
-// animated camera moves do not emit controls 'change', so re-thin the labels once the move has landed
 function moveCamera(pov, ms) {
   globe.pointOfView(pov, ms);
-  setTimeout(scheduleDeclutter, ms + 50);
+  wake(ms + 300);
 }
 
 const POINT_HIT_KM = 250;
@@ -219,13 +292,22 @@ export function setSelection(sel) {
   if (globe) applyData();
 }
 
+// eva graticule as two paths (one draw call each instead of one per line): every meridian but 180° in one path (they
+// meet at the poles), and every parallel in one path joined along the 180° meridian, which that path draws exactly once
 function evaPaths({ grid, ranges }) {
   const g = { color: grid.color, dash: 1, gap: 0, anim: 0 };
-  const paths = [];
-  for (let lng = -180; lng < 180; lng += grid.step) paths.push({ ...g, pts: Array.from({ length: 37 }, (_, i) => [-90 + i * 5, lng]) });
-  for (let lat = -90 + grid.step; lat < 90; lat += grid.step) paths.push({ ...g, pts: Array.from({ length: 73 }, (_, i) => [lat, -180 + i * 5]) });
+  const meridians = [];
+  for (let lng = -180 + grid.step, up = true; lng < 180; lng += grid.step, up = !up) {
+    for (let i = 0; i <= 36; i++) meridians.push([up ? -90 + i * 5 : 90 - i * 5, lng]);
+  }
+  const parallels = [[-90, -180]];
+  for (let lat = -90 + grid.step; lat < 90; lat += grid.step) {
+    for (let i = 0; i <= 72; i++) parallels.push([lat, -180 + i * 5]);
+  }
+  parallels.push([90, -180]);
+  const paths = [{ ...g, pts: meridians }, { ...g, pts: parallels }];
   for (const r of ranges) {
-    paths.push({ anim: 0, ...r, pts: Array.from({ length: 73 }, (_, i) => {
+    paths.push({ ...r, anim: animated() ? r.anim || 0 : 0, pts: Array.from({ length: 73 }, (_, i) => {
       const a = (i * 5 * Math.PI) / 180;
       return [ORIGIN.lat + r.deg * Math.sin(a), ORIGIN.lng + (r.deg * Math.cos(a)) / Math.cos((ORIGIN.lat * Math.PI) / 180)];
     }) });
@@ -258,6 +340,7 @@ export function styleGlobe() {
   if (!globe) return;
   const s = style();
   globe.atmosphereColor(s.atmo).atmosphereAltitude(s.atmoAlt);
+  labels?.restyle();
   if (isEva()) {
     globe.pathsData(evaPaths(s)).hexPolygonsData(geo.land ? [geo.land] : []);
     darken();
@@ -273,9 +356,10 @@ export function styleGlobe() {
     if (saved.bump) mat.bumpMap = saved.bump;
     mat.needsUpdate = true;
     setSky(true);
-    globe.pathsData([]).hexPolygonsData([]).htmlElementsData([]);
+    globe.pathsData([]).hexPolygonsData([]);
   }
   applyData();
+  wake(1500); // texture / outline changes land over the next frames
 }
 // Plain dark sphere for eva; re-asserted on each render in case a texture load lands late.
 const DARK = '080808';
@@ -339,6 +423,7 @@ function selHit(x) {
 }
 const matches = selHit;
 
+const rgb = (csv) => csv.split(',').map((v) => Number(v) / 255);
 function applyData() {
   if (!globe) return;
   const s = style();
@@ -352,11 +437,11 @@ function applyData() {
   const cities = last.cities || [];
   const cmax = Math.max(1, ...cities.map((c) => c.bps));
   globe.arcsData(arcs);
-  globe.ringsData(cities.map((c) => {
-    const alpha = selection && !matchesCity(c) ? 0.15 : 1;
-    return { ...c, r: 1.5 + 3 * Math.sqrt(c.bps / cmax), ringFn: (t) => `rgba(${s.ring},${alpha * (1 - t)})` };
-  }));
+  const rings = cities.map((c) => ({ ...c, r: 1.5 + 3 * Math.sqrt(c.bps / cmax), alpha: selection && !matchesCity(c) ? 0.15 : 1 }));
+  if (pulses.set(rings.map((c) => ({ lat: c.lat, lng: c.lng, r: c.r, rgb: rgb(s.ring), alpha: c.alpha })))) globe.ringsData([]);
+  else globe.ringsData(rings.map((c) => ({ ...c, ringFn: (t) => `rgba(${s.ring},${c.alpha * (1 - t)})` })));
   globe.pointsData(cities);
+  hidePoints = 30;
   // Label priority by bps: skip a city label within LABEL_MIN_KM of the origin or of a label already placed;
   // a selected destination is always labelled.
   const placed = [ORIGIN];
@@ -369,21 +454,18 @@ function applyData() {
   if (isEva()) {
     darken();
     globe.labelsData([]);
-    // prio for screen-space thinning: selected destination, then HOME, then by bps (labelled is already in that order)
+    // drawing order = priority for the screen-space thinning: selected destination, then HOME, then by bps
     const sel = labelled.filter((c) => isSelCity(c));
     const rest = labelled.filter((c) => !isSelCity(c));
-    globe.htmlElementsData([
-      ...sel.map((c, i) => ({ ...c, sel: 1, prio: i })),
-      { ...ORIGIN, text: ORIGIN.label, home: true, prio: sel.length },
-      ...rest.map((c, i) => ({ ...c, sel: 0, prio: sel.length + 1 + i })),
+    labels.set([...sel, { ...ORIGIN, text: ORIGIN.label, home: true }, ...rest].map((c) => ({ lat: c.lat, lng: c.lng, text: c.text, home: !!c.home })));
+  } else {
+    labels.set([]);
+    globe.labelsData([
+      ...labelled.map((c) => ({ ...c, size: isSelCity(c) ? 1.6 : 1.3, dot: 0.35, color: isSelCity(c) ? '#ffffff' : 'rgba(160,240,255,0.9)' })),
+      { ...ORIGIN, text: ORIGIN.label, size: 1.5, dot: 0.6, color: '#ffb000' },
     ]);
-    scheduleDeclutter();
-    return;
   }
-  globe.labelsData([
-    ...labelled.map((c) => ({ ...c, size: isSelCity(c) ? 1.6 : 1.3, dot: 0.35, color: isSelCity(c) ? '#ffffff' : 'rgba(160,240,255,0.9)' })),
-    { ...ORIGIN, text: ORIGIN.label, size: 1.5, dot: 0.6, color: '#ffb000' },
-  ]);
+  wake(200); // static mode: the library applies the new data on its next frames
 }
 const isSelCity = (c) => (selection && selection.type !== 'src' && selHit(c) ? 1 : 0);
 const matchesCity = selHit;
@@ -394,4 +476,5 @@ export function screenOf(lat, lng) {
 }
 export const testSelection = () => selection;
 export const testInfo = () => ({ pov: globe?.pointOfView(), cities: (last.cities || []).map((c) => ({ key: c.key, lat: c.lat, lng: c.lng })),
-  gl: globe && { ...globe.renderer().info.memory, programs: globe.renderer().info.programs.length, w: globe.width(), h: globe.height() } });
+  gl: globe && { ...globe.renderer().info.memory, programs: globe.renderer().info.programs.length, w: globe.width(), h: globe.height() },
+  render: renderInfo(), paced: loop.paced, running: loop.running, labels: labels?.count() ?? 0, uiZoom: uiZoom() });

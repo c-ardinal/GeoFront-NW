@@ -130,7 +130,7 @@ mask-api の自己テスト (`python mask-api/mask_api.py --selftest`、イメ�
 
 ## 本番に入れる (Raspberry Pi / 小型 PC)
 
-前提: 64 bit の Linux (Raspberry Pi OS 64-bit / Ubuntu など、arm64 または amd64)、Docker Engine と compose plugin。
+前提: 64 bit の Linux (Raspberry Pi OS 64-bit / Ubuntu など、arm64 または amd64)、Docker Engine 25 以上 (healthcheck の `start_interval` を使うため) と compose plugin。
 ホストに Python などは要りません (設定作業は `tools` コンテナで行います)。Pi 4 (4 GB) で動く既定値にしてあります。
 P1 時点で実機での動作確認はまだです (下記「既知の制限」)。
 
@@ -179,6 +179,30 @@ save
 WLX: Web GUI の SNMP 設定で SNMPv3 の読み取り専用ユーザー (同じ認証・暗号方式とパスワード、アクセスを許すホストに監視ホスト) を作り、syslog の送信先に監視ホストを指定します。
 
 確認: `docker compose run --rm tools check` で SNMP が OK、syslog の受信待ちで該当機器の行が届けば完了です。NG の詳細に原因の目安 (応答なし = IP・ポート・SNMP 有効化・ACL、認証エラー = ユーザー名・パスワード・方式) を出します。
+
+## Raspberry Pi での推奨設定と表示端末
+
+既定値は Raspberry Pi 4 (4 GB) に合わせてあります。計測 (変更前後、Pi 相当の 4 コア制限下) は `docs/plans/v2/PERF-RESULTS.md`。
+
+- 収集: Prometheus の scrape と評価の間隔は 30 秒 (`prometheus/prometheus.yml`)。画面・アラート・記録ルール・Grafana の rate はどれも 4 間隔分 (2 分) の窓です (INTERFACES の見出しが `rate 2 min`)。Loki / Prometheus / Alloy 自身のメトリクスは画面が使うものだけを保存します。
+- 常駐サービス: healthcheck は 60 秒ごと (起動直後だけ 5 秒ごと)。Loki はキャッシュ・並列度・WAL の再生上限を小さく、Prometheus の同時評価は 4 件まで、Alloy の利用統計送信は無効、Grafana は自前のアラート評価と Live 配信を無効にしています。flowd は 5 秒ごと、grafana-guard は管理者のパスワードが変わったときだけ PBKDF2 を計算し直します。
+- Grafana は任意です。command-center は Grafana を使いません。Pi では `.env` に `OBS_GRAFANA=0` を勧めます (Grafana と grafana-guard を起動しません。約 100 MB と常時の処理が減ります。`/grafana/` は 502、証跡の版情報の grafana は `unknown`、`tools check` は Grafana を確かめません)。
+- メモリ / CPU の上限は `.env` の `*_MEM` / `*_CPUS` (`.env.example` の resources) で変えられます。既定値は計測した最大使用量のおよそ 2 倍以上の余裕を残しています。
+
+### 表示端末 (ブラウザ) の GPU と描画モード
+
+地球儀は WebGL で描きます。設定メニュー (`⋯`) の `RENDER:` が描画モードです (押すたびに AUTO → GPU → LITE。ブラウザに保存されます。`?render=lite` などの URL 指定はその表示だけに効きます)。
+
+- `GPU`: 動く地球儀 (アークの流れ・パルス・自転)。動きはシェーダ側で時間だけを更新し、描画は最大 30 fps、1 分間操作がなければ 15 fps、タブが隠れていれば止めます。
+- `LITE`: 同じ地球儀と同じ情報を静止表示します (流れ・パルス・自転なし。パルスは最大半径の輪)。データの更新・ポインタ操作・視点の移動のときだけ描きます。画面全体も「視差効果を減らす」と同じ静止表示になります (DOWN の点滅・警報の枠の脈動・ログの流れ込みなし、警報バナーの名前は流さず折り返して全部表示。STALE の保険 (dead-man) は動きます)。ソフトウェア描画のブラウザでは、合成だけで済む CSS アニメーションでも毎フレーム画面全体の合成に CPU を使うためです。OS の「視差効果を減らす」(prefers-reduced-motion) が有効なときも GPU モードのまま同じく静止・必要時だけ描画です。
+- `AUTO` (既定): WebGL が無い、またはソフトウェア描画 (SwiftShader / llvmpipe など) のときは LITE、それ以外は GPU。ボタンの説明 (ホバー) にブラウザの WebGL レンダラ名を出します。
+
+Raspberry Pi の Chromium を表示端末 (キオスク) にする場合:
+
+- GPU が使われているかは `chrome://gpu` の「WebGL: Hardware accelerated」と、WebGL のレンダラが `V3D` (Broadcom) であることで確かめます。`llvmpipe` や「Software only」ならソフトウェア描画で、AUTO は LITE になります。
+- Raspberry Pi OS (Bookworm) は既定で GPU ドライバ (`/boot/firmware/config.txt` の `dtoverlay=vc4-kms-v3d`) が有効です。無効にしていると Chromium はソフトウェア描画になります。Chromium が GPU を使わない (ブロックリスト) 場合は起動オプションに `--ignore-gpu-blocklist` を足して `chrome://gpu` で確かめてください。
+- Pi 4 の GPU は非力なので、4K 画面や Pi で収集サーバも兼ねる場合は LITE を勧めます (URL で固定: `http://<host>:8080/?render=lite`)。キオスクの例: `chromium-browser --kiosk --noerrdialogs --disable-infobars http://<host>:8080/?render=lite`
+- 取得は 1 周期に 1 回だけ (同じ問い合わせは共有、遅い応答の間はその取得元への次の取得を重ねない。Prometheus と Loki の鮮度はそれぞれ独立) で、要求ごとに期限 (8 秒 / 範囲・ログ 16 秒) があります。期限切れは鮮度バッジの DEGRADED (理由に `timeout`)、続けば STALE です。
 
 ## 疑似実機で prod の経路を試す (testbed)
 
@@ -285,7 +309,7 @@ docker compose run --rm tools check         # 通知先の設定の検証、Aler
 
 testbed (`docker compose --env-file testbed/testbed.env up -d --build`) では `testbed/receivers.yaml` の 5 種類の通知先がすべて `notifymock` に向いています (ダミーの秘密値)。`tools notify-test` で全部 OK になり、notifymock の記録 (`docker compose --env-file testbed/testbed.env exec notifymock python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8080/captures').read().decode())"`) で本文・宛先・伏せ字・復旧通知を確かめられます。
 
-Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (デモは rtx1300 lan2) から setup が生成する記録ルール `obs_wan:ifHCInOctets:rate1m` / `obs_wan:ifHCOutOctets:rate1m` を表示します (WAN 未設定ならデータなし)。
+Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (デモは rtx1300 lan2) から setup が生成する記録ルール `obs_wan:ifHCInOctets:rate2m` / `obs_wan:ifHCOutOctets:rate2m` を表示します (WAN 未設定ならデータなし)。
 
 ## パケット取込と解析 (P3)
 

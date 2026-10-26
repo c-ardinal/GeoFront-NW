@@ -17,6 +17,7 @@ Configuration comes from the environment compose passes in (from .env or --env-f
 import argparse
 import base64
 import getpass
+import functools
 import hashlib
 import hmac
 import ipaddress
@@ -200,10 +201,10 @@ def wan_rules(wan):
     sel = 'job="snmp",instance="%s",ifName="%s"' % (wan["device"], wan["ifName"])
     where = f'{wan["device"]} {wan["ifName"]}'
     return {"groups": [{"name": "yamaha-wan", "rules": [
-        {"record": "obs_wan:ifHCInOctets:rate1m", "expr": f"rate(ifHCInOctets{{{sel}}}[1m])"},
-        {"record": "obs_wan:ifHCOutOctets:rate1m", "expr": f"rate(ifHCOutOctets{{{sel}}}[1m])"},
+        {"record": "obs_wan:ifHCInOctets:rate2m", "expr": f"rate(ifHCInOctets{{{sel}}}[2m])"},
+        {"record": "obs_wan:ifHCOutOctets:rate2m", "expr": f"rate(ifHCOutOctets{{{sel}}}[2m])"},
         {"alert": "WanHighUtilization",
-         "expr": f"rate(ifHCInOctets{{{sel}}}[1m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
+         "expr": f"rate(ifHCInOctets{{{sel}}}[2m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
          "for": "30s", "labels": {"severity": "warning"},
          "annotations": {"summary": f'WAN ({where}) download utilization {{{{ $value | printf "%.0f" }}}}%',
                          "summary_ja": f'WAN ({where}) の下り使用率が {{{{ $value | printf "%.0f" }}}}% です (80% 超)',
@@ -262,7 +263,9 @@ def check_env(values, used_auths=()):
             errs.append(f"{key}={v}: 1〜65535 のポート番号にしてください")
     lan = on_lan(values)
     if values.get("GF_ADMIN_PASSWORD", "admin") in DEFAULT_GF_PASSWORDS:
-        if lan:
+        if values.get("OBS_GRAFANA", "1") == "0":  # Grafana not started: nothing to log in to (checked again once enabled)
+            warns.append("GF_ADMIN_PASSWORD が既定値です (Grafana は無効: OBS_GRAFANA=0)。有効にする前に変えてください")
+        elif lan:
             errs.append("GF_ADMIN_PASSWORD が既定値のまま LAN に公開しようとしています。LAN 公開時は Grafana にログインが必要です。パスワードを変えてください")
         else:
             warns.append("GF_ADMIN_PASSWORD が既定値です。Grafana 管理者パスワードを変えてください (初回起動時のみ反映)")
@@ -567,7 +570,14 @@ def default_of(admin):
     """The default password (admin / change-me / empty) this admin can log in with, or None."""
     if not admin.password:
         return None
-    return next((c for c in DEFAULT_LOGIN_PASSWORDS if hmac.compare_digest(grafana_hash(c, admin.salt), admin.password)), None)
+    return _default_for(admin.password, admin.salt)
+
+
+@functools.lru_cache(maxsize=64)
+def _default_for(password_hash, salt):
+    # the answer depends on the stored hash + salt only: the guard re-reads grafana.db every interval, but re-derives
+    # the PBKDF2 hashes (10000 rounds x 3 candidates per admin) only when an admin's stored hash changed
+    return next((c for c in DEFAULT_LOGIN_PASSWORDS if hmac.compare_digest(grafana_hash(c, salt), password_hash)), None)
 
 
 def grafana_defaults(db_path=None):
@@ -806,6 +816,8 @@ def services(m):
             ("alloy", "http://alloy:12345/-/ready"), ("grafana", "http://grafana:3000/grafana/api/health"),
             ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz"),
             ("alertmanager", ALERTMANAGER + "/-/healthy"), ("notify-relay", RELAY + "/health")]
+    if env("OBS_GRAFANA", "1") == "0":  # Grafana left out (small host): not a failure
+        base = [s for s in base if s[0] != "grafana"]
     extra = {"demo": [("demo-gen", "http://demo-gen:9116/fault/status")],
              "prod": [("snmp-exporter", "http://snmp-exporter:9116/")]}
     flows = {"pcap-replay": [("flowd-demo", "http://flowd-demo:9100/health")], "capture": [("flowd", "http://flowd:9100/health")]}
@@ -893,10 +905,13 @@ def cmd_check(args):
         srows.append((name, "OK" if ok else "NG", detail))
     table(("サービス", "状態", "詳細"), srows)
     print("\n■ Grafana の管理者パスワード (grafana.db に保存された値で確認。ログインはしない)")
-    ok, msg = grafana_guard()
-    lan = on_lan(env_map())
-    print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}")
-    rc |= (not ok) and lan
+    if env("OBS_GRAFANA", "1") == "0":
+        print("[--] Grafana は無効です (OBS_GRAFANA=0)。確認しません")
+    else:
+        ok, msg = grafana_guard()
+        lan = on_lan(env_map())
+        print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}")
+        rc |= (not ok) and lan
     rc |= check_notify(m)
     rc |= check_capture(m)
     if not rows:
@@ -1747,6 +1762,8 @@ def selftest():
     assert check_env({**good, "SNMP_V3_PRIV_PASS": "it's"})[0]
     lan = {**good, "OBS_BIND": "192.168.100.10"}
     assert check_env({**lan, "GF_ADMIN_PASSWORD": "admin"})[0] and not check_env({**good, "GF_ADMIN_PASSWORD": "admin"})[0]
+    off = check_env({**lan, "GF_ADMIN_PASSWORD": "admin", "OBS_GRAFANA": "0"})  # Grafana not started: a warning, not a refusal
+    assert not off[0] and any("OBS_GRAFANA=0" in w for w in off[1]), off
     assert any("OBS_GRAFANA_ANON_ON_LAN" in w for w in check_env({**lan, "OBS_GRAFANA_ANON_ON_LAN": "1"})[1])
     errs, _, _ = validate({**good, "SNMP_V3_USER": ""}, dev)  # v3 auth dropped -> reported as missing credentials
     assert errs, errs
@@ -1774,10 +1791,10 @@ def selftest():
     assert 'ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"}' in rule["expr"] and rule["annotations"]["summary"].startswith("WAN (rtx1300 lan2)")
     assert rule["annotations"]["summary_ja"].startswith("WAN (rtx1300 lan2) の下り使用率") and rule["annotations"]["value"]
     rec = {r["record"]: r["expr"] for r in wrules if "record" in r}  # the Grafana wallboard's WAN panels read these
-    assert rec == {"obs_wan:ifHCInOctets:rate1m": 'rate(ifHCInOctets{job="snmp",instance="rtx1300",ifName="lan2"}[1m])',
-                   "obs_wan:ifHCOutOctets:rate1m": 'rate(ifHCOutOctets{job="snmp",instance="rtx1300",ifName="lan2"}[1m])'}, rec
+    assert rec == {"obs_wan:ifHCInOctets:rate2m": 'rate(ifHCInOctets{job="snmp",instance="rtx1300",ifName="lan2"}[2m])',
+                   "obs_wan:ifHCOutOctets:rate2m": 'rate(ifHCOutOctets{job="snmp",instance="rtx1300",ifName="lan2"}[2m])'}, rec
     wall = (WORK / "dashboards/wallboard.json").read_text(encoding="utf-8")
-    assert 'ifName=\\"lan2\\"' not in wall and "obs_wan:ifHCInOctets:rate1m" in wall, "wallboard WAN panels follow the inventory"
+    assert 'ifName=\\"lan2\\"' not in wall and "obs_wan:ifHCInOctets:rate2m" in wall, "wallboard WAN panels follow the inventory"
     notify.selftest(good)
     cap.selftest()
     each(os.chmod, "/nonexistent/obs-selftest", 0o644)  # a vanished entry never fails setup-check
