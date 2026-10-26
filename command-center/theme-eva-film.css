@@ -180,6 +180,21 @@
     linear-gradient(var(--frame) 0 1px, transparent 1px) right 0 top 0 / 5px 16px repeat-y;
 }
 
+/* network map (P5): the edge label names the map; the globe's bearing / latitude scales are not shown over it */
+[data-theme="eva-film"] #p-globe.topo-on .globe-wrap::before { content: '\7DB2\69CB\6210\3000NETWORK MAP \00B7 SECTOR 07'; z-index: 3; }
+[data-theme="eva-film"] #p-globe.topo-on .globe-wrap::after, [data-theme="eva-film"] #p-globe.topo-on::after { display: none; }
+[data-theme="eva-film"] .topo { background: #000; padding-left: 40px; }
+[data-theme="eva-film"] .topo-node { background: #000; border-color: var(--frame); border-left: 4px solid var(--accent);
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%); }
+[data-theme="eva-film"] .topo-node.t-internet { border-left-color: var(--ok); }
+[data-theme="eva-film"] .topo-node.tn-down { background: var(--crit-tint); border-color: var(--crit-fill); }
+[data-theme="eva-film"] :is(.tn-name, .tn-kind, .tc-util) { font-family: var(--display); letter-spacing: 0.06em; }
+[data-theme="eva-film"] .topo-node.t-internet .tn-name { font: 800 16px/20px var(--ja); letter-spacing: 0; }
+[data-theme="eva-film"] .topo-chip { background: #000; border-color: var(--frame); }
+[data-theme="eva-film"] .topo-link { stroke: var(--frame); }
+[data-theme="eva-film"] .topo-link.k-ok { stroke: var(--ok); }
+[data-theme="eva-film"] .g-view { font-family: var(--sans); border-color: var(--accent); }
+
 /* globe labels of this theme's tactical globe: drawn into one canvas over the globe (globe-layers.js) with the look and
    geometry of these rules, read from a hidden sample .glabel element */
 .glabel { pointer-events: none; }

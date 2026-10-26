@@ -54,6 +54,10 @@ x-tools-env: &tools-env
   CAPTURE_KEEP_HOURS: ${CAPTURE_KEEP_HOURS:-24}
   PCAP_KEEP_HOURS: ${PCAP_KEEP_HOURS:-24}
   PCAP_UPLOADS_TOTAL_MB: ${PCAP_UPLOADS_TOTAL_MB:-200}
+  # traffic surge thresholds (P5): the setup step writes them into Prometheus' recording rules and the screen's config
+  SURGE_FACTOR: ${SURGE_FACTOR:-3}
+  SURGE_MIN_KBPS: ${SURGE_MIN_KBPS:-200}
+  SURGE_BASELINE: ${SURGE_BASELINE:-1h}
 
 # Notification destinations' settings and secrets: only for the steps that generate the relay config (prod-setup, tools),
 # not for the long-running tools services.
@@ -244,6 +248,9 @@ services:
       FLOWD_REPLAY: demo:demo-home.pcap
       FLOWD_REPLAY_SCALE: ${DEMO_PCAP_SCALE:-1500}
       FLOWD_DEMO_GEO: /demo/demo-geo.json
+      # demo traffic surge (P5): one host x destination x10 for 4 min, first after 20 min, then every 32 min (two of
+      # demo-gen's DEMO_AUTO_FAULTS cycles); off with DEMO_AUTO_FAULTS=0
+      FLOWD_DEMO_SURGE: ${DEMO_AUTO_FAULTS:-1}
       OBS_LAN_CIDRS: 192.168.100.0/24
     volumes:
       - ./demo:/demo:ro
@@ -262,6 +269,7 @@ services:
     command:
       - --config.file=/etc/snmp_exporter/snmp.yml
       - --config.file=/etc/obs-generated/snmp/auths.yml
+      - --config.file=/etc/snmp_exporter_obs/lldp.yml  # module lldp (LLDP-MIB, read-only) for the network map
       - --config.expand-environment-variables
     environment:
       SNMP_V3_USER: ${SNMP_V3_USER:-}
@@ -270,6 +278,7 @@ services:
       # (the v2c community is written into the generated auths.yml: snmp_exporter does not expand it)
     volumes:
       - generated:/etc/obs-generated:ro
+      - ./snmp/lldp.yml:/etc/snmp_exporter_obs/lldp.yml:ro
     depends_on:
       prod-setup: {condition: service_completed_successfully}
     healthcheck:

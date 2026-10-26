@@ -8,6 +8,32 @@
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
 
+## P5 (docs/plans/v2/P5-SPEC.md) - implemented, uncommitted on main (HEAD 6335c68), awaiting PM acceptance
+- Network map (command-center/js/topology.js): switch in the globe's controls (#g-view, localStorage cc-globe-view), same
+  slot; graph = inventory (new optional parent / parent_if / uplink_if, tools/obs.py validates, config.json `links`) +
+  LLDP (snmp/lldp.yml module, Prometheus job `lldp` every 2m, demo-gen and testbed snmpsim answer it); per-link source
+  台帳 / LLDP / 台帳+LLDP; deterministic tidy-tree layout recomputed only on graph / size change; globe paused while hidden.
+- Surges: setup writes prometheus surge-rules.yml from SURGE_FACTOR / SURGE_MIN_KBPS / SURGE_BASELINE (.env);
+  header button 急増 N + modal (correlate.js); demo surge in flowd-demo (FLOWD_DEMO_SURGE = DEMO_AUTO_FAULTS).
+- 原因候補: mask-api correlate.py `GET /correlate/events` (read-only, own masked read paths, bounded; Caddy GET/HEAD only);
+  drawer view from alert drawer / surge rows / playback bar; rules shown; links to detail / packets (since) / evidence.
+- Selftests: correlate.selftest (ordering, relatedness, spans, request checks), tools (links, loops, surge rules,
+  lldp.yml), flowd (demo surge), demo-gen (lldp), testbed device (LLDP rows).
+- Done: all build selftests (cached analyzer / notify-relay / capture run explicitly), P4 export_check scopes + limits
+  (0 raw hits), browser checks (scratchpad p5/check-p5.js: map / faults / playback / gpu; both themes, 390-2560 px),
+  testbed (real snmp-exporter lldp module over v3 + v2c, tools check all OK), Codex r1 (3 P2 fixed) + r2 (2 P2 fixed,
+  not re-reviewed). Containers stopped (compose down, volumes kept).
+- Review NO-GO B1 fixed (round 2): 原因候補 clipped to the playback cursor on every cursor change (main setTime ->
+  correlate.clipToCursor), before / without a fetch and after a failed one; cursor before the window -> "窓の外" state
+  (no items, no request; re-anchor button); server refuses a window that would end before it starts. Browser check
+  p5/check-pbclip.txt (in flight / 429 / outside: 0 items after the cursor, 0 requests with to <= from).
+  O1 live refetch 60 s; O3 masked / IPv4 sysNames not split on "."; O4 baseline needs >= 10 samples (demo surge first
+  at 20 min); O2 noted in README. Containers: `docker compose stop` from now on (owner).
+- Codex r3 (after the B1 fix): 2 P2 fixed (spans end at one missing evaluation point / ongoing = present at the last
+  point; packet drill-down picks only ring files closed before the window end); selftests re-run, not re-reviewed.
+- Design notes: surge baseline = median (quantile_over_time 0.5) so recurring bursts do not raise it; demo surge every
+  32 min from 12 min. Open: RTX/WLX LLDP-MIB support unverified on real devices.
+
 ## PERF (docs/plans/v2/PERF-SPEC.md) - implemented, uncommitted on main (HEAD b923d19), awaiting PM acceptance
 - Results: docs/plans/v2/PERF-RESULTS.md (targets met; also met before the change by the x4 Pi estimate).
 - Baseline: done (client base2, server demo/testbed from a HEAD worktree, since removed).

@@ -275,3 +275,39 @@
   #modal .pa-file select, #modal .pa-filter { width: 100%; flex-basis: 100%; }
   #modal .pa-status { width: auto; flex: 1; text-align: left; }
 }
+
+/* ---- 原因候補 (correlate.js): the notice is always shown; every item = time, delta, kind and relatedness in fixed-width
+   slots, then the text (wraps), the reasons and the three ways on (detail / analysis / evidence) ---- */
+#drawer .cr-notice { margin: var(--s2) 0; padding: var(--s2) var(--s3); color: var(--text); background: var(--warn-tint); border-left: 3px solid var(--warn); }
+#drawer .cr-ctl { margin-bottom: var(--s2); }
+#drawer .cr-ctl input[type="datetime-local"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); color-scheme: dark; }
+#drawer .cr-ctl input:focus-visible, #drawer .cr-rules summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#drawer .cr-status { align-self: center; min-width: 8em; font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-rules { margin: var(--s1) 0 var(--s2); font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-rules summary { cursor: pointer; color: var(--accent); }
+#drawer .cr-rules ul { margin: var(--s1) 0 0 var(--s4); list-style: disc; }
+#drawer .cr-partial:empty { display: none; }
+#drawer .cr-partial { color: var(--warn); }
+#drawer .cr-item { padding: var(--s2) 0; border-bottom: 1px solid var(--track); display: flex; flex-direction: column; gap: 2px; }
+#drawer .cr-item.rel-3 { box-shadow: inset 3px 0 0 var(--warn); padding-left: var(--s2); }
+#drawer .cr-item.rel-2 { box-shadow: inset 3px 0 0 var(--accent); padding-left: var(--s2); }
+#drawer .cr-h { display: flex; align-items: center; gap: var(--s2); }
+#drawer .cr-t { width: 8ch; font-variant-numeric: tabular-nums; }
+#drawer .cr-dt { width: 8ch; text-align: right; color: var(--text-2); font-size: var(--fs-s); font-variant-numeric: tabular-nums; }
+#drawer .cr-h .st { flex: none; }
+#drawer .cr-rel { flex: none; width: 5.6em; text-align: center; font: 600 var(--fs-s)/18px var(--sans); border: 1px solid var(--frame); color: var(--text-2); }
+#drawer .cr-rel.rel-hi { color: var(--warn); border-color: var(--warn); }
+#drawer .cr-rel.rel-mid { color: var(--accent); border-color: var(--accent); }
+#drawer .cr-title { overflow-wrap: anywhere; }
+#drawer .cr-title.mono { font: var(--fs-s)/1.4 var(--mono); }
+#drawer .cr-why { font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-acts { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: 2px; }
+#drawer.stale .cr-item :is(.cr-title, .cr-t) { color: var(--text-2); }
+[data-theme="eva-film"] #drawer :is(.cr-rel, .cr-t) { font-family: var(--display); }
+@media (max-width: 1279px) {
+  #drawer .cr-ctl input[type="datetime-local"], #drawer .cr-rules summary { min-height: 44px; }
+  #drawer .cr-rules summary { display: flex; align-items: center; }
+}
+@media (max-width: 767px) {
+  #drawer .cr-h { flex-wrap: wrap; }
+}

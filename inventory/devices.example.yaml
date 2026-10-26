@@ -11,6 +11,11 @@
 #   syslog:    この機器から syslog を受けるか (check の受信待ちの対象)
 #   wan_interface: (任意、1 台だけ) WAN 側インターフェースの ifName (例 lan2)。command-center の WAN 表示と
 #              アラート WanHighUtilization に使う。書かなければ WAN 表示は「WAN interface not configured」
+#              ネットワーク図ではこの機器の先に「インターネット」を描く
+#   parent:    (任意) この機器がつながっている上位の機器の name。ネットワーク図の線になる (書かなければ「接続先未設定」)
+#   parent_if: (任意) 上位の機器側のインターフェースの ifName (例 lan1)。線の利用率・エラーはこの IF の値
+#   uplink_if: (任意) この機器側の上位につながるインターフェースの ifName (parent_if が無いときはこちらの値を線に使う)
+#              LLDP (LLDP-MIB) が取れる機器では、取れた隣接も線として足す (図で「LLDP」と区別)
 # 秘密値 (SNMP のパスワード・コミュニティ) はここに書かない。.env に置く。
 devices:
   - name: rtx1300
@@ -24,3 +29,6 @@ devices:
     address: 192.168.100.2
     snmp_auth: yamaha_v3
     syslog: true
+    parent: rtx1300
+    parent_if: lan1
+    uplink_if: lan1

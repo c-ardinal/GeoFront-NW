@@ -12,6 +12,8 @@ import * as AL from './alerting.js';
 import * as PA from './views-pcap.js';
 import * as PB from './playback.js';
 import { downloadEvidence } from './evidence.js';
+import * as T from './topology.js';
+import * as C from './correlate.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -66,11 +68,17 @@ const nav = {
   logline: (e) => UI.openDrawer(D.loglineView(e)),
   job: (j) => UI.openDrawer(D.jobView(j)),
   logs: (f) => UI.openModal(M.logsModal(f)),
-  // packet analysis: opts { dest, src } narrow it to that traffic (filter from the flows' address tokens, last 15 min)
+  // 原因候補 around a moment (P5): anchor { at: ms, label, ctx }; the traffic surge list
+  correlate: (anchor) => UI.openDrawer(C.correlateView(anchor)),
+  surges: () => UI.openModal(C.surgeModal()),
+  // packet analysis: opts { dest, src } narrow it to that traffic (filter from the flows' address tokens, last 15 min);
+  // opts.since / opts.until (unix s): a ring file of that time span (a 原因候補 window)
   packets: async (opts = {}) => {
     const f = await PA.drillFilter({ ...opts, flows: state.snap?.flows || [] });
-    const since = opts.dest || opts.src ? now() / 1000 - 900 : undefined;
-    UI.openModal(PA.analysisView({ ...f, since: OBS.flowSource === 'capture' ? since : undefined }));
+    const since = opts.since ?? (opts.dest || opts.src ? now() / 1000 - 900 : undefined);
+    // a 原因候補 window is always handed over (the screen then says which file it opened); the 15 min default only with capture
+    const cap = OBS.flowSource === 'capture' || opts.since !== undefined;
+    UI.openModal(PA.analysisView({ ...f, since: cap ? since : undefined, until: cap ? opts.until : undefined }));
   },
 };
 const MODALS = {
@@ -108,6 +116,22 @@ function wirePanelTitles() {
   a.setAttribute('aria-label', 'Packet analysis: open captured or uploaded packets');
   a.addEventListener('click', () => nav.packets());
   g.insertBefore(a, g.querySelector('.h-r'));
+  // traffic surges (P5): the count in a fixed-width slot, opens the list
+  const sb = el('button', 'h-act h-surge', '急増 —');
+  sb.id = 'surge-btn';
+  sb.type = 'button';
+  sb.lang = 'ja';
+  sb.addEventListener('click', () => nav.surges());
+  g.insertBefore(sb, a);
+}
+function renderSurgeButton(s) {
+  const b = $('surge-btn');
+  const n = s.flowsOk ? s.surges.length : null;
+  const text = `急増 ${n === null ? '—' : n}`;
+  if (b.textContent !== text) b.textContent = text;
+  b.classList.toggle('hot', !!n);
+  b.title = n === null ? 'traffic surges: flow data unknown' : `traffic surges (host x destination above its baseline): ${n} · ${C.surgeRule()}`;
+  b.setAttribute('aria-label', `${n === null ? 'traffic surges unknown' : `${n} traffic surges`}: open the list`);
 }
 
 // ---- polling ------------------------------------------------------------------------------------
@@ -150,6 +174,11 @@ const Q = {
   capOver: 'max(obs_capture_over_limit)',
   geoBuild: 'min(obs_geoip_db_build_timestamp_seconds)',
   geoInfo: 'obs_geoip_db_info',
+  // P5: LLDP neighbours (network map; scraped every 2 min) and traffic surges (recording rules; only surging pairs exist)
+  lldp: 'last_over_time(lldpRemSysName{job="lldp"}[10m])',
+  surge: `obs_surge:flow_bps:ratio and on () (up{job="flows"} == 1)`,
+  surgeBps: 'obs_surge:flow_bps:rate5m and on (src_host, dst_country, asn) obs_surge:flow_bps:ratio',
+  surgeBase: 'last_over_time(obs_surge:flow_bps:baseline[10m]) and on (src_host, dst_country, asn) obs_surge:flow_bps:ratio',
 };
 const GEOIP_STALE_DAYS = 45;
 
@@ -166,7 +195,7 @@ function normFlows(res) {
 
 // inventories over the last hour and the GeoIP versions change slowly: LIVE asks for them once a minute (PLAYBACK at
 // every position, as before)
-const SLOW_Q = new Set(['ifInv', 'wlanInv', 'geoBuild', 'geoInfo']);
+const SLOW_Q = new Set(['ifInv', 'wlanInv', 'geoBuild', 'geoInfo', 'lldp']);
 const SLOW_EVERY_MS = 60000;
 const slow = { at: -Infinity, gen: -1, vals: {} };
 async function promAll(pb, gen) {
@@ -221,12 +250,16 @@ async function pollProm() {
     freshMin: scalar(res.freshMin), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
     alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx), capture,
     geo: { ageDays: has(geoBuild) ? (now() / 1000 - geoBuild) / 86400 : null, months: res.geoInfo.map((r) => r.metric.month).filter(Boolean) },
+    surges: flowsOk ? C.surgeRows(res.surge, res.surgeBps, res.surgeBase) : [],
   };
   const s = state.snap;
   P.renderDevices(m, nav); // before the flow rankings: they are fitted to the height the device list leaves
   P.renderFlows(s, nav);
   G.renderGlobe(s.flows);
   if (!flowsOk) $('arc-note').textContent = P.FLOW_TEXT.arcs;
+  T.update(OBS.cfg, topoDevices(), res.lldp, s);
+  if (T.isOn()) $('arc-note').textContent = T.summary();
+  renderSurgeButton(s);
   renderGeoNote(s.geo);
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
@@ -466,9 +499,14 @@ function refreshExposure() {
     cfgWatch.offer(freshCfg);
   });
 }
-const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)', flowSource: 'pcap-replay' };
+const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)', flowSource: 'pcap-replay', cfg: null };
+// the network map's devices: the inventory's (config.json), in its order; the demo's three without a config
+const topoDevices = () => (Array.isArray(OBS.cfg?.devices) ? OBS.cfg.devices.filter((d) => d && typeof d.name === 'string')
+  : P.DEVICES.map((n) => ({ name: n, kind: n.slice(0, 3) })));
 async function applyObsInfo() {
   const { exposure, cfg } = await fetchObs();
+  OBS.cfg = cfg || null;
+  C.setSurgeConfig(cfg?.surge);
   renderExposure(exposure);
   cfgWatch = P.configWatcher(cfg, { mode: UI.mode, reload: () => location.reload() });
   setInterval(refreshExposure, OBS_REFRESH_MS);
@@ -511,6 +549,19 @@ $('alert-banner').addEventListener('click', openAlerts);
 $('alert-banner').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAlerts(); } });
 AL.setOnChange(() => poll()); // after an ACK / silence change: show its effect now, not at the next poll
 G.initGlobe({ onDest: (key) => { const [cc, city] = key.split('|'); nav.dest({ cc, city }); }, onInteract: () => UI.touched() });
+// network map in the globe's slot (P5): same place and size; the globe pauses while it is hidden
+const GLOBE_TITLE = { ja: $('p-globe').querySelector('.h-ja').textContent, t: $('p-globe').querySelector('.h-t').textContent };
+T.initTopology({
+  nav,
+  setGlobe: (shown) => { G.setShown(shown); if (!shown) G.hideCard(); },
+  onChange: (on) => {
+    const h = $('p-globe');
+    h.querySelector('.h-ja').textContent = on ? '網構成' : GLOBE_TITLE.ja;
+    h.querySelector('.h-t').textContent = on ? 'NETWORK MAP' : GLOBE_TITLE.t;
+    if (on) $('arc-note').textContent = T.summary();
+    else if (state.snap) G.renderGlobe(state.snap.flows); // its arc count back in the header
+  },
+});
 // globe drawing mode (settings menu only): GPU / LITE, picked automatically or by hand (globe.js, render-mode.js)
 function showRender(r) {
   const b = $('render-toggle');
@@ -524,7 +575,7 @@ wirePanelTitles();
 // ---- playback: main.js owns the data time (util.now()); playback.js moves the cursor and paces the fetches ---------
 const resetFeed = () => { state.gen++; P.resetLogs(state.seenLogs); };
 PB.initPlayback({
-  setTime: (ms) => setCursor(ms),
+  setTime: (ms) => { setCursor(ms); C.clipToCursor(); }, // an open 原因候補 never shows anything after the new position
   fetch: () => poll(),
   jump: resetFeed,
   live: () => { // back to LIVE: the wallboard, the last 15 min, live polling; STALE until the first live answer
@@ -541,6 +592,7 @@ PB.initPlayback({
   },
 });
 $('pb-enter').addEventListener('click', () => { UI.closeMenu(); PB.enterDefault(); });
+$('pb-corr').addEventListener('click', () => nav.correlate({ at: now(), label: `再生位置 ${jstClock.format(new Date(now()))}`, ctx: {} }));
 boot();
 tickClock();
 setInterval(tickClock, 1000);
@@ -549,4 +601,4 @@ poll().then(() => { // link in the notifications (OBS_PUBLIC_URL/?open=alerts): 
 });
 setInterval(() => { if (!isPlayback()) poll(true); }, POLL_MS); // live polling is off during playback
 // scripted-test hook (read-only): screen position of a destination on the globe
-window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode, playback: PB.testState, enterPlayback: PB.enter, render: G.renderInfo };
+window.ccTest = { screenOf: G.screenOf, info: G.testInfo, selection: G.testSelection, mode: UI.mode, playback: PB.testState, enterPlayback: PB.enter, render: G.renderInfo, topology: T.testState };

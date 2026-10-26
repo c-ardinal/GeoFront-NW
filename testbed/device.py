@@ -3,7 +3,8 @@ running in one container, so SNMP answers and syslog lines come from the same ad
 
 Used only by the `testbed` compose profile to exercise the prod path (snmp-exporter -> Prometheus,
 Alloy -> Loki) without hardware. It is NOT a model of RTX/WLX firmware: the interface tables mirror
-demo-gen's, only standard MIB-II / IF-MIB objects are simulated (no YAMAHA private MIB), and the syslog
+demo-gen's, only standard MIB-II / IF-MIB / LLDP-MIB objects are simulated (no YAMAHA private MIB; whether RTX/WLX
+answer LLDP-MIB at all is unconfirmed), and the syslog
 lines are the "yamaha" fixtures from testbed/fixtures/syslog.jsonl (PRI only, no timestamp/host/tag).
 
 Env: TB_DEVICE (rtx1300 | wlx413), SNMP_V3_USER / SNMP_V3_AUTH_PASS / SNMP_V3_PRIV_PASS /
@@ -35,6 +36,10 @@ INTERFACES = {
                (3, "wlan1", "WLAN 5GHz", 1200, 1, 700_000, 3_000_000)],
 }
 MODEL = {"rtx1300": "rtx", "wlx413": "wlx"}
+# LLDP-MIB lldpRemTable (read-only, for the network map's LLDP path): local ifIndex, remote sysName, remote port id / desc.
+# rtx1300 also sees a neighbour that is not in the inventory (an LLDP-only node on the map).
+LLDP = {"rtx1300": [(1, "wlx413", "lan1", "LAN1"), (1, "sw-lab01", "port8", "GigabitEthernet 8")],
+        "wlx413": [(1, "rtx1300", "lan1", "LAN1 (LAN)")]}
 SYS_DESCR = {"rtx1300": "TESTBED simulated router (not real firmware)", "wlx413": "TESTBED simulated access point (not real firmware)"}
 
 
@@ -56,7 +61,15 @@ def snmprec(device):
                  (f"1.3.6.1.2.1.31.1.1.1.10.{idx}", "70:numeric", f"rate={tx},initial=1000"),
                  (f"1.3.6.1.2.1.31.1.1.1.15.{idx}", "66", str(speed)),
                  (f"1.3.6.1.2.1.31.1.1.1.18.{idx}", "4", "")]
-    key = lambda r: tuple(int(p) for p in r[0].split("."))  # snmpsim needs lexicographic OID order
+    lldp_rem, lldp_loc = "1.0.8802.1.1.2.1.4.1.1", "1.0.8802.1.1.2.1.3.7.1"
+    for i, (port, sysname, rport, rdesc) in enumerate(LLDP.get(device, []), 1):
+        ix = f"0.{port}.{i}"  # lldpRemTimeMark.lldpRemLocalPortNum.lldpRemIndex
+        rows += [(f"{lldp_rem}.4.{ix}", "2", "5"), (f"{lldp_rem}.6.{ix}", "2", "5"),  # chassis / port id subtypes
+                 (f"{lldp_rem}.7.{ix}", "4", rport), (f"{lldp_rem}.8.{ix}", "4", rdesc), (f"{lldp_rem}.9.{ix}", "4", sysname)]
+    for port in sorted({p for p, *_ in LLDP.get(device, [])}):
+        name = next(n for i, n, *_ in INTERFACES[device] if i == port)
+        rows += [(f"{lldp_loc}.2.{port}", "2", "5"), (f"{lldp_loc}.3.{port}", "4", name)]
+    key =lambda r: tuple(int(p) for p in r[0].split("."))  # snmpsim needs lexicographic OID order
     return "".join(f"{oid}|{typ}|{val}\n" for oid, typ, val in sorted(rows, key=key))
 
 
@@ -132,6 +145,8 @@ def selftest():
     assert oids == sorted(oids) and len(oids) == len(set(oids))
     assert any(r.startswith("1.3.6.1.2.1.31.1.1.1.6.2|70:numeric|rate=9000000") for r in rec)
     assert "1.3.6.1.2.1.1.5.0|4|rtx1300" in rec
+    assert "1.0.8802.1.1.2.1.4.1.1.9.0.1.1|4|wlx413" in rec and "1.0.8802.1.1.2.1.3.7.1.3.1|4|lan1" in rec  # LLDP-MIB
+    assert "1.0.8802.1.1.2.1.4.1.1.9.0.1.1|4|rtx1300" in snmprec("wlx413").splitlines()
     env = {"SNMP_V3_USER": "u", "SNMP_V3_AUTH_PASS": "a" * 8, "SNMP_V3_PRIV_PASS": "p" * 8}
     assert "--v3-only" in responder_args(env) and "--v3-only" not in responder_args({**env, "SNMP_COMMUNITY": "c"})
     for model in ("rtx", "wlx"):

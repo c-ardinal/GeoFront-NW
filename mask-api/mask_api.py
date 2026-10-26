@@ -23,6 +23,8 @@ Packet analysis (/pcap/, from the proxy): pcap_api.py, sharing this module's tok
 
 Evidence export (/evidence/, from the proxy, GET only): evidence.py builds a zip from this module's own read paths.
 
+原因候補 (/correlate/, from the proxy, GET only): correlate.py lists what happened around a moment, read the same way.
+
 Run: python mask_api.py            (listens on :8000)
      python mask_api.py --selftest
 """
@@ -48,6 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import OrderedDict
 from typing import NamedTuple
 
+import correlate
 import evidence
 import pcap_api
 
@@ -1159,6 +1162,8 @@ def respond(method, raw_path, headers, read_body, gone=None):
             return pcap_api.handle(method, raw_path, headers, read_body)
         if raw_path.startswith("/evidence/"):
             return evidence.handle(method, raw_path, headers, gone)
+        if raw_path.startswith("/correlate/"):
+            return correlate.handle(method, raw_path)
         url, post, err = route(method, raw_path)
         if err:
             return err[0], error_body(*err), "application/json"
@@ -1854,11 +1859,13 @@ def selftest():
     am_selftest(tok)
     pcap_api.selftest()
     evidence.selftest()
+    correlate.selftest()
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
 
 pcap_api.setup(sys.modules[__name__])
 evidence.setup(sys.modules[__name__], pcap_api)
+correlate.setup(sys.modules[__name__])
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:

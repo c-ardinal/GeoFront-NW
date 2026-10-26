@@ -43,6 +43,11 @@ HOSTS_FILE = Path(os.environ.get("FLOWD_HOSTS", "/etc/obs-generated/flowd/hosts.
 DEMO_GEO = os.environ.get("FLOWD_DEMO_GEO", "")
 REPLAY = os.environ.get("FLOWD_REPLAY", "")  # e.g. demo:demo-home.pcap ; empty = follow the capture ring
 REPLAY_SCALE = float(os.environ.get("FLOWD_REPLAY_SCALE", "1"))
+# demo only (replay): a traffic surge for the surge detection / 原因候補 to find - one host x destination x SURGE_X for
+# SURGE_LEN_S, first SURGE_FIRST_S after start (once the surge rules have a baseline), then every SURGE_EVERY_S (two of
+# demo-gen's 4-step DEMO_AUTO_FAULTS cycles: rare enough that the baseline, a median, stays at the normal rate)
+DEMO_SURGE = os.environ.get("FLOWD_DEMO_SURGE", "0") == "1"
+SURGE_FIRST_S, SURGE_EVERY_S, SURGE_LEN_S, SURGE_X = 1200, 1920, 240, 10
 DELAY_S = float(os.environ.get("FLOWD_DELAY_S", "90"))
 MAX_SERIES = int(os.environ.get("FLOWD_MAX_SERIES", "3000"))
 IDLE_EXPIRE_S = float(os.environ.get("FLOWD_IDLE_EXPIRE_S", "3600"))
@@ -470,6 +475,26 @@ class Replay:
         self.loaded, self.error = False, None
 
 
+def surge_on(since_start):
+    d = since_start - SURGE_FIRST_S
+    return d >= 0 and d % SURGE_EVERY_S < SURGE_LEN_S
+
+
+def surge_rows(buckets, flows):
+    """The demo surge's extra bytes: (SURGE_X - 1) x the rows of the busiest LAN host <-> remote pair that has a known
+    location (deterministic for one pcap). [] when there is none."""
+    per = {}
+    for sec, src, dst, *_rest, size, _n in buckets:
+        k = flows.key_of(src, dst)
+        if k and k[2] != "Unknown":
+            pair = tuple(sorted((src, dst)))
+            per[pair] = per.get(pair, 0) + size
+    if not per:
+        return []
+    pair = max(sorted(per), key=lambda p: per[p])
+    return [[*r[:6], r[6] * (SURGE_X - 1), r[7]] for r in buckets if tuple(sorted((r[1], r[2]))) == pair]
+
+
 def replay(flows, ref, stop, state):
     root, _, name = ref.partition(":")
     while not stop.is_set():
@@ -488,9 +513,12 @@ def replay(flows, ref, stop, state):
     print(f"flowd: replaying {ref} ({len(res['buckets'])} buckets, {span} s loop, x{REPLAY_SCALE})", flush=True)
     start = time.time()
     cycle = 0
+    extra = surge_rows(res["buckets"], flows) if DEMO_SURGE else []
     while not stop.is_set():
         base = start + cycle * span
         flows.schedule(res["buckets"], base, t0, REPLAY_SCALE)
+        if extra and surge_on(base - start):
+            flows.schedule(extra, base, t0, REPLAY_SCALE)
         cycle += 1
         stop.wait(max(0, base + span - 30 - time.time()))  # queue the next loop 30 s before this one ends
 
@@ -684,6 +712,12 @@ def selftest():
             assert is_addr or operator or free_text(v) == v, (k, v)
     assert "02005e100017" not in text and 'iface="enx"' in text and "android-x" in text, text
     assert 'obs_geoip_db_info{db="city",source="DB-IP Lite",edition="DBIP-City-Lite",month="2026-10"} 1' in text, text
+    # demo surge: only the busiest located pair, x SURGE_X in total; scheduled windows
+    rows = [[1, "192.168.100.23", "192.0.2.10", "6", "5", "443", 100, 1], [1, "192.0.2.10", "192.168.100.23", "6", "443", "5", 50, 1],
+            [2, "192.168.100.24", "198.51.100.7", "6", "5", "443", 900, 1]]  # the bigger pair has no location: not chosen
+    ex = surge_rows(rows, Flows(geo, names))
+    assert [r[6] for r in ex] == [100 * (SURGE_X - 1), 50 * (SURGE_X - 1)] and surge_rows(rows[2:], Flows(geo, names)) == []
+    assert not surge_on(0) and surge_on(SURGE_FIRST_S) and not surge_on(SURGE_FIRST_S + SURGE_LEN_S) and surge_on(SURGE_FIRST_S + SURGE_EVERY_S + 1)
     big = Names()
     big.learn({}, {f"192.168.{i // 250}.{i % 250}": "02:00:5e:00:00:01" for i in range(NAMES_MAX + 100)})
     assert len(big.ip_mac) == NAMES_MAX

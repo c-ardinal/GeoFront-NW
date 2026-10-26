@@ -250,6 +250,18 @@ export function srcView(host) {
 }
 
 // ---- alert --------------------------------------------------------------------------------
+// "原因候補" (P5): what else happened around this moment, opened as the next drawer view
+function correlateSection(anchorOf, what) {
+  const s = section('原因候補', '相関の候補 · 前後 10 分 · 因果は断定しません');
+  const b = el('button', 'link-btn ops-btn', `${what}の前後に起きたこと`);
+  b.type = 'button';
+  b.lang = 'ja';
+  b.setAttribute('aria-label', `Correlation candidates: what else happened around ${what}`);
+  b.addEventListener('click', () => { if (nav()) nav().correlate(anchorOf()); });
+  s.body.append(b, el('p', 'v-p', '同じ時間窓の警報・機器や IF の状態変化・エラー・急増・syslog・通知記録を、関連の近い順に並べます (相関の候補であり、原因とは限りません)。'));
+  return s;
+}
+
 export function alertView(alert0) {
   let s;
   let rules = null;
@@ -264,9 +276,16 @@ export function alertView(alert0) {
       s.tl.body.append(s.tlBox, keyLegend(ALERT_KEYS));
       const ev = evidenceSection(() => ({ scope: 'alert', alertname: alert0.labels.alertname, instance: alert0.labels.instance, ifName: alert0.labels.ifName, severity: alert0.labels.severity }),
         () => Date.parse(alert0.activeAt));
-      body.append(s.sum, s.ops.wrap, ev.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
+      const cr = correlateSection(() => {
+        const t = Date.parse(alert0.activeAt);
+        const L = alert0.labels;
+        return { at: Math.min(now(), Number.isFinite(t) ? t : now()), label: `警報 ${L.alertname}${L.instance ? ` ${L.instance}` : ''}`,
+          ctx: { instance: L.instance, ifName: L.ifName, alertname: L.alertname } };
+      }, 'この警報');
+      body.append(s.sum, s.ops.wrap, cr.wrap, ev.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const cur = ctx.snap.alerts.find((a) => alertKey(a.labels) === id);
       const a = cur || alert0;
       s.ops.update(a, cur?.state === 'firing');

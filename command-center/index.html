@@ -62,6 +62,7 @@
     <label class="pb-fld pb-speed-l"><span class="sr-only">再生速度</span><select id="pb-speed" aria-label="再生速度"></select></label>
     <input id="pb-slider" class="pb-slider" type="range" aria-label="再生位置">
     <button id="pb-export" type="button" class="pb-btn" title="この期間の証跡 (伏せ字済みの zip) を出力">証跡を出力</button>
+    <button id="pb-corr" type="button" class="pb-btn" title="再生位置の前後に起きたこと (原因候補、相関の候補)">原因候補</button>
     <button id="pb-live" type="button" class="pb-btn pb-live" title="WALLBOARD・直近 15 分・自動更新に戻る">● LIVE に戻る</button>
     <p id="pb-status" class="pb-status" role="status"></p>
   </section>
@@ -97,17 +98,21 @@
     <section class="panel" id="p-globe">
       <h2><span class="h-ja" lang="ja">広域通信</span><span class="h-t">GLOBAL TRAFFIC</span><span class="h-r" id="arc-note"></span></h2>
       <div class="globe-wrap"><div id="globe"></div>
+        <!-- network map (topology.js): the same slot as the globe; the first control switches between them -->
+        <div id="topo" class="topo" role="group" aria-label="ネットワーク図" lang="ja" hidden></div>
         <div id="gcard" class="gcard" role="status" hidden></div>
         <div class="g-ctl" role="group" aria-label="Globe view">
+          <button id="g-view" type="button" class="g-view" lang="ja" aria-pressed="false">ネットワーク図</button>
           <button id="g-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>
           <button id="g-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">&minus;</button>
           <button id="g-reset" type="button" aria-label="Reset view" title="Reset view and resume rotation">&#x27F2;</button>
         </div>
       </div>
-      <div class="caption">Arcs = logical relation to GeoIP estimate, not physical routes.
+      <div class="caption"><span class="cap-globe">Arcs = logical relation to GeoIP estimate, not physical routes.
         Origin = coarse home region (logical origin, not exact address).
         <span class="legend"><i class="lg-out"></i>OUTBOUND <i class="lg-in"></i>INBOUND</span>
-        <span class="geo-note" id="geo-note"></span></div>
+        <span class="geo-note" id="geo-note"></span></span><span class="cap-topo" lang="ja">線の出所: <span class="lg-src lg-inv">台帳</span> 実線 = 機器台帳 · <span class="lg-src lg-lldp">LLDP</span> 破線 = LLDP-MIB で取れた隣接 · 台帳+LLDP = 両方。
+        線の % = その IF の利用率 (rate 2 min、in / out の大きい方)、ERR = エラーの有無。矢印キーで機器を移動、Enter で詳細。</span></div>
     </section>
 
     <div class="col" id="col-right">

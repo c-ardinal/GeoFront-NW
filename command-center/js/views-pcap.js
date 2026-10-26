@@ -68,11 +68,14 @@ function fileLabel(f) {
   const name = f.kind === 'demo' ? `${f.name} (合成)` : f.kind === 'upload' ? f.name : when;
   return `${name} · ${fmtBytes(f.size)}${f.kind === 'upload' ? ` · ${when}` : ''}${f.recording ? ' · 記録中' : ''}`;
 }
-function pickFile(files, wanted, since) {
+// since / until (unix s): a ring file closed inside that span, so all of its packets are before `until` (the playback
+// cursor): a file still open at `until` holds later packets and is not chosen
+function pickFile(files, wanted, since, until) {
   const all = [...files.ring, ...files.upload, ...files.demo];
   if (wanted && all.some((f) => f.id === wanted)) return wanted;
-  const ring = files.ring.filter((f) => !f.recording && (!since || f.mtime >= since));
-  return (ring[0] || files.ring.find((f) => !f.recording) || files.upload[0] || files.demo[0])?.id || '';
+  const ring = files.ring.filter((f) => !f.recording && (!since || f.mtime >= since) && (!until || f.mtime <= until));
+  // a window with no ring file of its own never silently opens a capture of another time (uploads / demo instead)
+  return (ring[0] || (!until && files.ring.find((f) => !f.recording)) || files.upload[0] || files.demo[0])?.id || '';
 }
 
 // ---- view ---------------------------------------------------------------------------------------
@@ -89,6 +92,15 @@ export function analysisView(init = {}) {
     ui.input.setAttribute('aria-invalid', String(kind === 'err-filter'));
   }
   function setStatus(text) { ui.status.textContent = text; }
+  const spanText = () => `${jstFull.format(new Date(init.since * 1000))}${init.until ? `–${jstFull.format(new Date(init.until * 1000))}` : ' 以降'}`;
+  // the time span asked for and the file actually opened: a ring file of the span, or (none there) which other file
+  function handoffFile(files) {
+    const f = [...files.ring, ...files.upload, ...files.demo].find((x) => x.id === st.file);
+    const ring = f && files.ring.includes(f);
+    ui.handoff.textContent = `引き継ぎ: ${init.what || 'フィルタなし'} · ${spanText()} ${ring ? `のリングファイル: ${fileLabel(f)}`
+      : `のリングファイルはありません · 開いたファイル: ${f ? `${f.kind === 'upload' ? 'アップロード' : 'デモ'} ${fileLabel(f)}` : 'なし'}`}${init.note ? ` · ${init.note}` : ''}`;
+    ui.handoff.classList.toggle('pa-warn', !ring);
+  }
 
   async function loadFiles(prefer) {
     const files = await api('files');
@@ -106,8 +118,9 @@ export function analysisView(init = {}) {
       return g;
     }));
     if (!ui.file.options.length) ui.file.append(el('option', '', 'ファイルなし'));
-    st.file = pickFile(files, prefer, init.since);
+    st.file = pickFile(files, prefer, init.since, init.until);
     ui.file.value = st.file;
+    if (init.since && !prefer) handoffFile(files);
     const c = files.capture || {};
     ui.capture.textContent = c.state === 'running'
       ? `キャプチャ中: ${c.iface} · NIC の受信ドロップ ${has(c.nic_rx_dropped) ? c.nic_rx_dropped : '—'} · dumpcap の欠落 ${has(c.dumpcap_dropped) ? c.dumpcap_dropped : '—'} · リング ${has(c.ring_bytes) ? fmtBytes(c.ring_bytes) : '—'}`
@@ -533,7 +546,8 @@ export function analysisView(init = {}) {
       ui.msg.setAttribute('role', 'alert');
       ui.ctx = el('div', 'pa-ctx');
       ui.capture = el('span', 'pa-cap');
-      ui.ctx.append(el('span', '', init.what ? `引き継ぎ: ${init.what}${init.since ? ' · 直近 15 分のリングファイル' : ''}${init.note ? ` · ${init.note}` : ''}` : ''), ui.capture);
+      ui.handoff = el('span', 'pa-handoff', init.what || init.since ? `引き継ぎ: ${init.what || 'フィルタなし'}${init.since ? ` · ${spanText()} のリングファイル` : ''}${init.note ? ` · ${init.note}` : ''}` : '');
+      ui.ctx.append(ui.handoff, ui.capture);
       ui.tabs = el('div', 'pa-tabs');
       ui.tabs.setAttribute('role', 'tablist');
       ui.tabs.setAttribute('aria-label', 'analysis views');

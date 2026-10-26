@@ -60,6 +60,15 @@ export function cycleRender() {
 const FPS = 30;
 const IDLE_FPS = 15;
 const IDLE_AFTER_MS = 60000;
+// shown: false while the network map takes the globe's place (P5): nothing is drawn, the data is still kept current
+let shown = true;
+export function setShown(on) {
+  shown = on;
+  if (!globe) return;
+  if (!on) { setRunning(false); return; }
+  fit();
+  if (animated()) setRunning(true); else wake(600);
+}
 const loop = { running: true, paced: false, skip: 0, last: 0, until: 0, timer: 0, dragging: false, stopped: false, input: performance.now() };
 function initPacing() {
   const cycle = globe._animationCycle;
@@ -80,7 +89,7 @@ function initPacing() {
   });
 }
 function setRunning(on) {
-  if (!globe || on === loop.running) return;
+  if (!globe || (on && !shown) || on === loop.running) return;
   loop.running = on;
   if (on) { globe.resumeAnimation(); return; }
   globe.pauseAnimation();
@@ -89,7 +98,7 @@ function setRunning(on) {
 }
 // static mode: keep drawing for ms (a data update needs a few frames, a camera move its duration)
 function wake(ms) {
-  if (!globe || animated() || document.hidden) return;
+  if (!globe || animated() || document.hidden || !shown) return;
   loop.until = Math.max(loop.until, performance.now() + ms);
   setRunning(true);
   clearTimeout(loop.timer);
@@ -191,6 +200,7 @@ export function initGlobe(h) {
   styleGlobe();
   initZoomButtons();
   applyMotion();
+  if (!shown) setRunning(false); // opened on the network map: the globe waits until it is shown
 }
 
 // Arcs leaving HOME pass over nearby destinations; when the pointer is over a destination point, that point wins
@@ -238,7 +248,7 @@ export function hideCard() {
 
 export function fit() {
   const host = $('globe');
-  if (globe && (globe.width() !== host.clientWidth || globe.height() !== host.clientHeight)) {
+  if (globe && shown && (globe.width() !== host.clientWidth || globe.height() !== host.clientHeight)) {
     globe.width(host.clientWidth).height(host.clientHeight);
     wake(300);
   }

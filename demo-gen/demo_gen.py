@@ -1,6 +1,6 @@
 """Synthetic stand-in for YAMAHA RTX1300 / WLX413 / WLX222 (DEMO DATA, not observed reality).
 
-- GET /snmp?target=<dev>&module=if_mib  snmp_exporter-compatible exposition
+- GET /snmp?target=<dev>&module=if_mib  snmp_exporter-compatible exposition (module=lldp: LLDP neighbours only)
 - GET /flows                            demo_flow_bytes_total counters
 - GET /fault/{down,wanspike,logburst,counter_reset,status}
 - RFC3164 syslog over UDP to $SYSLOG_HOST:$SYSLOG_PORT
@@ -134,11 +134,13 @@ class State:
         return now < self.down_until.get(dev, 0)
 
     # ---- rendering ----------------------------------------------------------
-    def render_snmp(self, dev, now):
+    def render_snmp(self, dev, now, module="if_mib"):
         if dev not in DEVICES:
             return 400, "unknown target\n"
         if self.is_down(dev, now):
             return 503, "demo fault: target unreachable\n"
+        if module == "lldp":
+            return 200, render_lldp(dev)
         out = []
         with self.lock:
             out.append("# HELP sysUpTime The time (in hundredths of a second) since the network management portion of the system was last re-initialized. - 1.3.6.1.2.1.1.3")
@@ -208,6 +210,20 @@ class State:
         return lines
 
 
+# LLDP neighbours (snmp/lldp.yml's shape): local ifIndex, remote sysName, remote port id / desc. wlx222 answers none, so
+# the demo map shows one link confirmed by LLDP (rtx1300 - wlx413) and one from the inventory only (rtx1300 - wlx222).
+LLDP = {"rtx1300": [(1, "wlx413", "lan1", "LAN1")], "wlx413": [(1, "rtx1300", "lan1", "LAN1 (LAN)")], "wlx222": []}
+
+
+def render_lldp(dev):
+    names = {i[0]: i[1] for i in DEVICES[dev]}
+    out = ["# HELP lldpRemSysName SYNTHETIC LLDP-MIB lldpRemTable (demo)", "# TYPE lldpRemSysName gauge"]
+    for n, (port, sysname, rport, rdesc) in enumerate(LLDP[dev], 1):
+        out.append(f'lldpRemSysName{{lldpLocPortId="{names[port]}",lldpRemIndex="{n}",lldpRemLocalPortNum="{port}",'
+                   f'lldpRemPortDesc="{rdesc}",lldpRemPortId="{rport}",lldpRemSysName="{sysname}",lldpRemTimeMark="0"}} 1')
+    return "\n".join(out) + "\n"
+
+
 STATE = State(time.time())
 
 
@@ -267,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/snmp":
-            code, body = STATE.render_snmp(q.get("target", ""), time.time())
+            code, body = STATE.render_snmp(q.get("target", ""), time.time(), q.get("module", "if_mib"))
         elif u.path == "/flows":
             code, body = 200, STATE.render_flows()
         elif u.path.startswith("/fault/"):
@@ -311,6 +327,9 @@ def selftest():
     s.wanspike_until, s.noise = t0 + 900, 1.3
     assert 800 < s.wan_rates(t0 + 800)[0] * 1.03 < 1000, "spike must exceed 80% but stay under link speed"
     assert s.syslog_lines(t0)[0].startswith("<")
+    lldp = s.render_snmp("wlx413", t0, "lldp")[1]
+    assert 'lldpRemSysName="rtx1300"' in lldp and 'lldpLocPortId="lan1"' in lldp and "ifHCInOctets" not in lldp
+    assert "lldpRemSysName{" not in s.render_snmp("wlx222", t0, "lldp")[1] and s.render_snmp("wlx222", t0 + 550, "lldp")[0] == 503
     print("selftest OK")
 
 

@@ -92,6 +92,18 @@
 			}
 		}
 	}
+	# 原因候補 (mask-api correlate.py): read-only, GET / HEAD only; mask-api reads Prometheus / Loki through its own
+	# masked read paths, bounded (window, lines, items, a 10 s budget, two at a time: 429)
+	handle /correlate/* {
+		@correlateWrite not method GET HEAD
+		header @correlateWrite Content-Type application/json
+		respond @correlateWrite `\{"status":"error","error":"read-only"\}` 405
+		reverse_proxy mask-api:8000 {
+			transport http {
+				response_header_timeout 30s
+			}
+		}
+	}
 	redir /grafana /grafana/ 308
 	handle /grafana/* {
 		# Published beyond localhost, every /grafana/ request is first asked of `grafana-guard` (internal network only):
