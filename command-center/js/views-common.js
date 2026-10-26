@@ -60,10 +60,10 @@ const SCRAPE_S = 15;
 export const SNMP_UP = 'and on (instance) (up{job="snmp"} == 1)';
 export const FLOWS_UP = 'and on () (up{job="flows"} == 1)';
 export let FLOWS_DOWN = 'flow source DOWN: flow data UNKNOWN';
-const NO_FLOW_SOURCE = 'no flow source configured (P3)';
+const NO_FLOW_SOURCE = 'no flow source configured (capture off)';
 export function setNoFlowSource() {
   FLOWS_DOWN = NO_FLOW_SOURCE;
-  Object.assign(FLOW_TEXT, { status: 'no flow source (P3)', row: NO_FLOW_SOURCE, arcs: NO_FLOW_SOURCE });
+  Object.assign(FLOW_TEXT, { status: 'no flow source (capture off)', row: NO_FLOW_SOURCE, arcs: NO_FLOW_SOURCE });
 }
 // a view without flow data is STALE only when a flow source is configured (and DOWN); otherwise it just says so
 export function flowsMissing(snap) {

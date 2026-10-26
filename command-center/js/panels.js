@@ -343,6 +343,18 @@ export function renderHealth(snap, nav) {
   }
   rows.push(row([badge('none', ''), cell('syslog received (alloy)', 'sub'), cell(''), num(snap.alloyRx, 2), cell('lines/s', 'n sub')], 'sep'));
   rows.push(row([badge('none', ''), cell('log ingest (loki)', 'sub'), cell(''), num(snap.lokiRx, 2), cell('lines/s', 'n sub')]));
+  const c = snap.capture; // capture profile only: flowd reports the capture service's state
+  if (c) {
+    const [kind, text] = c.up !== 1 ? ['crit', 'DOWN'] : c.drops > 0 || c.dumpDrops > 0 || c.over === 1 ? ['warn', 'DROP'] : ['ok', 'UP'];
+    const why = c.over === 1 ? 'ring over its size limit' : `NIC rx drops in 5 min; dumpcap drops (ended sessions, 1 h): ${c.dumpDrops ?? '—'}`;
+    rows.push(row([badge(kind, text), cell('packet capture', 'sub', why), cell(''), num(c.drops, 0), cell('NIC drop/5m', 'n sub')],
+      '', () => nav.packets(), 'packet capture: open packet analysis'));
+  }
+  if (c || snap.geo.months.length) {
+    const age = snap.geo.ageDays;
+    const [kind, text] = age === null ? ['unknown', 'NONE'] : age > 45 ? ['warn', 'OLD'] : ['ok', 'OK'];
+    rows.push(row([badge(kind, text), cell('GeoIP DB (DB-IP Lite)', 'sub', 'IP Geolocation by DB-IP, CC BY 4.0'), cell(''), num(age ?? undefined, 0), cell('days old', 'n sub')]));
+  }
   put('health', rows);
 
 }

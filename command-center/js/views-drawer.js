@@ -137,6 +137,20 @@ export function ifaceView(key) {
   };
 }
 
+// "この通信のパケット": opens packet analysis narrowed to this destination / host (filter + last 15 min of the ring)
+let lastNav = null;
+const nav = () => lastNav;
+function packetsSection(open) {
+  const s = section('Packets', 'stored captures · masked');
+  const b = el('button', 'link-btn ops-btn', 'この通信のパケット');
+  b.type = 'button';
+  b.lang = 'ja';
+  b.setAttribute('aria-label', 'Packets of this traffic: open packet analysis with a filter for it');
+  b.addEventListener('click', () => { if (nav()) open(); });
+  s.body.append(b, el('p', 'v-p', 'Opens packet analysis with a filter for these addresses (from the last 15 min of the capture ring; the demo opens its synthetic pcap).'));
+  return s;
+}
+
 // ---- destination (country / city / unknown IP) -------------------------------------------------
 export function destView(d) {
   const tok = ipTokens(); // unique, address-free focus keys for rows that only differ by a masked IP
@@ -148,13 +162,14 @@ export function destView(d) {
     title: `Destination ${label}`, src: 'prom',
     mount(body) {
       s = { sum: el('div'), src: section('Source hosts talking to it', 'Mbps · share of this destination\'s traffic'), ips: section('Destination IPs', 'masked (NFR-09) · Mbps'),
-        t: section('Trend, last 1 h', 'Mbps by direction'), note: section('Geo confidence') };
+        t: section('Trend, last 1 h', 'Mbps by direction'), note: section('Geo confidence'), pk: packetsSection(() => nav().packets({ dest: d })) };
       s.srcBox = el('div');
       s.src.body.append(s.srcBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
-      body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap);
+      body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const ok = ctx.snap.flowsOk; // flow source DOWN: every figure is unknown ("—"), never 0
       const fl = ctx.snap.flows.filter(match);
       const all = totalBps(ctx.snap.flows);
@@ -181,7 +196,7 @@ export function destView(d) {
         ? 'No GeoIP result: counted as Unknown (kept in totals and shares); no location is estimated or drawn (TC-007).'
         : 'Location is a GeoIP estimate of the destination (synthetic in this demo). Arcs show a logical relation, not a physical route.'));
       const sel = d.ip ? `dst_ip=${lv(d.ip)}` : `dst_country=${lv(d.cc)}${d.city ? `,dst_city=${lv(d.city)}` : ''}`;
-      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{${sel}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${label} traffic by direction`);
+      await drawRange(chart, [{ q: `sum by (direction) (rate(obs_flow_bytes_total{${sel}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${label} traffic by direction`);
       if (!ok) flowsMissing(ctx.snap);
     },
   };
@@ -195,13 +210,15 @@ export function srcView(host) {
   return {
     title: `Source ${host}`, src: 'prom',
     mount(body) {
-      s = { sum: el('div'), cc: section('Destinations by country', 'Mbps · share of this host\'s traffic'), dst: section('Destinations', 'country / city / masked IP'), t: section('Trend, last 1 h', 'Mbps by direction') };
+      s = { sum: el('div'), cc: section('Destinations by country', 'Mbps · share of this host\'s traffic'), dst: section('Destinations', 'country / city / masked IP'), t: section('Trend, last 1 h', 'Mbps by direction'),
+        pk: packetsSection(() => nav().packets({ src: host })) };
       s.ccBox = el('div');
       s.cc.body.append(s.ccBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
-      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap);
+      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const ok = ctx.snap.flowsOk; // flow source DOWN: every figure is unknown ("—"), never 0
       const fl = ctx.snap.flows.filter((f) => f.src === host);
       const bps = ok ? totalBps(fl) : undefined;
@@ -223,7 +240,7 @@ export function srcView(host) {
         return { label: `${f.cc} ${f.city || '(no GeoIP)'} ${maskIp(g.key)}`, key: tok(g.key), value: mbps(g.bps), extra: shareText(pct(g.bps, bps)), cls: f.lat === null ? 'rank-unknown' : '',
           onOpen: () => ctx.nav.dest(f.lat === null ? { cc: 'Unknown', ip: g.key } : { cc: f.cc, city: f.city }) };
       }), { head: ['destination', 'Mbps', 'of host'] }) : el('p', 'na', FLOWS_DOWN));
-      await drawRange(chart, [{ q: `sum by (direction) (rate(demo_flow_bytes_total{src_host=${lv(host)}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${host} traffic by direction`);
+      await drawRange(chart, [{ q: `sum by (direction) (rate(obs_flow_bytes_total{src_host=${lv(host)}}[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', `${host} traffic by direction`);
       if (!ok) flowsMissing(ctx.snap);
     },
   };

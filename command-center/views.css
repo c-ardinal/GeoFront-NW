@@ -195,3 +195,83 @@
   :is(#modal, #drawer) .cards { grid-template-columns: 1fr; }
   :is(#modal, #drawer) .multiples, #drawer .multiples { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 }
+
+/* ---- packet analysis modal (views-pcap.js) ----
+   toolbar (file / upload / display filter / status in a fixed-width slot) -> message line (height reserved, so an
+   error never moves the layout) -> tabs -> packets: virtual list | detail tree over hex, or a statistics table.
+   Masked bytes ("xx" / "·") are dimmed on the track colour; the selected field and its bytes share the accent. */
+#modal .pa { display: flex; flex-direction: column; gap: var(--s2); }
+#modal .pa-bar { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s2) var(--s3); }
+#modal .pa-bar :is(select, input[type="text"]) { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); height: 30px; }
+#modal .pa-bar input[type="text"] { font-family: var(--mono); width: 100%; }
+#modal .pa-bar input[aria-invalid="true"] { border-color: var(--crit); }
+#modal .pa-bar :is(select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pa-file select { width: 320px; max-width: 100%; }
+#modal .pa-filter { display: flex; align-items: end; gap: var(--s1); flex: 1 1 420px; min-width: 0; }
+#modal .pa-filter .fld { flex: 1; min-width: 0; }
+#modal .pa-bar .ops-btn { height: 30px; }
+#modal .pa-status { flex: 0 0 auto; width: 24ch; align-self: center; text-align: right; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#modal .pa-msg { min-height: 1.4em; font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+#modal .pa-msg:is(.err, .err-filter) { color: var(--crit); }
+#modal .pa-msg.warn, #modal .pa-warn { color: var(--warn); }
+#modal .pa-ctx { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); min-height: 1.3em; font-size: var(--fs-s); color: var(--text-2); }
+#modal .pa-ctx span:empty { display: none; }
+#modal .pa-tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--frame); }
+#modal .pa-tabs .seg-btn { padding: 3px var(--s3); }
+#modal .pa-tabs .seg-btn[aria-selected="true"] { color: var(--text); border-color: var(--accent); background: var(--hover); }
+#modal .pa-pk[hidden], #modal .pa-stats[hidden] { display: none; }
+#modal .pa-pk { display: grid; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); gap: var(--s3); height: min(600px, calc(100dvh - 330px)); min-height: 320px; }
+#modal .pa-lw { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--frame); }
+#modal .pa-list { --pa-row: 24px; position: relative; flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--frame) transparent; }
+#modal .pa-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pa-spacer { position: relative; }
+#modal .pa-row { display: grid; grid-template-columns: 56px 76px minmax(0, 150px) minmax(0, 150px) 64px 48px minmax(0, 1fr); column-gap: var(--s2); align-items: center;
+  height: 24px; padding: 0 var(--s2); font: var(--fs-s)/1 var(--mono); white-space: nowrap; }
+#modal .pa-row span { overflow: hidden; text-overflow: ellipsis; }
+#modal .pa-row .n { text-align: right; }
+#modal .pa-head { flex: 0 0 auto; font-family: var(--sans); color: var(--text-2); border-bottom: 1px solid var(--frame); }
+#modal .pa-spacer .pa-row { position: absolute; left: 0; right: 0; cursor: pointer; color: var(--text); }
+#modal .pa-spacer .pa-row:hover { background: var(--hover); }
+#modal .pa-spacer .pa-row.sel { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
+#modal .pa-p { color: var(--accent); }
+#modal .pa-det { display: grid; grid-template-rows: minmax(0, 3fr) minmax(0, 2fr); gap: var(--s2); min-height: 0; }
+#modal :is(.pa-tree, .pa-hex) { min-height: 0; overflow: auto; border: 1px solid var(--frame); padding: var(--s1) var(--s2); scrollbar-width: thin; scrollbar-color: var(--frame) transparent; }
+#modal .pt { font: var(--fs-s)/1.6 var(--mono); }
+#modal .pt-node .pt-node { margin-left: 14px; }
+#modal :is(.pt-s, .pt-leaf) { cursor: pointer; white-space: nowrap; }
+#modal .pt-s::marker { color: var(--accent); }
+#modal :is(.pt-s, .pt-leaf):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pt-sel { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+#modal .pt-f { margin-left: var(--s2); padding: 0 var(--s1); font-size: 12px; }
+#modal .hx { font: var(--fs-s)/1.6 var(--mono); cursor: pointer; }
+#modal .hx-line { display: flex; gap: var(--s3); white-space: pre; }
+#modal .hx-o { color: var(--text-2); }
+#modal .hx-b { display: inline-block; width: 2ch; margin-right: 0.6ch; }
+#modal .hx-m { color: var(--text-2); background: var(--track); }
+#modal .hx-sel { color: var(--bg); background: var(--accent); }
+#modal .pa-stats { min-height: 360px; }
+#modal .pa-tbl { max-height: min(560px, calc(100dvh - 330px)); overflow: auto; }
+#modal .pa-phs td:first-child { white-space: pre; font-family: var(--mono); }
+#modal .pa-names { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: var(--s3); }
+#modal :is(.pa-foot, .pa-note) { font-size: var(--fs-s); color: var(--text-2); }
+#modal .v-h .link-btn + .pa-sub { margin-left: var(--s2); }
+#modal.stale .pa-spacer .pa-row { color: var(--text-2); }
+
+@media (max-width: 1279px) {
+  #modal .pa-bar :is(select, input[type="text"]), #modal .pa-bar .ops-btn, #modal .pa-tabs .seg-btn, #modal .pt-f { min-height: 44px; min-width: 44px; }
+  #modal .pa-list { --pa-row: 44px; }
+  #modal .pa-spacer .pa-row { height: 44px; }
+  #modal .pt-leaf { min-height: 44px; display: flex; align-items: center; gap: var(--s1); }
+  #modal .pt-s { line-height: 44px; }
+}
+@media (max-width: 767px) {
+  #modal .pa-pk { grid-template-columns: 1fr; height: auto; }
+  #modal .pa-lw { height: 55dvh; }
+  #modal .pa-det { grid-template-rows: auto auto; }
+  #modal .pa-tree { max-height: 60dvh; }
+  #modal .pa-hex { max-height: 45dvh; }
+  #modal .pa-row { grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) 52px minmax(0, 1fr); }
+  #modal .pa-row > :nth-child(2), #modal .pa-row > :nth-child(6) { display: none; }
+  #modal .pa-file select, #modal .pa-filter { width: 100%; flex-basis: 100%; }
+  #modal .pa-status { width: auto; flex: 1; text-align: left; }
+}

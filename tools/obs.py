@@ -7,6 +7,8 @@
   restore      backup のアーカイブを戻す (prometheus / loki / grafana / alertmanager は止めてから)
   notify-test  各通知先にテスト通知を送り (Alertmanager 経由)、応答 (HTTP / SMTP) を表で出す
   test-syslog  fixtures を Alloy に送り、Loki に正しく解析されて入ったかを確かめる (回帰テスト)
+  capture      パケット取込の状態 (status) / リングとアップロードの一覧 (list) / 保存期間を過ぎたものの削除 (prune)
+  geoip        DB-IP Lite (City + ASN) のダウンロード・更新 (update) / 版と鮮度 (status)
 
 Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
 Paths: the repository is mounted at /work, the generated volume at /generated, data volumes under /vol.
@@ -23,6 +25,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sqlite3
 import sys
 import tarfile
@@ -43,6 +46,7 @@ from typing import NamedTuple
 from notify import (DEMO_PLAN, NOTIFY_ENV, RECEIVER_TYPES, RELAY, RELAY_UID, SMTP_PORTS, TEST_ALERT, URL_SECRETS,
                     alertmanager_config, check_receivers, notify_summary, relay_config, render_receivers)
 import notify  # the notification model (tools/notify.py, next to this file)
+import capture as cap  # packet capture / GeoIP housekeeping (tools/capture.py)
 
 WORK = Path(os.environ.get("OBS_WORK", "/work"))
 GEN = Path(os.environ.get("OBS_GENERATED", "/generated"))
@@ -61,7 +65,9 @@ TEMPLATE_VARS = ("SNMP_V3_AUTH_PROTO", "SNMP_V3_PRIV_PROTO")  # filled in by us;
 # community: that one is written into the generated auths.yml (generated volume only, mode 0600, never printed).
 LITERAL_SECRETS = ("SNMP_COMMUNITY",)
 # data volume -> owner the service runs as (a fresh volume first mounted here would otherwise be root-owned)
-VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0), "alertmanager": (65534, 65534)}
+VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0), "alertmanager": (65534, 65534),
+           "capture": (0, 0), "uploads": (65534, 65534)}  # the last two only with backup --include-captures
+DEMO_HOSTS = {"192.168.100.1": "rtx1300"}  # the demo pcap's router (its other hosts are named by DHCP)
 IFNAME_RE = re.compile(r"[A-Za-z0-9_/:-]{1,64}")  # no dots: mask-api rejects digit.digit in query literals
 RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in the inventory (alloy/config.alloy)
 PUBLIC_URL_RE = re.compile(r"https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?")  # host name, IPv4 or [IPv6]
@@ -299,15 +305,44 @@ def _declared_auths():
 
 # ---- generated files (Prometheus file_sd, Alloy host map, snmp_exporter auths) --------------------
 
-def file_sd(rows, demo):
+def capture_on(values=None):
+    """prod: flows come from the capture profile (OBS_CAPTURE=1 in .env, with COMPOSE_PROFILES=prod,capture)."""
+    return (values if values is not None else os.environ).get("OBS_CAPTURE", "0") == "1"
+
+
+def demo_replay(values=None):
+    """demo: flows from the synthetic pcap replayed by flowd-demo (default), or demo-gen's synthetic counters."""
+    return (values if values is not None else os.environ).get("DEMO_PCAP_REPLAY", "1") != "0"
+
+
+def flow_source(demo, values=None):
+    if demo:
+        return "pcap-replay" if demo_replay(values) else "demo-gen"
+    return "capture" if capture_on(values) else None
+
+
+FLOW_TARGETS = {"pcap-replay": [{"targets": ["flowd-demo:9100"], "labels": {"__metrics_path__": "/metrics"}}],
+                "demo-gen": [{"targets": ["demo-gen:9116"]}],
+                "capture": [{"targets": ["flowd:9100"], "labels": {"__metrics_path__": "/metrics"}}], None: []}
+
+
+def file_sd(rows, demo, values=None):
+    flows = FLOW_TARGETS[flow_source(demo, values)]
     if demo:
         snmp = [{"targets": [n], "labels": {"__device": n, "__exporter": "demo-gen:9116", "__param_module": "if_mib"}}
                 for n in DEMO_DEVICES]
-        return snmp, [{"targets": ["demo-gen:9116"]}]
+        return snmp, flows
     snmp = [{"targets": [d["address"]], "labels": {"__device": d["name"], "__exporter": "snmp-exporter:9116",
                                                    "__param_module": "if_mib,system", "__param_auth": d["snmp_auth"]}}
             for d in rows]
-    return snmp, []
+    return snmp, flows
+
+
+def flow_hosts(rows, demo):
+    """Inventory names for flowd's src_host (IPv4 management addresses only)."""
+    if demo:
+        return dict(DEMO_HOSTS)
+    return {split_address(d["address"])[0]: d["name"] for d in rows if is_ipv4(split_address(d["address"])[0])}
 
 
 def alloy_string(s):
@@ -350,7 +385,8 @@ def write_atomic(path, text, mode=0o644, owner=None):
 
 
 def write_generated(rows, values, demo, plan=None):
-    snmp, flows = file_sd(rows, demo)
+    snmp, flows = file_sd(rows, demo, values)
+    write_atomic(GEN / "flowd/hosts.json", json.dumps(flow_hosts(rows, demo), indent=2) + "\n")
     write_atomic(GEN / "prometheus/snmp.json", json.dumps(snmp, indent=2) + "\n")
     write_atomic(GEN / "prometheus/flows.json", json.dumps(flows, indent=2) + "\n")
     write_atomic(GEN / "alloy/hostmap.alloy", hostmap([] if demo else rows, demo))
@@ -358,19 +394,20 @@ def write_generated(rows, values, demo, plan=None):
     write_atomic(GEN / "snmp/auths.yml", "# Generated by `tools targets` from snmp/auths.yml. Do not edit.\n"
                  + yaml.safe_dump({"auths": auths}, sort_keys=False), mode=0o600)  # may hold the v2c community
     write_atomic(GEN / "mode", "demo\n" if demo else "prod\n")
-    write_atomic(GEN / "ui/config.json", json.dumps(ui_config(rows, demo), indent=2) + "\n")
+    write_atomic(GEN / "ui/config.json", json.dumps(ui_config(rows, demo, values), indent=2) + "\n")
     write_atomic(GEN / "prometheus/wan-rules.yml", "# Generated by `tools targets`. Do not edit.\n"
                  + yaml.safe_dump(wan_rules(wan_of(rows, demo)), sort_keys=False, width=200))
     if plan is not None:
         write_alerting(plan, values)
 
 
-def ui_config(rows, demo):
+def ui_config(rows, demo, values=None):
     """What the command-center needs to know about the deployment (served by the proxy as /obs/config.json):
-    no addresses or credentials, only names."""
+    no addresses or credentials, only names. flow_source: pcap-replay | demo-gen | capture | null (no flows)."""
     devices = [{"name": n, "kind": n[:3]} for n in DEMO_DEVICES] if demo else [{"name": d["name"], "kind": d["kind"]} for d in rows]
-    return {"profile": "demo" if demo else "prod", "flows_configured": demo, "devices": devices, "wan": wan_of(rows, demo),
-            "bind": env("OBS_BIND", "127.0.0.1")}
+    src = flow_source(demo, values)
+    return {"profile": "demo" if demo else "prod", "flows_configured": src is not None, "flow_source": src, "devices": devices,
+            "wan": wan_of(rows, demo), "bind": env("OBS_BIND", "127.0.0.1")}
 
 
 # ---- alert notifications: files and commands (the model is tools/notify.py) ---------------------------------------
@@ -669,6 +706,7 @@ def cmd_grafana_reset_admin(args):
 
 def cmd_setup_check(args):
     """Shared services need the files of a profile's setup step: fail clearly when no profile was chosen."""
+    fix_capture_volumes()
     if (GEN / "mode").exists():
         print(f"profile の設定: {mode()}")
         return 0
@@ -770,7 +808,9 @@ def services(m):
             ("alertmanager", ALERTMANAGER + "/-/healthy"), ("notify-relay", RELAY + "/health")]
     extra = {"demo": [("demo-gen", "http://demo-gen:9116/fault/status")],
              "prod": [("snmp-exporter", "http://snmp-exporter:9116/")]}
-    return base + extra.get(m, [])
+    flows = {"pcap-replay": [("flowd-demo", "http://flowd-demo:9100/health")], "capture": [("flowd", "http://flowd:9100/health")]}
+    # the analyzer has no network: its health is mask-api's /pcap/ answering a filter check through it
+    return base + extra.get(m, []) + flows.get(flow_source(m == "demo"), []) + [("analyzer", "http://mask-api:8000/pcap/check?filter=dns")]
 
 
 def snmp_probe(d, m):
@@ -858,6 +898,7 @@ def cmd_check(args):
     print(f"[{'OK' if ok else ('NG' if lan else '注意')}] {msg}")
     rc |= (not ok) and lan
     rc |= check_notify(m)
+    rc |= check_capture(m)
     if not rows:
         return 1
     print("\n■ 機器 (SNMP: exporter 経由で sysUpTime と ifHC カウンタを取得 / Prometheus の up)")
@@ -888,6 +929,40 @@ def cmd_check(args):
         table(("機器", "syslog", "最初に届いた行 / 対処"), lrows)
     print("\n結果:", "すべて OK" if not rc else "NG があります (上の表を確認してください)")
     return 1 if rc else 0
+
+
+def check_capture(m):
+    """Packet capture (prod with OBS_CAPTURE=1) and the GeoIP databases. -> 1 on a problem."""
+    print("\n■ パケット取込とフロー (flowd) / GeoIP")
+    rc = 0
+    src = flow_source(m == "demo")
+    if src is None:
+        print("キャプチャは無効です (OBS_CAPTURE=0。有効にするには README「パケット取込」)")
+    elif src == "capture":
+        st = cap.capture_status(CAPTURE_VOL)
+        if st["state"] == "running":
+            print(f"[OK] キャプチャ中: {st.get('iface')} / フィルタ {st.get('filter') or '(なし)'} / snaplen {st.get('snaplen')} / "
+                  f"リング {st.get('ring_files')} 本 {st.get('ring_bytes', 0) / 1e6:.0f} MB (上限 {st.get('ring_limit_bytes', 0) / 1e6:.0f} MB) / "
+                  f"受信 {st.get('received')} / NIC の受信ドロップ {st.get('nic_rx_dropped')} / dumpcap の欠落 (終了したセッション分) {st.get('dumpcap_dropped')}")
+            if st.get("nic_rx_dropped") or st.get("dumpcap_dropped"):
+                print("[注意] パケットの取りこぼしがあります (NIC の受信ドロップ / dumpcap の欠落)。CAPTURE_BPF で絞るか CAPTURE_SNAPLEN を下げてください")
+            print(RAW_NOTE)
+        else:
+            rc = 1
+            why = st.get("error") or ("status.json がありません (capture サービスが動いていない: docker compose --profile capture up -d)" if st["state"] == "none"
+                                      else f"{st['age_s']} 秒更新がありません")
+            print(f"[NG] キャプチャが動いていません: {why}")
+    else:
+        print(f"デモ: フローは {'合成 pcap (demo/demo-home.pcap) を flowd-demo が繰り返し再生' if src == 'pcap-replay' else 'demo-gen の合成値'}")
+    demo = subprocess.run([sys.executable, str(WORK / "demo/make_demo_pcap.py"), "--check"], capture_output=True, text=True)
+    print(f"[{'OK' if demo.returncode == 0 else 'NG'}] デモ pcap: {(demo.stdout or demo.stderr).strip()[:120]}")
+    rc |= demo.returncode != 0
+    rows = cap.geoip_rows(GEOIP_VOL)
+    table(("GeoIP", "版 (月)", "MiB", "経過日数", "状態"), [(a, b, c, "—" if d is None else d, e) for a, b, c, d, e in rows])
+    print(f"  ({cap.ATTRIBUTION})")
+    if src == "capture" and any(r[3] is None or r[3] > cap.GEOIP_STALE_DAYS for r in rows):
+        print("[注意] GeoIP がないか古いと、通信先の国・都市は Unknown / 古い推定になります (docker compose run --rm tools geoip update)")
+    return rc
 
 
 def check_notify(m):
@@ -1162,6 +1237,7 @@ def offer_grafana_reset(new, args):
 
 
 def cmd_init(args):
+    fix_capture_volumes()
     inv = inventory_path()
     exists = [p for p in (ENV_FILE, inv) if p.exists()]
     if exists and not args.force:
@@ -1289,7 +1365,10 @@ def cmd_backup(args):
     manifest = {"created": stamp, "format": 2, "mode": mode(), "include_env": bool(args.include_env and ENV_FILE.exists()),
                 "inventory": rel(inv) if inv.exists() else None, "receivers": rel(receivers_path()) if receivers_path().exists() else None}
     snap = snapshot_prometheus()
+    if args.include_captures:
+        print("[注意] キャプチャのリングとアップロードした pcap を含めます (通信内容そのもの。取り扱い注意)")
     umask = os.umask(0o077)  # the archive (and the copies in tmp) are owner-only from the first byte
+    staged = []
     try:
         with tempfile.TemporaryDirectory() as tmp:
             gdb = grafana_db_copy(tmp)
@@ -1298,6 +1377,13 @@ def cmd_backup(args):
                        ("grafana", "grafana", VOL / "grafana", skip_db), ("alertmanager", "alertmanager", VOL / "alertmanager", None)]
             if gdb:
                 sources.append(("grafana", "grafana/grafana.db", gdb, None))
+            if args.include_captures:  # never by default: full packets, bounded by their own retention instead
+                # closed files only, staged first: the ring rotates and prunes under a running capture
+                stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=out))
+                staged.append(stage)
+                cap.stage_closed(CAPTURE_VOL, stage / "capture", capture_volume=True)
+                cap.stage_closed(UPLOADS_VOL, stage / "uploads")
+                sources += [("capture", "capture", stage / "capture", None), ("uploads", "uploads", stage / "uploads", None)]
             if inv.exists():
                 sources.append((None, "config/" + manifest["inventory"].lstrip("/"), inv, None))
             if manifest["receivers"]:
@@ -1308,6 +1394,8 @@ def cmd_backup(args):
     finally:
         os.umask(umask)
         shutil.rmtree(snap, ignore_errors=True)
+        for stage in staged:
+            shutil.rmtree(stage, ignore_errors=True)
     os.chmod(path, 0o600)
     fix_owner(path)
     size = path.stat().st_size / 2**20
@@ -1332,7 +1420,43 @@ def chown_tree(root, uid, gid):
     os.chown(root, uid, gid)
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
-            os.chown(os.path.join(dirpath, n), uid, gid, follow_symlinks=False)
+            each(os.chown, os.path.join(dirpath, n), uid, gid, follow_symlinks=False)
+
+
+def each(fn, *args, **kw):
+    """Per entry of a live tree (ring rotation, uploads, prune): an entry that vanished or changed meanwhile is skipped."""
+    try:
+        fn(*args, **kw)
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        pass
+
+
+def reader_modes(root):
+    """Capture / upload trees: directories 0755, files 0644 (flowd, the analyzer and mask-api read them as other users)."""
+    each(os.chmod, root, 0o755)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames:
+            each(os.chmod, os.path.join(dirpath, n), 0o755, follow_symlinks=False)
+        for n in filenames:
+            p = os.path.join(dirpath, n)
+            if not os.path.islink(p):
+                each(os.chmod, p, 0o644)
+
+
+def fix_capture_volumes():
+    """Every start (setup-check) and tools init: a volume first mounted by a tools container is root-owned, so mask-api
+    (nobody) could not write uploads; restored / staged trees may carry owner-only modes the readers cannot traverse.
+    Never fails the start: entries that vanish meanwhile are skipped, any other error is reported and ignored."""
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    try:
+        if UPLOADS_VOL.is_dir():
+            chown_tree(UPLOADS_VOL, *VOLUMES["uploads"])
+            reader_modes(UPLOADS_VOL)
+        if CAPTURE_VOL.is_dir():
+            reader_modes(CAPTURE_VOL)
+    except OSError as e:
+        print(f"[注意] キャプチャ / アップロードのボリュームの所有者・権限を直せませんでした: {e}", file=sys.stderr)
 
 
 def clear_dir(p):
@@ -1387,6 +1511,13 @@ def cmd_restore(args):
         except KeyError:
             raise Fail("manifest.json がありません。tools backup で作ったアーカイブではありません") from None
         config = check_manifest(manifest, members, args.with_config)
+        if {"capture", "uploads"} & set(manifest["parts"]):  # their writers / readers must be stopped too
+            using = [n for n, port in (("mask-api", 8000), ("flowd", 9100), ("flowd-demo", 9100)) if probe(f"tcp://{n}:{port}")[0]]
+            if cap.capture_status(CAPTURE_VOL)["state"] == "running":
+                using.append("capture")
+            if using:
+                raise Fail(f"キャプチャ / アップロードを戻すには {', '.join(using)} も止めてください: "
+                           "docker compose stop capture flowd flowd-demo mask-api (何も消していません)")
         if not args.yes:
             if not sys.stdin.isatty():
                 raise Fail("確認できません (TTY なし)。--yes を付けてください")
@@ -1399,6 +1530,8 @@ def cmd_restore(args):
             clear_dir(dest)
             extract_part(tar, members, comp, dest)
             chown_tree(dest, uid, gid)
+            if comp in ("capture", "uploads"):
+                reader_modes(dest)
             print(f"[OK] {comp} を戻しました")
         if args.with_config:
             stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1412,6 +1545,79 @@ def cmd_restore(args):
                 print(f"[OK] {name} を戻しました (元のファイルは .bak-{stamp})")
     print("次: docker compose up -d   (台帳・通知先を戻したなら docker compose run --rm tools targets も)")
     return 0
+
+
+# ---- packet capture / GeoIP ------------------------------------------------------------------------
+
+CAPTURE_VOL = VOL / "capture"
+# the operator's own console shows interface / filter / errors raw (enx<MAC> names, BPF addresses); the screens never do
+RAW_NOTE = "[注意] インターフェース名・フィルタ・エラーは生の値です (MAC / IP を含むことがあります。共有するときは伏せてください。画面では伏せ字)"
+UPLOADS_VOL = VOL / "uploads"
+GEOIP_VOL = VOL / "geoip"
+
+
+def cmd_capture_setup(args):
+    """capture profile, at `up`: the profile and .env must agree (OBS_CAPTURE=1 makes the setup step scrape flowd and
+    tell the screens that flows are configured), and an interface must be named."""
+    if not capture_on():
+        print("[NG] capture profile が有効ですが .env に OBS_CAPTURE=1 がありません。両方を設定してください "
+              "(COMPOSE_PROFILES=prod,capture と OBS_CAPTURE=1、CAPTURE_IFACE=<LAN 側のインターフェース>)", file=sys.stderr)
+        return 1
+    if mode() != "prod":
+        print("[NG] capture profile は prod と一緒に使います (COMPOSE_PROFILES=prod,capture)", file=sys.stderr)
+        return 1
+    if not env("CAPTURE_IFACE"):
+        print("[NG] CAPTURE_IFACE (キャプチャするインターフェース名) を .env に設定してください", file=sys.stderr)
+        return 1
+    print(f"キャプチャ: {env('CAPTURE_IFACE')} (フィルタ {env('CAPTURE_BPF') or 'なし'})。flowd を scrape します")
+    return 0
+
+
+def cmd_capture(args):
+    now = time.time()
+    keep_h = float(env("CAPTURE_KEEP_HOURS", "24"))
+    up_keep_h = float(env("PCAP_KEEP_HOURS", "24"))
+    up_max = int(env("PCAP_UPLOADS_TOTAL_MB", "200")) * 2**20
+    st = cap.capture_status(CAPTURE_VOL, now)
+    ring = cap.capture_files(CAPTURE_VOL / "ring")
+    ups = cap.capture_files(UPLOADS_VOL)
+    current = st.get("current") if st["state"] == "running" else None
+    if args.action == "status":
+        print(f"キャプチャ: {dict(running='動作中', stopped='停止', none='未起動')[st['state']]}"
+              + (f" ({st['age_s']} 秒前に更新)" if st["state"] != "none" else ""))
+        if st["state"] != "none":
+            table(("項目", "値"), [("インターフェース", st.get("iface") or "—"), ("BPF フィルタ", st.get("filter") or "(なし)"),
+                                  ("snaplen", st.get("snaplen") or "—"), ("リング", f"{len(ring)} 本 / {sum(f[1] for f in ring) / 1e6:.1f} MB (上限 {(st.get('ring_limit_bytes') or 0) / 1e6:.0f} MB)"),
+                                  ("受信", st.get("received", "—")), ("NIC の受信ドロップ (取込開始から)", st.get("nic_rx_dropped", "—")),
+                                  ("dumpcap の欠落 (終了したセッションの合計)", st.get("dumpcap_dropped", "—")), ("エラー", st.get("error") or "なし")])
+            print(RAW_NOTE)
+        print(f"アップロード: {len(ups)} 件 / {sum(f[1] for f in ups) / 2**20:.1f} MiB (上限 {up_max / 2**20:.0f} MiB、{up_keep_h:g} 時間で削除)")
+        return 0 if st["state"] != "stopped" or not capture_on() else 1
+    if args.action == "list":
+        rows = [("ring", n + (" (記録中)" if n == current else ""), f"{b / 1e6:.1f}", time.strftime("%m-%d %H:%M:%S", time.localtime(t))) for n, b, t in ring]
+        rows += [("upload", n, f"{b / 1e6:.1f}", time.strftime("%m-%d %H:%M:%S", time.localtime(t))) for n, b, t in ups]
+        table(("種類", "ファイル", "MB", "更新"), rows or [("—", "なし", "", "")])
+        return 0
+    keep = (args.keep_hours if args.keep_hours is not None else keep_h) * 3600
+    gone_r = cap.prune_plan(ring, now, keep, current=current)
+    gone_u = cap.prune_plan(ups, now, (args.keep_hours if args.keep_hours is not None else up_keep_h) * 3600, up_max)
+    if args.dry_run:
+        print("削除対象 (--dry-run):", ", ".join(gone_r + gone_u) or "なし")
+        return 0
+    print(f"[OK] リング {cap.prune(CAPTURE_VOL / 'ring', gone_r)} 本、アップロード {cap.prune(UPLOADS_VOL, gone_u)} 件を削除しました")
+    return 0
+
+
+def cmd_geoip(args):
+    if args.action == "update":
+        print(f"DB-IP Lite (City + ASN) を取得します ({cap.ATTRIBUTION}) ...", flush=True)
+        ok, _ = cap.geoip_update(GEOIP_VOL, force=args.force)
+        print("flowd は 1 分以内に新しい版を読み込みます" if ok else "一部取得できませんでした (ネットワーク / 月初めはまだ公開前のことがあります)")
+        return 0 if ok else 1
+    rows = cap.geoip_rows(GEOIP_VOL)
+    table(("GeoIP", "版 (月)", "MiB", "経過日数", "状態"), [(a, b, c, "—" if d is None else d, e) for a, b, c, d, e in rows])
+    print(f"({cap.ATTRIBUTION})")
+    return 0 if all(r[3] is not None and r[3] <= cap.GEOIP_STALE_DAYS for r in rows) else 1
 
 
 # ---- syslog regression test ---------------------------------------------------------------------
@@ -1544,15 +1750,22 @@ def selftest():
     assert any("OBS_GRAFANA_ANON_ON_LAN" in w for w in check_env({**lan, "OBS_GRAFANA_ANON_ON_LAN": "1"})[1])
     errs, _, _ = validate({**good, "SNMP_V3_USER": ""}, dev)  # v3 auth dropped -> reported as missing credentials
     assert errs, errs
-    snmp, flows = file_sd(rows, demo=False)
+    snmp, flows = file_sd(rows, demo=False, values={})
     assert snmp[0] == {"targets": ["192.168.100.1"], "labels": {"__device": "rtx1300", "__exporter": "snmp-exporter:9116",
                                                                 "__param_module": "if_mib,system", "__param_auth": "yamaha_v3"}} and flows == []
+    assert file_sd(rows, demo=False, values={"OBS_CAPTURE": "1"})[1] == [{"targets": ["flowd:9100"], "labels": {"__metrics_path__": "/metrics"}}]
+    assert file_sd([], demo=True, values={})[1][0]["targets"] == ["flowd-demo:9100"]
+    assert file_sd([], demo=True, values={"DEMO_PCAP_REPLAY": "0"})[1] == [{"targets": ["demo-gen:9116"]}]
+    assert flow_hosts(rows, demo=False) == {"192.168.100.1": "rtx1300"} and flow_hosts([], demo=True) == DEMO_HOSTS
     assert [t["targets"] for t in file_sd([], demo=True)[0]] == [["rtx1300"], ["wlx413"], ["wlx222"]]
     hm = hostmap(rows)
     assert '"192\\\\.168\\\\.100\\\\.1"' in hm and '"testbed\\\\-wlx(\\\\..*)?"' in hm and hm.count("rule {") == 2, hm
     assert hostmap([]).count("rule {") == 0 and '"[^;]*demo-gen[^;]*;(rtx1300|wlx413|wlx222)"' in hostmap([], demo=True)
-    assert ui_config(rows, demo=False) == {"profile": "prod", "flows_configured": False, "wan": None, "bind": env("OBS_BIND", "127.0.0.1"),
-                                           "devices": [{"name": "rtx1300", "kind": "rtx"}, {"name": "wlx413", "kind": "wlx"}]}
+    assert ui_config(rows, demo=False, values={}) == {"profile": "prod", "flows_configured": False, "flow_source": None, "wan": None,
+                                                      "bind": env("OBS_BIND", "127.0.0.1"),
+                                                      "devices": [{"name": "rtx1300", "kind": "rtx"}, {"name": "wlx413", "kind": "wlx"}]}
+    assert ui_config(rows, demo=False, values={"OBS_CAPTURE": "1"})["flows_configured"] is True
+    assert ui_config([], demo=True, values={})["flow_source"] == "pcap-replay"
     assert ui_config([], demo=True)["wan"] == {"device": "rtx1300", "ifName": "lan2"} and wan_rules(None) == {"groups": []}
     wrows = validate(good, [{**dev[0], "wan_interface": "lan2"}, dev[1]])[2]
     assert wan_of(wrows, demo=False) == {"device": "rtx1300", "ifName": "lan2"}
@@ -1566,6 +1779,14 @@ def selftest():
     wall = (WORK / "dashboards/wallboard.json").read_text(encoding="utf-8")
     assert 'ifName=\\"lan2\\"' not in wall and "obs_wan:ifHCInOctets:rate1m" in wall, "wallboard WAN panels follow the inventory"
     notify.selftest(good)
+    cap.selftest()
+    each(os.chmod, "/nonexistent/obs-selftest", 0o644)  # a vanished entry never fails setup-check
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "ring").mkdir(mode=0o700)
+        Path(tmp, "ring", "a.pcapng").write_bytes(b"x")
+        os.chmod(Path(tmp, "ring", "a.pcapng"), 0o600)
+        reader_modes(tmp)
+        assert Path(tmp, "ring").stat().st_mode & 0o777 == 0o755 and Path(tmp, "ring", "a.pcapng").stat().st_mode & 0o777 == 0o644
     assert check_env({**good, "SLACK_WEBHOOK_URL": "https://x/'"})[0]  # quoting rules cover the notification secrets too
     werrs = check_devices([{**dev[0], "wan_interface": "ge0.1"}, {**dev[1], "wan_interface": "lan1"}], {"yamaha_v3"})
     assert any("ifName" in e for e in werrs) and any("1 台だけ" in e for e in werrs), werrs
@@ -1643,6 +1864,7 @@ def selftest():
         except Fail:
             pass
     assert check_manifest(good_m, mem("config/inventory/devices.yaml", "config/.env"), False) == []
+    assert check_manifest({"parts": ["capture", "uploads"], "contents": {}}, mem("capture/ring/a.pcapng", "uploads/u.pcap"), False) == []
     # backup: written to .partial, moved into place only when complete; restore checks completeness first
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp, "loki")
@@ -1717,7 +1939,8 @@ def parser():
     b = sub.add_parser("backup", help="設定とデータを 1 つのアーカイブに")
     b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
     b.add_argument("--out", default="backups", help="出力先 (リポジトリからの相対、既定 backups)")
-    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana / alertmanager は停止しておく)")
+    b.add_argument("--include-captures", action="store_true", help="キャプチャのリングとアップロードした pcap も含める (既定は含めない)")
+    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana / alertmanager、キャプチャを含むなら capture / flowd / mask-api も停止しておく)")
     r.add_argument("archive")
     r.add_argument("--with-config", action="store_true", help="機器台帳・通知先 (と含まれていれば .env) も戻す")
     r.add_argument("--yes", action="store_true", help="確認せずに実行")
@@ -1733,6 +1956,14 @@ def parser():
     s.add_argument("--host", default="alloy")
     s.add_argument("--port", type=int, default=514)
     s.add_argument("--timeout", type=int, default=30)
+    cp = sub.add_parser("capture", help="パケット取込: status / list / prune (保存期間・合計容量を超えたものを削除)")
+    cp.add_argument("action", choices=("status", "list", "prune"))
+    cp.add_argument("--keep-hours", type=float, default=None, metavar="時間", help="prune: この時間より古いものを削除 (既定 CAPTURE_KEEP_HOURS / PCAP_KEEP_HOURS)")
+    cp.add_argument("--dry-run", action="store_true", help="prune: 削除せずに対象だけ表示")
+    gp = sub.add_parser("geoip", help="GeoIP (DB-IP Lite City + ASN, CC BY 4.0): update / status")
+    gp.add_argument("action", choices=("update", "status"))
+    gp.add_argument("--force", action="store_true", help="update: 最新でも取り直す")
+    sub.add_parser("capture-setup", help="(capture profile の起動時に自動) .env と profile の整合確認")
     sub.add_parser("help", help="この説明")
     return p
 
@@ -1745,7 +1976,8 @@ def main(argv):
     args = p.parse_args(argv)
     cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
             "grafana-guard": cmd_grafana_guard, "guard-health": cmd_guard_health, "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
-            "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test}
+            "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test,
+            "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup}
     if args.cmd not in cmds:
         p.print_help()
         return 0

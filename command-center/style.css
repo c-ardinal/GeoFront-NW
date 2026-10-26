@@ -298,6 +298,11 @@ ul { list-style: none; }
 .h-click:hover { text-decoration: underline; text-underline-offset: 3px; }
 .h-open { font: 600 var(--fs) var(--sans); color: var(--text-2); background: transparent; border: 0; padding: 0 var(--s1); cursor: pointer; line-height: 1; }
 .h-open:hover { color: var(--accent); }
+/* packet analysis entry in the GLOBAL TRAFFIC header; the GeoIP attribution (CC BY 4.0) sits in its caption */
+.h-act { font: 600 var(--fs-s)/1 var(--sans); color: var(--accent); background: transparent; border: 1px solid var(--frame); padding: 3px var(--s2); margin-right: var(--s1); cursor: pointer; }
+.h-act:hover { border-color: var(--accent); }
+.h-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.geo-note { margin-left: var(--s3); white-space: nowrap; }
 .g-ctl { position: absolute; right: var(--s3); top: var(--s3); display: flex; flex-direction: column; gap: var(--s1); z-index: 3; }
 .g-ctl button { width: 32px; height: 32px; font: 600 18px/1 var(--sans); color: var(--text); background: var(--overlay); border: 1px solid var(--frame); cursor: pointer; }
 .g-ctl button:hover { border-color: var(--accent); color: var(--accent); }
@@ -472,7 +477,8 @@ body.red-alert #topbar { border-top-color: var(--crit); }
   .h-open { position: relative; min-width: 44px; justify-content: center; font-size: 18px; }
   .h-open::after { content: ''; position: absolute; inset: -6px 0; } /* >= 44 px hit area inside the 36 px header */
   .g-ctl button { width: 44px; height: 44px; }
-  #theme-toggle, #back-live, .d-btn, .crumb, #bar-more { min-height: 44px; }
+  #theme-toggle, #back-live, .d-btn, .crumb, #bar-more, .h-act { min-height: 44px; }
+  .h-act { min-width: 44px; }
   #bar-more, #topbar.bar-s-back #back-live { min-width: 44px; }
   .d-btn { min-width: 44px; }
   #drawer { top: calc(var(--topbar-h, 56px) + var(--s2)); width: min(600px, calc(100vw - 2 * var(--s2))); }

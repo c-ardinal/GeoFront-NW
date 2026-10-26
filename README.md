@@ -4,6 +4,7 @@
 > `demo` profile が表示するメトリクス・フロー・ログは、すべて `demo-gen` が生成した**疑似データ**です。
 > 実機 (RTX1300 / WLX413 / WLX222) の観測値ではありません。国・都市・座標・ASN は架空の GeoIP 推定値で、
 > 宛先 IP はドキュメント用予約範囲 (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) のみを使います。
+> デモのフローと解析画面の pcap (`demo/demo-home.pcap`) も合成データです (生成スクリプト `demo/make_demo_pcap.py`)。
 
 仕様書 (要件定義・設計・試行計画 v1.0) の G1/G2 相当 — 収集 → 保存 → Grafana DB01-Wallboard — の挙動を、
 実機なしで確認するためのものです。v2 P1 から、同じ compose 一式を実機につないで常時運用する `prod` profile と、
@@ -18,13 +19,17 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 | `demo` | demo-gen の疑似データで動くデモ (これまでと同じ) |
 | `prod` | 実機: snmp-exporter (SNMPv3) と LAN からの syslog。対象は機器台帳 `inventory/devices.yaml` |
 | `testbed` | `prod` と一緒に使う疑似実機 (SNMPv3 で答える SNMP シミュレータ + syslog 送信器)。`testbed/testbed.env` で起動 |
-| `capture` | P3 (パケット取込) 用に名前だけ予約。まだサービスはありません |
+| `capture` | `prod` と一緒に使うパケット取込 (既定は無効、Linux ホストのみ)。dumpcap のリング → flowd → 実フロー + GeoIP。下記「パケット取込と解析」 |
 
 | サービス | イメージ | 役割 | ホスト公開 |
 |---|---|---|---|
 | proxy | caddy:2.11.7-alpine | 前段のリバースプロキシ。command-center を `/`、Grafana を `/grafana/` で配信。認証の差し込み口 | `OBS_BIND:OBS_PORT` (既定 127.0.0.1:8080)、127.0.0.1:9090 (Prometheus 読み取り専用)、127.0.0.1:3000 (旧 Grafana URL の転送) |
 | command-center | nginx:1.29.2-alpine | 自作の司令室画面 (静的) と mask-api への中継 | なし (proxy 経由) |
-| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki/Alertmanager の応答中の IP/MAC をサーバ側で伏せる。書き込みは抑止 (silence) の作成・延長・解除だけ (許可リスト) | なし |
+| mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki/Alertmanager の応答中の IP/MAC をサーバ側で伏せる。パケット解析 API (`/pcap/`、伏せ字済み)。書き込みは抑止 (silence) の作成・延長・解除と pcap のアップロード・削除だけ (許可リスト) | なし |
+| analyzer | python:3.12-slim + tshark 4.4 (Debian, 自作) | パケット解析の隔離環境。ネットワークなし・読み取り専用・非 root・CPU/メモリ/時間の上限・1 リクエスト 1 プロセス・同時実行数の上限。mask-api と flowd から Unix ソケットでだけ使う | なし (ネットワーク自体がない) |
+| flowd-demo (`demo`) / flowd (`capture`) | python:3.12-slim + maxminddb (自作) | pcap (デモ: 合成 pcap の繰り返し再生 / capture: リングファイル) から 5-tuple のフロー集計 → `obs_flow_bytes_total`。GeoIP (DB-IP Lite)、ホスト名 (台帳・DHCP・逆引き)、キャプチャの状態 | なし |
+| capture (`capture`) | python:3.12-slim + dumpcap 4.4 (自作) | host network で LAN 側インターフェースを dumpcap で取り込む (NET_RAW / NET_ADMIN だけ、読み取り専用 root)。上限付きリング | なし (host network。ポートは開かない) |
+| testbed-traffic (`testbed`) | python:3.12-slim | ドキュメント用アドレス宛ての合成トラフィック (capture の経路を Linux 上で試す用) | なし |
 | alertmanager | prom/alertmanager:v0.34.1 | Prometheus の全アラートの通知: 重大度ごとの送り先と再通知、復旧通知、抑止 (silence) / 確認 (ACK) | なし |
 | notify-relay | python:3.12-slim (自作, 標準ライブラリのみ) | Alertmanager から受けて、日本語・伏せ字の通知文をメール / Slack / Discord / LINE / Webhook に送り、結果を Loki に記録。ACK の自動解除 | なし |
 | prometheus | prom/prometheus:v3.6.0 | SNMP/フロー/自己監視のスクレイプ (15s)、アラートルール | なし (proxy の :9090 経由で読み取りのみ) |
@@ -38,7 +43,7 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 | demo-setup / prod-setup | tools (自作) | 起動時に 1 回だけ動き、profile に合った scrape 対象を生成して終了 | なし |
 | tools | python:3.12-slim + PyYAML (自作) | `docker compose run --rm tools <コマンド>` の初期設定・確認・バックアップ | なし |
 
-既定ではすべて 127.0.0.1 にだけ bind します。host network は使いません。
+既定ではすべて 127.0.0.1 にだけ bind します。host network を使うのは `capture` profile の capture サービスだけです (既定では動きません)。
 
 運用設定 (全サービス): healthcheck、`restart: unless-stopped` (一回だけ動く setup / tools は除く)、メモリ / CPU 上限 (Raspberry Pi 4 4GB を想定した既定値。`.env` の `PROM_MEM` などで変更)、コンテナログのローテーション (json-file、`LOG_MAX_SIZE` 既定 10m × `LOG_MAX_FILE` 既定 3)、イメージはタグ + digest 固定 (どれも linux/amd64 と linux/arm64 の両方がある multi-arch イメージ。自作イメージの元の python:3.12-slim も digest 固定)。
 
@@ -147,7 +152,7 @@ docker compose run --rm tools check
 - 機器台帳を変えたら `docker compose run --rm tools targets` (Prometheus の scrape 対象と、syslog の送信元 → 機器名の対応表を作り直します。再起動は不要)。`docker compose up` のたびにも `prod-setup` が作り直します。
 - SNMP: `snmp/auths.yml` が auth のテンプレートです。`yamaha_v3` (SNMPv3 authPriv、既定 SHA / AES) と `yamaha_v2c` (`SNMP_COMMUNITY` が空なら無効)。方式は `.env` から埋め込み、SNMPv3 のユーザー名とパスワードは snmp_exporter が起動時に環境変数から読みます (生成物にも書きません)。SNMPv2c のコミュニティは snmp_exporter が環境変数を展開しない項目のため、生成物 (generated ボリューム内の auths.yml、権限 600) に値を書きます (リポジトリやログには出しません)。モジュールは snmp_exporter 同梱の `if_mib` + `system` (IF-MIB / SNMPv2-MIB) です。
 - syslog: `.env` の `SYSLOG_BIND` をこのホストの LAN 側 IP (または `0.0.0.0`) にすると、UDP/TCP `SYSLOG_PORT` (既定 514) で機器から受けます。既定の 127.0.0.1 では LAN から届きません。送信元は機器台帳の `address` で機器名 (Loki の `host`) に対応付けます (IP なら送信元 IP、DNS 名なら送信元の逆引き名)。`host` は送信元アドレスだけで決め、syslog ヘッダのホスト名は使いません (LAN 上の誰でもヘッダに `rtx1300` と書けるため)。台帳に無い送信元は `host="unknown"` で、送信元 IP を `src_ip` ラベルに入れます (画面では伏せ字)。`.env` の `SYSLOG_DROP_UNKNOWN=1` で台帳に無い送信元の行を捨てます。ヘッダのホスト名が機器名と違うときは本文の先頭に残します (ホスト名を省いた RFC3164 で本文の先頭語が欠けることもありません)。`tools check` の syslog 受信待ちも、この送信元アドレスで決まった `host` で数えます。UDP の送信元アドレス自体は偽装できるので、これは認証ではなく取り違えの防止です。台帳の `address` は IP で書くのを勧めます。DNS 名で書くと逆引き名で照合するため、DHCP でホスト名を名乗れる端末に機器名を騙られる余地があります。インターネットから届くホストで `SYSLOG_BIND=0.0.0.0` にする場合は `SYSLOG_DROP_UNKNOWN=1` にし、FW で送信元を絞ってください。Alloy は送信元の逆引き名をキャッシュするため、機器の `address` は固定 IP (DHCP 予約) で書くのが確実です。DNS 名で書いた機器の IP が変わったら `docker compose restart alloy` してください (testbed の疑似機器を作り直したときも同じ。compose には疑似機器の更新時に Alloy も再起動する指定を入れてあります)。
-- WLX の無線クライアント数 (`demo_wlan_clients`) とフロー (`/flows`) はデモ専用です。YAMAHA の独自 MIB の OID は確認できるまで推測で入れません。prod では command-center の WIRELESS CLIENTS は不明 (—)、通信先 (地球儀・TOP DESTINATIONS / SOURCES) はデータなしになります (フロー収集は P3)。
+- WLX の無線クライアント数 (`demo_wlan_clients`) とデモのフローはデモ専用です。YAMAHA の独自 MIB の OID は確認できるまで推測で入れません。prod では command-center の WIRELESS CLIENTS は不明 (—)。通信先 (地球儀・TOP DESTINATIONS / SOURCES) は `capture` profile を有効にすると実フローで動きます (下記「パケット取込と解析」)。無効のままなら「no flow source configured」の表示です。
 - WAN: 台帳でルーターに `wan_interface: <ifName>` (例 `lan2`、1 台だけ) を書くと、command-center の WAN パネル・スパークライン・詳細画面 (見出し `WAN · <機器名> <ifName>`) とアラート `WanHighUtilization` (生成される `wan-rules.yml`) がそのインターフェースを使います。`tools init` が rtx の機器で尋ね (非対話は `--wan rtx1300:lan2`)、`tools check` はその ifName が実機の IF-MIB にあるかを確かめます。書かなければ WAN パネルは「WAN interface not configured」と表示し、アラートも作りません。デモは従来どおり rtx1300 の lan2 です。Grafana の Wallboard (`dashboards/wallboard.json`) の WAN パネルは rtx1300 lan2 のままです。
 
 ### 機器側の設定例 (手作業で投入。ツールからは機器の設定を変更しません)
@@ -213,6 +218,7 @@ Alloy は syslog を raw で受け (PRI から重要度・facility だけを取�
 ```sh
 docker compose run --rm tools backup                 # backups/obs-backup-<日時 (JST、.env の TZ で変更)>.tar.gz
 docker compose run --rm tools backup --include-env   # .env (秘密値) も含める。取り扱い注意
+docker compose run --rm tools backup --include-captures  # キャプチャのリングとアップロードした pcap も (既定は含めない)
 ```
 
 1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
@@ -224,7 +230,7 @@ docker compose run --rm tools restore backups/... --with-config                 
 docker compose up -d
 ```
 
-restore は対象のサービスが動いていると止めるよう案内して何もしません。ボリュームの中身を消してアーカイブの内容に置き換え、各サービスの実行ユーザーに所有者を合わせます (空の新しいボリュームにも戻せます)。往復テスト (testbed で backup → ボリューム削除 → restore → 同じ時刻の値と Grafana の印のフォルダが一致) は確認済みです。
+キャプチャ / アップロードを含むアーカイブ (`backup --include-captures`) を戻すときは、`docker compose stop capture flowd flowd-demo mask-api` も先に止めます (動いていれば restore は何も消さずに止まります)。restore は対象のサービスが動いていると止めるよう案内して何もしません。ボリュームの中身を消してアーカイブの内容に置き換え、各サービスの実行ユーザーに所有者を合わせます (空の新しいボリュームにも戻せます)。往復テスト (testbed で backup → ボリューム削除 → restore → 同じ時刻の値と Grafana の印のフォルダが一致) は確認済みです。
 
 ## profile を付けずに起動した場合
 
@@ -281,7 +287,77 @@ testbed (`docker compose --env-file testbed/testbed.env up -d --build`) では `
 
 Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (デモは rtx1300 lan2) から setup が生成する記録ルール `obs_wan:ifHCInOctets:rate1m` / `obs_wan:ifHCOutOctets:rate1m` を表示します (WAN 未設定ならデータなし)。
 
+## パケット取込と解析 (P3)
+
+### 何ができるか
+
+- **解析画面**: コマンドセンターの GLOBAL TRAFFIC 見出しの「解析」、または通信先 / 送信元の詳細 (ドロワー) の「この通信のパケット」で開きます (後者は表示中のフローのアドレスを表示フィルタにし、capture 中は直近 15 分のリングファイルを選びます)。
+  - ファイル: キャプチャのリングファイル (記録中のものは閉じてから)、アップロードした pcap / pcapng (127.0.0.1 公開のときだけ。サイズ上限・拡張子・先頭のマジックバイトを確認し、tshark で読めないものは捨てます)、デモの合成 pcap
+  - パケット一覧 (仮想スクロール・500 件ずつ取得。矢印キー / PageUp / PageDown / Home / End)、Wireshark の表示フィルタ (サーバ側の tshark に渡す。エラーは tshark の文言で表示)、パケット詳細 (プロトコル階層ツリー) と 16 進 + ASCII (選んだフィールドとバイトが相互にハイライト)
+  - 統計: プロトコル階層、会話 (IP / TCP / UDP)、端点 (IP / Ethernet)、I/O グラフ (パケット数・バイト数)、DNS 問い合わせ名 / TLS SNI / HTTP Host。行を選ぶとその条件で絞り込み。一覧と統計は CSV (伏せ字のまま) で保存できます
+- **実フロー**: `capture` profile では、dumpcap のリングファイルが閉じるたびに flowd が 5-tuple のフロー集計を作り、`obs_flow_bytes_total{src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction}` (デモの合成フローと同じ形) として Prometheus に出します。地球儀・通信先パネルはこれで動き、`/obs/config.json` の `flows_configured` が true になります。バイトはキャプチャ時刻 + `FLOWD_DELAY_S` (既定 90 秒) に計上するので、ファイル単位でまとめて届いても速度の表示はなめらかです。
+  - 方向: `OBS_LAN_CIDRS` (既定は全プライベート範囲) の側が LAN。LAN のホストが送ったものが outbound、受けたものが inbound。LAN 内どうし・ブロードキャスト / マルチキャストは通信先に数えません
+  - 送信元の名前 (`src_host`): 機器台帳 → DHCP で見えたホスト名 (MAC 経由) → 逆引き (`FLOWD_RDNS=1` のとき) → アドレス (IPv4 は画面では伏せ字、IPv6 は flowd の時点で /64 + `::x` に伏せる)
+  - 地理: DB-IP Lite (City + ASN)。プライベート・ドキュメント用・予約アドレスと、DB に結果がないものは `Unknown` (緯度経度は空、推定で置かない)。DB がなくてもフローは動きます (国は Unknown)
+  - 系列数の上限 `FLOWD_MAX_SERIES` (既定 3000、超えた分はホスト・方向ごとの `other` にまとめる)、1 時間通信のない系列は消します
+- **鮮度と状態**: COLLECTION HEALTH に「packet capture」(DOWN / 取りこぼしあり DROP / UP と 5 分間の NIC 受信ドロップ数) と「GeoIP DB」(経過日数) の行。キャプチャ停止・取りこぼし・リングの容量超過・GeoIP が 45 日より古い (capture のとき) は鮮度バッジの DEGRADED の理由になり、キャプチャが止まると通信先のパネルは STALE (flow source DOWN) になります。アラート (通知あり、warning): CaptureDown / CaptureNicDrops / CaptureDumpcapDrops / GeoIPStale / FlowSourceStale / FlowFilesSkipped
+- **取りこぼしの数え方 (正直な説明)**: dumpcap のリングファイルには統計が入らず、dumpcap 自身やカーネルのキャプチャバッファでの取りこぼし (`obs_capture_dumpcap_dropped_total`) はセッションが終わったとき (再起動・停止) にしか分かりません (停止時の最終統計も含め、合計は status.json に残してコンテナを作り直しても引き継ぎます)。動作中に分かるのは、キャプチャするインターフェースのカーネルの受信ドロップ (`obs_capture_nic_rx_dropped_total`、NIC / ドライバで落ちた分) だけです
+- **flowd の取りこぼし対策**: analyzer にはフロー集計専用の枠があり、画面の解析が混んでもフロー集計は待たされません。analyzer が混雑・時間切れ・停止のときはリングファイルを後で取り直し (5 回まで)、それでも取れなかったものは `obs_flowd_files_total{result="skipped"}` に数えてアラート (FlowFilesSkipped) にします
+
+### 伏せ字と安全
+
+- 解析画面のすべて (一覧・詳細ツリー・16 進・統計・CSV・tshark のエラー文) で IP / MAC を伏せます。**アドレスの型を持つフィールド** (送信元・宛先・`ip.src` など) は IPv4 `a.b.c.x`、IPv6 /64 + `::x`、MAC `aa:bb:cc:xx:xx:xx` (IPv6 に埋め込まれた IPv4 は `::ffff:192.168.100.x`、NAT64 `64:ff9b::…`、6to4 / Teredo は `2002::x` / `2001::x`) で、不透明なトークン (`~xxxxxxxxxxxx`、Prometheus の伏せ字と共通) が付き、行の区別と絞り込みにだけ使えます (統計の一覧では同じ伏せ字のアドレスを `#1` `#2` … で区別)
+- **それ以外の文字列** (DNS / SNI / HTTP の名前、Info 欄、値のないツリーの見出し、ファイル名、エラー文、flowd の送信元名) にアドレスらしいものは一部も残しません: 数字を含む 16 進・数字の並びはすべて `x` (順序を問わないので逆順の DNSBL 名 `23.100.168.192.zen.spamhaus.org` も `x.x.x.x.zen.spamhaus.org`、全角やアラビア数字など Unicode の数字も)、記号や端に挟まれた 16 進文字だけの語は 1 文字でも `x` (`2001-db8-1-2-a-b-c-d` → `x-x-x-x-x-x-x-x`、`ESP_DDEEFF` → `ESP_x`、`aa bb cc` → `x x x`)、逆引き名は接尾辞の前を丸ごと `x` (`x.in-addr.arpa`、`x.ip6.arpa`)、`==` で終わる base64 の並び (`wKhkFw==`) も `x` です。普通の単語も伏せ過ぎます (`a` `bad` `cafe` → `x`、`phone-a` → `phone-x`)。`==` のない base64 / base64url (MAC の 6 バイトなど) は英数字の語と区別できないため伏せません。flowd の DHCP 名・逆引き名、キャプチャするインターフェース名 (`enx02005e100017` のように MAC を含む名前 → `enx`。画面・`obs_capture_up{iface}`)、キャプチャのフィルタとエラー文も同じ規則 (`android-0a1b2c3d` → `android-x`)。機器台帳の名前は運用者が付けたものなのでそのまま出します。`tools capture status` / `tools check` は運用者のコンソール向けに生の値を出し、その旨を表示します。アップロードしたファイルの名前はこの規則で伏せて保存し、ファイルの ID は名前と無関係な乱数です。伏せ字を外す操作は認証層の導入まで用意しません
+- トークンは mask-api のメモリ上の表 (最大 65536 件、最近使われていないものから消える。キャッシュした一覧・統計を返すときはそこに出ているトークンを登録し直す) で引くので、長く開いたままの画面や再起動後は古いトークンでの絞り込みが「期限切れ」になります (ページを読み直す)。CSV の書き出しでは `=` `+` `-` `@` タブ・CR で始まるセルの先頭に `'` を付けます (表計算ソフトの数式として実行されないように)
+- 16 進表示は**既定ですべて伏せ**、表示してよいヘッダのフィールド (ポート・フラグ・長さ・種別コード・TTL など。名前は数字や `:` を含まない場合だけ) のバイトだけを見せます。しかもそのフィールドのバイトがフレームのその位置のバイトと一致する場合に限ります (再構成・展開されたデータのフィールドは位置が別のバッファを指すので、フレームのバイトを見せる根拠にしない)。ペイロード・バイト列・アドレス・チェックサム・不明なフィールドは `xx` のままです
+- 表示フィルタは「隠れた部分を試す」ことに使えるので**許可リスト方式** (既定で拒否) です: 使えるのはプロトコル名 (有無)、決めておいた数値のフィールド (ポート・フラグ・長さ・種別・TTL・時刻など。`== != < > <= >=` と `in {…}`・範囲)、名前のフィールド (`dns.qry.name`・`tls.handshake.extensions_server_name`・`http.host` など。`== != contains`、値はホスト名の形で、`.` `-` `_` で区切った各部分に g〜z の英字を含むものだけ = 16 進や数字だけの部分は不可。さらに上の規則で画面に伏せ字で出る値 (`hostc0a86417` など) は大文字・小文字を変えても不可)、アドレスのフィールド (`ip.addr`・`ipv6.addr`・`eth.addr` など) はトークン付きの値 (同じアドレスの種類) との `== / != / in {…}` だけ。`&&` `||` `!` と括弧で組み合わせます。それ以外 (チェックサム・バイト列・内容・先頭が `.` のフィールド参照・スライス・関数・演算・フィールドどうしの比較・正規表現・未知の記号) は書けません。受け付けたフィルタは解析して書き直したものだけを tshark に渡します。フィールドは 32 種類・512 文字まで、tshark の実行時間は `PCAP_ANALYZE_TIMEOUT` (既定 60 秒) まで、解析の要求はクライアントごとに `PCAP_READS_PER_MIN` (既定 120 / 分) まで
+- tshark は analyzer コンテナの中でだけ動きます: `network_mode: none`、読み取り専用のルート、非 root (uid 10001)、全 capability を落とす、`no-new-privileges`、メモリ・CPU・プロセス数の上限、tshark 1 回ごとに時間・メモリ・CPU 時間の上限とファイル書き込み禁止、同時実行は `PCAP_ANALYZE_CONCURRENCY` (既定 1、超えたら 429) + フロー集計専用の 1 本。メモリは analyzer の上限 `ANALYZER_MEM` (既定 896m) が (同時実行数 + 1) × `PCAP_ANALYZE_PROC_MB` (既定 384) + 約 60 MB を収めるように設定してください。キャプチャファイルは読み取り専用で渡し、フィルタは `-Y` の値としてだけ (引数の配列、シェルを通さない) 渡します。名前解決はしません (`-n`)
+- 書き込み (アップロード・削除) は抑止 (silence) と同じ規則です: 127.0.0.1 公開のときだけ (LAN 公開中は proxy と mask-api の両方が 403)、同じオリジン + `X-Obs-Csrf`、回数制限
+
+### 有効にする (Linux ホストのみ)
+
+```sh
+# .env (tools init の後に追記):
+#   COMPOSE_PROFILES=prod,capture
+#   OBS_CAPTURE=1
+#   CAPTURE_IFACE=eth0          # LAN のトラフィックが見えるインターフェース (ミラーポートにつないだ NIC など)
+#   CAPTURE_BPF="not port 22"   # 任意 (tcpdump の書式)
+#   OBS_LAN_CIDRS=192.168.100.0/24
+docker compose up -d
+docker compose run --rm tools geoip update      # DB-IP Lite City + ASN (約 65 MB のダウンロード。月 1 回)
+docker compose run --rm tools capture status    # 動作中・インターフェース・リング・受信 / 欠落
+docker compose run --rm tools check             # 「パケット取込とフロー / GeoIP」の節も
+```
+
+- **ミラーポートの設定は手作業です**: スイッチ / ルーターのポートミラーリング (または LAN 側の通信が通る位置へのつなぎ替え) は仕様 G4 の承認を得てから、機器の管理画面・コンソールで人が行います。このツールは機器の設定を一切変更しません
+- **Windows / Docker Desktop では使えません**: Docker Desktop (Windows / macOS) と WSL ではコンテナの host network が VM のものなので LAN のパケットは見えません。capture サービスはそれを検出して理由を表示して終了します (`restart: on-failure:3`、`tools capture status` にも表示)。`CAPTURE_ALLOW_VM=1` は VM の中で経路だけを試すためのもので、LAN の監視にはなりません
+- profile と `.env` は揃えてください: `capture` profile なのに `OBS_CAPTURE=1` や `CAPTURE_IFACE` がない、または `prod` なしの場合は、起動時の確認 (capture-setup) が理由を出して止めます
+- capture サービスは host network・NET_RAW / NET_ADMIN だけ・読み取り専用のルートで動き、書くのはリング用ボリュームだけです。ポートは開きません (状態は status.json 経由で flowd が出します)
+- testbed で経路を試す (Linux ホスト): `COMPOSE_PROFILES=prod,testbed,capture OBS_CAPTURE=1 CAPTURE_IFACE=br-<testbed ネットワークの ID 先頭 12 文字> docker compose --env-file testbed/testbed.env up -d --build`。`testbed-traffic` がドキュメント用アドレスへ合成トラフィックを流し、リング → flowd → Prometheus → 画面まで動きます (ドキュメント用アドレスなので国は Unknown)
+
+### 捕捉データの扱い・保存期間
+
+- 取り込むのはパケットそのもの (既定 `CAPTURE_SNAPLEN=1514` バイト) です。HTTPS などの暗号化された中身は見えず、復号もしません (鍵を扱う機能はありません)。平文のプロトコル (HTTP・DNS など) は中身が残るので、家族・同居人など LAN の利用者に取り込みを知らせてから有効にしてください。必要以上に取らないよう `CAPTURE_BPF` で絞り、`CAPTURE_SNAPLEN` を小さくできます (小さくすると TLS SNI や HTTP Host が欠けることがあります)
+- **伏せ字でも分かること**: DNS 問い合わせ名・TLS SNI・HTTP Host の一覧と会話の表は、アドレスを伏せても「どの端末 (トークン / 送信元名) がどのサイトを見たか」を表します。認証がない今は、LAN に公開すると LAN の誰でもこれを見られます。認証の導入までは `OBS_BIND=127.0.0.1` (このホストだけ) で使うことを強く勧めます
+- 完全なパケットは長期保存しません: リングは `CAPTURE_FILES` (既定 20) × `CAPTURE_FILE_MB` (既定 20 MB) で古いものから上書き、少なくとも `CAPTURE_FILE_SECONDS` (既定 60 秒) ごとに次のファイルへ切り替え、`CAPTURE_KEEP_HOURS` (既定 24 時間) より古いファイルは削除。アップロードは 1 件 `PCAP_UPLOAD_MAX_MB` (既定 50 MB)、合計 `PCAP_UPLOADS_TOTAL_MB` (既定 200 MB。超えると古いものから削除)、`PCAP_KEEP_HOURS` (既定 24 時間) で削除。Prometheus に残るのはフローごとのバイト数だけです
+- 手で消す: `docker compose run --rm tools capture prune` (保存期間・合計上限を超えたもの。`--keep-hours N` で期間を指定、`--dry-run` で確認だけ)、`tools capture list` で一覧
+- バックアップ: 既定では含めません。`tools backup --include-captures` で含めます (通信内容そのものなので取り扱い注意)。キャプチャ中でも取れます: 閉じたリングファイルとアップロードだけを先に出力先の一時ディレクトリへ写してから固めます (書き込み中のファイル・途中のアップロード・写す間に消えたファイルは含めません。一時的に同じ大きさの空きが要ります)
+- アップロードは、ファイルの最後まで tshark で読めた場合だけ受け付けます (途中で切れた・壊れたレコードがあれば 400、`PCAP_VALIDATE_TIMEOUT` (既定 180 秒) 以内に読み終わらなければ 413。どちらも既存のアップロードは消しません)
+- アップロード / キャプチャのボリュームの所有者と権限は、起動のたび (setup-check) と `tools init` で直します (先に tools がボリュームを作ると root の持ち物になり、mask-api が書けないため)
+
+### GeoIP (DB-IP Lite)
+
+国・都市・緯度経度は [DB-IP](https://db-ip.com) の **IP to City Lite**、ASN は **IP to ASN Lite** (MaxMind DB 形式) を使います。ライセンスは **Creative Commons Attribution 4.0 (CC BY 4.0)** で、表示義務 (「IP Geolocation by DB-IP」) を画面 (地球儀の注記、解析画面の下部) とこの README に記載しています。MaxMind GeoLite2 はアカウントとライセンスキーが必要なため既定にしていません。
+
+- `tools geoip update`: `https://download.db-ip.com/free/dbip-{city,asn}-lite-YYYY-MM.mmdb.gz` を今月 → 先月の順に取得して `geoip` ボリュームに置きます (検証してから差し替え。失敗しても前の版はそのまま)。flowd は 1 分以内に読み込み直します。月に 1 回の更新を推奨 (cron など)
+- `tools geoip status`: 版 (月) と経過日数。45 日を超えると check で注意、画面で DEGRADED の理由になります
+- 版とビルド日時は Prometheus の `obs_geoip_db_info` / `obs_geoip_db_build_timestamp_seconds` に出ます (地球儀の注記と解析画面に表示)
+
+### デモ
+
+demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分。DHCP でホスト名を名乗る 6 台、ARP、DNS、NTP、TLS ClientHello の SNI、HTTP の Host、ドキュメント用アドレス宛ての通信) を繰り返し再生して、地球儀と通信先パネルのフローを作ります (`DEMO_PCAP_SCALE` 倍に拡大。ドキュメント用アドレスにはデモ用の架空の位置 `demo/demo-geo.json` を付け、203.0.113.50 / .60 などは Unknown のまま)。`DEMO_PCAP_REPLAY=0` にすると以前の demo-gen の合成フローに戻ります。解析画面ではこの pcap を開けます。pcap は `python demo/make_demo_pcap.py` で同じものを作り直せます (`--check` で一致を確認)。
+
 ## 既知の制限 (P1 時点)
 
 - 実機 (RTX/WLX) では未検証です。SNMPv3 の方式・syslog の形式・機器側コマンドは実機で確かめる必要があります。
-- command-center は proxy の `/obs/config.json` (setup が生成: profile・フロー収集の有無・台帳の機器名と種別。アドレスや資格情報は含まない) で動作を切り替えます。60 秒ごとに取り直し、内容が変わっていれば (初回の取得に失敗していた、`tools targets` で台帳を変えた など) 画面を読み込み直します。調査中 (INVESTIGATE) は読み込み直さず、WALLBOARD に戻ったとき (Esc / BACK TO LIVE / 無操作) に読み込み直します。prod では `DEMO DATA / SYNTHETIC` 表示を出さず、機器一覧は台帳の機器、通信先 (地球儀・TOP DESTINATIONS / SOURCES・UNKNOWN GEO と詳細画面) は「no flow source configured (P3)」の表示になり、フロー未設定は鮮度バッジの DEGRADED / STALE の理由に数えません (設定済みのソースが止まった場合の STALE はこれまでどおり)。WIRELESS CLIENTS は prod では見出しが `MIB unconfirmed` になり、WLX ごとの値は不明 (—) で、0 は表示しません (鮮度バッジには影響しません)。
+- command-center は proxy の `/obs/config.json` (setup が生成: profile・フロー収集の有無・台帳の機器名と種別。アドレスや資格情報は含まない) で動作を切り替えます。60 秒ごとに取り直し、内容が変わっていれば (初回の取得に失敗していた、`tools targets` で台帳を変えた など) 画面を読み込み直します。調査中 (INVESTIGATE) は読み込み直さず、WALLBOARD に戻ったとき (Esc / BACK TO LIVE / 無操作) に読み込み直します。prod では `DEMO DATA / SYNTHETIC` 表示を出さず、機器一覧は台帳の機器、通信先 (地球儀・TOP DESTINATIONS / SOURCES・UNKNOWN GEO と詳細画面) は「no flow source configured (capture off)」の表示になり (capture profile を有効にすると実フロー)、フロー未設定は鮮度バッジの DEGRADED / STALE の理由に数えません (設定済みのソースが止まった場合の STALE はこれまでどおり)。WIRELESS CLIENTS は prod では見出しが `MIB unconfirmed` になり、WLX ごとの値は不明 (—) で、0 は表示しません (鮮度バッジには影響しません)。

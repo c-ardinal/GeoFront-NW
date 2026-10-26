@@ -61,6 +61,22 @@
 		respond @amLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中は抑止・確認の操作はできません (認証がありません)"\}` 403
 		reverse_proxy mask-api:8000
 	}
+	# Packet analysis for the command-center, through mask-api (pcap_api.py): reads (file list, packets, details, hex,
+	# statistics, filter checks) are masked; the only writes are uploading / deleting an uploaded pcap, checked by
+	# mask-api like the silences (same origin + X-Obs-Csrf, rate limit, size / magic bytes) and refused here as well
+	# while the screens are on the LAN.
+	handle /pcap/* {
+		@pcapLanWrite {
+			not method GET HEAD
+			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
+		}
+		header @pcapLanWrite Content-Type application/json
+		respond @pcapLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中は pcap のアップロード・削除はできません (認証がありません)"\}` 403
+		request_body {
+			max_size {$PCAP_UPLOAD_MAX_MB:50}MB
+		}
+		reverse_proxy mask-api:8000
+	}
 	redir /grafana /grafana/ 308
 	handle /grafana/* {
 		# Published beyond localhost, every /grafana/ request is first asked of `grafana-guard` (internal network only):

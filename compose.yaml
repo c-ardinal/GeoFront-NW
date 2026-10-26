@@ -5,11 +5,12 @@ name: yamaha-observatory-trial
 #   prod     real devices: snmp-exporter (SNMPv3) + syslog from the LAN, targets from inventory/devices.yaml
 #   testbed  with prod: simulated devices (snmpsim SNMPv3 + syslog sender) to try the prod path without hardware
 #            (docker compose --env-file testbed/testbed.env up -d)
-#   capture  reserved for P3 (packet capture); no services yet
-# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay) run in
-# every profile.
+#   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
+#            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; README "パケット取込")
+# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
+# run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
-# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|help>
+# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|help>
 # Notifications: alerting/receivers.yaml (destinations, routes per severity) + secrets in .env -> the setup step writes the
 # Alertmanager config and the notify-relay config (0600) into the `generated` volume. Demo: only the local demo sink.
 #
@@ -45,6 +46,13 @@ x-tools-env: &tools-env
   SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
   OBS_GRAFANA_ANON_ON_LAN: ${OBS_GRAFANA_ANON_ON_LAN:-0}
   TZ: ${TZ:-Asia/Tokyo}
+  OBS_CAPTURE: ${OBS_CAPTURE:-0}
+  DEMO_PCAP_REPLAY: ${DEMO_PCAP_REPLAY:-1}
+  CAPTURE_IFACE: ${CAPTURE_IFACE:-}
+  CAPTURE_BPF: ${CAPTURE_BPF:-}
+  CAPTURE_KEEP_HOURS: ${CAPTURE_KEEP_HOURS:-24}
+  PCAP_KEEP_HOURS: ${PCAP_KEEP_HOURS:-24}
+  PCAP_UPLOADS_TOTAL_MB: ${PCAP_UPLOADS_TOTAL_MB:-200}
 
 # Notification destinations' settings and secrets: only for the steps that generate the relay config (prod-setup, tools),
 # not for the long-running tools services.
@@ -81,6 +89,23 @@ x-tools: &tools
 x-setup-done: &setup-done
   setup-check: {condition: service_completed_successfully}
 
+# flowd (capture profile) and flowd-demo (demo): capture files -> obs_flow_bytes_total, through the analyzer sandbox
+x-flowd: &flowd
+  <<: *ops
+  build:
+    context: ./flowd
+    additional_contexts: *python-base
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9100/health', timeout=3)"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+  mem_limit: ${FLOWD_MEM:-192m}
+  cpus: ${FLOWD_CPUS:-0.5}
+
 services:
   # ---- one-shot setup per profile ------------------------------------------------------------
   demo-setup:
@@ -100,10 +125,30 @@ services:
   # every profile: fails `up` with a clear message when no profile (so no setup) was chosen
   setup-check:
     <<: *tools
-    build: ./tools
+    build:
+      context: ./tools
+      additional_contexts:
+        repo: ./  # only the files the selftest reads are used (tools/Dockerfile)
     command: [setup-check]
+    # also fixes the capture / upload volumes' owner and modes on every start (a volume first created by a tools run is
+    # root-owned: mask-api, as nobody, could not write uploads)
+    volumes:
+      - ./:/work
+      - generated:/generated
+      - capture-ring:/vol/capture
+      - pcap-uploads:/vol/uploads
     depends_on:
       demo-setup: {condition: service_completed_successfully, required: false}
+      prod-setup: {condition: service_completed_successfully, required: false}
+      capture-setup: {condition: service_completed_successfully, required: false}
+    restart: "no"
+
+  # capture profile: .env and profile must agree (OBS_CAPTURE=1, CAPTURE_IFACE); fails `up` with the reason otherwise
+  capture-setup:
+    <<: *tools
+    profiles: [capture]
+    command: [capture-setup]
+    depends_on:
       prod-setup: {condition: service_completed_successfully, required: false}
     restart: "no"
 
@@ -141,7 +186,10 @@ services:
 
   tools:
     <<: *tools
-    build: ./tools
+    build:
+      context: ./tools
+      additional_contexts:
+        repo: ./  # only the files the selftest reads are used (tools/Dockerfile)
     pull_policy: build
     profiles: [tools]
     environment:
@@ -153,6 +201,9 @@ services:
       - loki-data:/vol/loki
       - grafana-data:/vol/grafana
       - alertmanager-data:/vol/alertmanager
+      - capture-ring:/vol/capture
+      - pcap-uploads:/vol/uploads
+      - geoip:/vol/geoip
     restart: "no"
 
   # ---- demo ---------------------------------------------------------------------------------------
@@ -176,6 +227,25 @@ services:
       retries: 3
     mem_limit: ${DEMO_GEN_MEM:-128m}
     cpus: ${DEMO_GEN_CPUS:-0.5}
+
+  # synthetic flows from the bundled synthetic pcap (DEMO_PCAP_REPLAY=1, default), replayed in a loop and scaled up so
+  # the globe looks like demo-gen's; its documentation addresses get demo-gen's demo locations (demo/demo-geo.json)
+  flowd-demo:
+    <<: *flowd
+    profiles: [demo]
+    environment:
+      FLOWD_REPLAY: demo:demo-home.pcap
+      FLOWD_REPLAY_SCALE: ${DEMO_PCAP_SCALE:-1500}
+      FLOWD_DEMO_GEO: /demo/demo-geo.json
+      OBS_LAN_CIDRS: 192.168.100.0/24
+    volumes:
+      - ./demo:/demo:ro
+      - geoip:/geoip:ro
+      - generated:/etc/obs-generated:ro
+      - analyzer-run:/run/analyzer
+    depends_on:
+      <<: *setup-done
+      analyzer: {condition: service_healthy}
 
   # ---- prod collectors ----------------------------------------------------------------------------
   snmp-exporter:
@@ -202,6 +272,62 @@ services:
       retries: 3
     mem_limit: ${SNMP_EXPORTER_MEM:-96m}
     cpus: ${SNMP_EXPORTER_CPUS:-0.5}
+
+  # ---- capture (with prod; Linux host only) ---------------------------------------------------------
+  # Host network (it must see the LAN interface) with only NET_RAW / NET_ADMIN; read-only root, writes only its ring
+  # volume. Exits with the reason (and is not restarted more than 3 times) on Docker Desktop / WSL, a missing
+  # interface or a BPF filter that does not compile; status in `tools capture status` and COLLECTION HEALTH.
+  capture:
+    <<: *ops
+    profiles: [capture]
+    build:
+      context: ./capture
+      additional_contexts: *python-base
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp:size=8m]
+    restart: on-failure:3
+    environment:
+      CAPTURE_IFACE: ${CAPTURE_IFACE:-}
+      CAPTURE_BPF: ${CAPTURE_BPF:-}
+      CAPTURE_SNAPLEN: ${CAPTURE_SNAPLEN:-1514}
+      CAPTURE_FILE_MB: ${CAPTURE_FILE_MB:-20}
+      CAPTURE_FILES: ${CAPTURE_FILES:-20}
+      CAPTURE_FILE_SECONDS: ${CAPTURE_FILE_SECONDS:-60}
+      CAPTURE_KEEP_HOURS: ${CAPTURE_KEEP_HOURS:-24}
+      CAPTURE_ALLOW_VM: ${CAPTURE_ALLOW_VM:-0}
+    volumes:
+      - capture-ring:/capture
+    depends_on:
+      capture-setup: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/capture/status.json')); assert s['running'] and time.time()-s['updated']<30"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: ${CAPTURE_MEM:-128m}
+    cpus: ${CAPTURE_CPUS:-0.5}
+
+  flowd:
+    <<: *flowd
+    profiles: [capture]
+    environment:
+      OBS_LAN_CIDRS: ${OBS_LAN_CIDRS:-}
+      FLOWD_DELAY_S: ${FLOWD_DELAY_S:-90}
+      FLOWD_RDNS: ${FLOWD_RDNS:-0}
+      FLOWD_MAX_SERIES: ${FLOWD_MAX_SERIES:-3000}
+    volumes:
+      - capture-ring:/capture:ro
+      - geoip:/geoip:ro
+      - generated:/etc/obs-generated:ro
+      - analyzer-run:/run/analyzer
+    depends_on:
+      <<: *setup-done
+      analyzer: {condition: service_healthy}
 
   # ---- testbed (simulated devices; use with prod) -------------------------------------------------
   testbed-rtx:
@@ -243,6 +369,20 @@ services:
     healthcheck: *testbed-health
     mem_limit: 160m
     cpus: 0.5
+
+  # synthetic traffic to documentation addresses, for the capture path on a Linux host (capture CAPTURE_IFACE = the
+  # compose network's bridge). Nothing answers it.
+  testbed-traffic:
+    <<: *ops
+    profiles: [testbed]
+    image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+    command: [python, -u, /demo/traffic.py]
+    user: nobody
+    read_only: true
+    volumes:
+      - ./demo:/demo:ro
+    mem_limit: 48m
+    cpus: 0.1
 
   # mock notification receivers (fake SMTP / Slack / Discord / LINE / webhook): nothing leaves the compose network.
   # testbed/receivers.yaml + the dummy secrets in testbed/testbed.env point every receiver here.
@@ -395,14 +535,66 @@ services:
       # 1 = also allow them for X-Obs-Role operator / admin, set by an authentication layer in the proxy (caddy/Caddyfile)
       OBS_OPS_TRUST_ROLE: ${OBS_OPS_TRUST_ROLE:-0}
       OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}  # its host is one of the origins allowed to write
-    depends_on: [prometheus, loki]
+      # /pcap/: packet analysis through the analyzer; uploads are the only other writes (same rules as silences)
+      PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
+      PCAP_UPLOADS_TOTAL_MB: ${PCAP_UPLOADS_TOTAL_MB:-200}
+      PCAP_KEEP_HOURS: ${PCAP_KEEP_HOURS:-24}
+      ANALYZER_TIMEOUT: ${PCAP_ANALYZE_TIMEOUT:-60}
+      ANALYZER_VALIDATE_TIMEOUT: ${PCAP_VALIDATE_TIMEOUT:-180}  # an upload is read to its end before it is accepted
+      PCAP_READS_PER_MIN: ${PCAP_READS_PER_MIN:-120}
+    volumes:
+      - capture-ring:/capture:ro
+      - pcap-uploads:/uploads
+      - ./demo:/demo:ro
+      - analyzer-run:/run/analyzer
+    depends_on:
+      <<: *setup-done
+      prometheus: {condition: service_started}
+      loki: {condition: service_started}
+      analyzer: {condition: service_started}
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
       interval: 30s
       timeout: 5s
       retries: 3
-    mem_limit: ${MASK_API_MEM:-128m}
+    mem_limit: ${MASK_API_MEM:-320m}
     cpus: ${MASK_API_CPUS:-0.5}
+
+  # Packet analysis sandbox: tshark on the stored capture files, one process per request (time / memory / CPU bounded,
+  # at most PCAP_ANALYZE_CONCURRENCY at once). No network at all, read-only root, non-root, capture files read-only;
+  # mask-api (and flowd) reach it only through the Unix socket in the analyzer-run tmpfs volume.
+  analyzer:
+    <<: *ops
+    build:
+      context: ./analyzer
+      additional_contexts:
+        <<: *python-base
+        demo: ./demo
+    network_mode: none
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=64m]
+    pids_limit: 64
+    environment:
+      ANALYZER_TIMEOUT: ${PCAP_ANALYZE_TIMEOUT:-60}
+      ANALYZER_VALIDATE_TIMEOUT: ${PCAP_VALIDATE_TIMEOUT:-180}  # an upload is read to its end before it is accepted
+      ANALYZER_CONCURRENCY: ${PCAP_ANALYZE_CONCURRENCY:-1}
+      ANALYZER_PROC_MEM_MB: ${PCAP_ANALYZE_PROC_MB:-384}
+      ANALYZER_MAX_ROWS: ${PCAP_MAX_PACKETS:-100000}
+    volumes:
+      - capture-ring:/capture:ro
+      - pcap-uploads:/uploads:ro
+      - ./demo:/demo:ro
+      - analyzer-run:/run/analyzer
+    healthcheck:
+      test: ["CMD", "python", "-c", "import analyzer; assert analyzer.call({'op': 'ping'}, timeout=5)['ok']"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: ${ANALYZER_MEM:-896m}
+    cpus: ${ANALYZER_CPUS:-1.0}
 
   # Alertmanager: every Prometheus alert goes through it (routes per severity, repeats, silences / ACK). Not published:
   # reachable only on the internal network; the screens read it masked and write silences through mask-api (/am/).
@@ -468,6 +660,7 @@ services:
     environment:
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
       OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+      PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -505,3 +698,11 @@ volumes:
   alertmanager-data:
   caddy-data:
   generated:
+  # packet capture ring (+ status.json) and uploaded pcaps: bounded by their own retention, not in `tools backup`
+  # unless --include-captures
+  capture-ring:
+  pcap-uploads:
+  geoip:  # DB-IP Lite City + ASN (tools geoip update)
+  # the analyzer's Unix socket: memory only, owned by the analyzer user
+  analyzer-run:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=10001,gid=10001,mode=0755,size=1m"}

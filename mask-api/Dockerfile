@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 WORKDIR /app
-COPY mask_api.py .
+COPY mask_api.py pcap_api.py pcap_filter.py ./
 RUN python mask_api.py --selftest
+# pcap uploads: a fresh named volume mounted here takes over this owner (nobody), so uploads are writable
+RUN mkdir -p /uploads && chown nobody:nogroup /uploads && chmod 0755 /uploads
 USER nobody
 EXPOSE 8000
 CMD ["python", "-u", "mask_api.py"]

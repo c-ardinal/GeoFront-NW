@@ -281,7 +281,8 @@ export function sortTable(cols, initial, keyOf) {
 
 // ---- line chart -----------------------------------------------------------------------
 // series: [{ name, color, points: [[tSec, v], ...] }]; gaps (> 2 steps) are drawn as breaks, never as 0.
-export function lineChart(canvas, series, { t0, t1, step, unit = '' }) {
+// tfmt(tSec): optional x-axis label (default JST HH:MM)
+export function lineChart(canvas, series, { t0, t1, step, unit = '', tfmt }) {
   const dpr = (window.devicePixelRatio || 1) * uiZoom();
   const w = (canvas.width = canvas.clientWidth * dpr);
   const h = (canvas.height = canvas.clientHeight * dpr);
@@ -303,8 +304,8 @@ export function lineChart(canvas, series, { t0, t1, step, unit = '' }) {
   }
   for (let i = 0; i <= 4; i++) {
     const t = t0 + ((t1 - t0) / 4) * i;
-    const label = jstHm.format(new Date(t * 1000));
-    ctx.fillText(label, Math.min(x(t) - 18 * dpr, w - 44 * dpr), h - 5 * dpr);
+    const label = tfmt ? tfmt(t) : jstHm.format(new Date(t * 1000));
+    ctx.fillText(label, Math.min(x(t) - 18 * dpr, w - ctx.measureText(label).width - 4 * dpr), h - 5 * dpr);
   }
   for (const s of series) {
     ctx.strokeStyle = s.color;

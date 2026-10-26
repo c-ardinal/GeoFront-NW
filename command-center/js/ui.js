@@ -1,5 +1,5 @@
 // View modes (WALLBOARD / INVESTIGATE), modal, detail drawer with breadcrumbs, idle auto-return.
-// A view is { title, src: 'prom'|'loki'|'both', mount(body), update(ctx) }; update() runs on open and after every poll.
+// A view is { title, src: 'prom'|'loki'|'both'|'none', note?, mount(body), update(ctx) }; update() runs on open and after every poll.
 import { $, el, REDUCED_MOTION, uiZoom, WALLBOARD } from './util.js';
 
 const params = new URLSearchParams(location.search);
@@ -75,6 +75,7 @@ export function openModal(view) {
   if (!st.modal) st.modalOpener = opener();
   st.modal = view;
   $('modal-title').textContent = view.title;
+  document.querySelector('#modal .m-note').textContent = view.note || 'live · IP/MAC masked';
   const body = $('modal-body');
   body.replaceChildren();
   view.mount(body);
@@ -293,7 +294,8 @@ export function refreshViews(ctx) {
 async function runUpdate(view, container) {
   const ctx = st.ctx;
   if (!ctx) return;
-  const srcStale = (view.src === 'loki' ? ctx.lokiStale : view.src === 'both' ? ctx.promStale || ctx.lokiStale : ctx.promStale);
+  // src 'none': a view of stored files (packet analysis), not of the live sources: never STALE because of them
+  const srcStale = view.src === 'none' ? false : (view.src === 'loki' ? ctx.lokiStale : view.src === 'both' ? ctx.promStale || ctx.lokiStale : ctx.promStale);
   try {
     await view.update(ctx);
     view.err = null;

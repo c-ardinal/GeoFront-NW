@@ -8,3 +8,6 @@ backups/
 # real notification destinations (only the example is tracked)
 alerting/receivers.yaml
 alerting/receivers.yaml.bak-*
+# Python bytecode (local selftest runs)
+__pycache__/
+*.pyc

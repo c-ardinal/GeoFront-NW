@@ -103,7 +103,7 @@
       "gridPos": { "x": 0, "y": 4, "w": 16, "h": 11 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "refId": "A", "instant": true, "range": false, "format": "table",
-        "expr": "sum by (dst_country, dst_city, lat, lon, asn) (rate(demo_flow_bytes_total{lat!=\"\"}[5m])) * 8" }],
+        "expr": "sum by (dst_country, dst_city, lat, lon, asn) (rate(obs_flow_bytes_total{lat!=\"\"}[5m])) * 8" }],
       "transformations": [
         { "id": "convertFieldType", "options": { "conversions": [
           { "targetField": "lat", "destinationType": "number" },
@@ -171,8 +171,8 @@
       "gridPos": { "x": 16, "y": 9, "w": 8, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "instant": true, "range": false, "format": "table", "expr": "sum by (dst_country) (rate(demo_flow_bytes_total[5m])) * 8" },
-        { "refId": "B", "instant": true, "range": false, "format": "table", "expr": "sum by (dst_country) (rate(demo_flow_bytes_total[5m])) / scalar(sum(rate(demo_flow_bytes_total[5m]))) * 100" }
+        { "refId": "A", "instant": true, "range": false, "format": "table", "expr": "sum by (dst_country) (rate(obs_flow_bytes_total[5m])) * 8" },
+        { "refId": "B", "instant": true, "range": false, "format": "table", "expr": "sum by (dst_country) (rate(obs_flow_bytes_total[5m])) / scalar(sum(rate(obs_flow_bytes_total[5m]))) * 100" }
       ],
       "transformations": [
         { "id": "merge", "options": {} },

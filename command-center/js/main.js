@@ -1,6 +1,6 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
-import { $, el, vmap, scalar, jstClock, REDUCED_MOTION, LARGE, WALLBOARD } from './util.js';
+import { $, el, vmap, scalar, has, jstClock, REDUCED_MOTION, LARGE, WALLBOARD } from './util.js';
 import { promQuery, promRange, promAlerts, lokiRange, lokiMetric, flattenStreams } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
@@ -9,6 +9,7 @@ import * as M from './views-modal.js';
 import * as D from './views-drawer.js';
 import { setNoFlowSource } from './views-common.js';
 import * as AL from './alerting.js';
+import * as PA from './views-pcap.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -61,11 +62,24 @@ const nav = {
   logline: (e) => UI.openDrawer(D.loglineView(e)),
   job: (j) => UI.openDrawer(D.jobView(j)),
   logs: (f) => UI.openModal(M.logsModal(f)),
+  // packet analysis: opts { dest, src } narrow it to that traffic (filter from the flows' address tokens, last 15 min)
+  packets: async (opts = {}) => {
+    const f = await PA.drillFilter({ ...opts, flows: state.snap?.flows || [] });
+    const since = opts.dest || opts.src ? Date.now() / 1000 - 900 : undefined;
+    UI.openModal(PA.analysisView({ ...f, since: OBS.flowSource === 'capture' ? since : undefined }));
+  },
 };
 const MODALS = {
   'p-devices': M.devicesModal, 'p-dest': M.destModal, 'p-src': M.srcModal, 'p-unknown': M.unknownModal, 'p-wan': M.wanModal,
   'p-if': M.ifacesModal, 'p-wlan': M.wlanModal, 'p-alerts': M.alertsModal, 'p-logs': () => M.logsModal(), 'p-sev': M.sevModal, 'p-health': M.healthModal,
 };
+// GeoIP note under the globe: whose data the locations are (CC BY 4.0 attribution) and its version
+function renderGeoNote(geo) {
+  const n = $('geo-note');
+  const text = OBS.flowSource === 'pcap-replay' || OBS.flowSource === 'demo-gen' ? 'Locations: synthetic demo data'
+    : geo.months.length ? `GeoIP: IP Geolocation by DB-IP (CC BY 4.0) · ${[...new Set(geo.months)].join('/')}` : 'GeoIP: no database (Unknown) · IP Geolocation by DB-IP, CC BY 4.0';
+  if (n.textContent !== text) n.textContent = text;
+}
 function wirePanelTitles() {
   for (const [id, make] of Object.entries(MODALS)) {
     const h = document.querySelector(`#${id} > h2`);
@@ -81,6 +95,15 @@ function wirePanelTitles() {
     h.querySelector('.h-t').addEventListener('click', open);
     h.querySelector('.h-t').classList.add('h-click');
   }
+  // GLOBAL TRAFFIC: the way into packet analysis (stored captures / uploads / the demo pcap)
+  const g = document.querySelector('#p-globe > h2');
+  const a = el('button', 'h-act', '解析');
+  a.type = 'button';
+  a.lang = 'ja';
+  a.title = 'packet analysis (captured / uploaded pcap)';
+  a.setAttribute('aria-label', 'Packet analysis: open captured or uploaded packets');
+  a.addEventListener('click', () => nav.packets());
+  g.insertBefore(a, g.querySelector('.h-r'));
 }
 
 // ---- polling ------------------------------------------------------------------------------------
@@ -91,7 +114,7 @@ const gate = (expr) => `(${expr}) and ${UP}`;
 const ERR_EXPR = '(rate(ifInErrors{job="snmp"}[2m]) + rate(ifOutErrors{job="snmp"}[2m])) * 60';
 const Q = {
   // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
-  flows: '(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(demo_flow_bytes_total[2m])) * 8) and on () (up{job="flows"} == 1)',
+  flows: '(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(obs_flow_bytes_total[2m])) * 8) and on () (up{job="flows"} == 1)',
   up: 'up{job="snmp"}',
   uptime: gate('sysUpTime{job="snmp"} / 100'),
   devIn: gate('sum by (instance) (rate(ifHCInOctets{job="snmp"}[1m])) * 8 / 1e6'),
@@ -115,7 +138,17 @@ const Q = {
   freshMin: 'min(time() - (timestamp(up) and up == 1))',
   alloyRx: 'sum(rate(loki_source_syslog_entries_total[1m]))',
   lokiRx: 'sum(rate(loki_distributor_lines_received_total[1m]))',
+  // flowd: is its input live (capture running / replay loaded); the capture service and the GeoIP databases
+  flowSrc: 'max(obs_flow_source_up)',
+  capUp: 'max(obs_capture_up)',
+  capDrop: 'sum(increase(obs_capture_nic_rx_dropped_total[5m]))', // NIC drops: the only live drop counter
+  capDumpDrop: 'sum(increase(obs_capture_dumpcap_dropped_total[1h]))', // dumpcap's own, known when a session ends
+  capRing: 'max(obs_capture_ring_bytes / obs_capture_ring_limit_bytes)',
+  capOver: 'max(obs_capture_over_limit)',
+  geoBuild: 'min(obs_geoip_db_build_timestamp_seconds)',
+  geoInfo: 'obs_geoip_db_info',
 };
+const GEOIP_STALE_DAYS = 45;
 
 const notifySlot = (a) => { const st = AL.notifyState(a); return { ...st, kindClass: AL.NT_KIND[st.kind], nextText: AL.nextText(st) }; };
 
@@ -158,17 +191,23 @@ async function pollProm() {
     jobs.age.set(t.job, Math.max(jobs.age.get(t.job) || 0, t.age ?? 0));
   }
   // flow source freshness: its scrape target must exist, be up and have a recent sample (else flow data is UNKNOWN)
-  const flowsOk = targets.some((t) => t.job === 'flows' && t.up === 1 && t.age < FLOW_MAX_AGE_S);
+  // flowd also says whether its own input is live (the capture service running, the demo replay loaded)
+  const flowSrc = scalar(res.flowSrc);
+  const flowsOk = targets.some((t) => t.job === 'flows' && t.up === 1 && t.age < FLOW_MAX_AGE_S) && flowSrc !== 0;
+  const geoBuild = scalar(res.geoBuild);
+  const capture = res.capUp.length ? { up: scalar(res.capUp), drops: scalar(res.capDrop), dumpDrops: scalar(res.capDumpDrop), ring: scalar(res.capRing), over: scalar(res.capOver) } : null;
   state.snap = {
     at: Date.now(), m, flowsOk, flowsConfigured: state.flowsConfigured, flows: flowsOk ? normFlows(res.flows) : [], wlan: res.wlan, wlanInv: res.wlanInv, alerts, targets, jobs, sDown, sUp,
     freshMin: scalar(res.freshMin), down: targets.filter((t) => t.up === 0).map((t) => t.instance).sort(),
-    alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx),
+    alloyRx: scalar(res.alloyRx), lokiRx: scalar(res.lokiRx), capture,
+    geo: { ageDays: has(geoBuild) ? (Date.now() / 1000 - geoBuild) / 86400 : null, months: res.geoInfo.map((r) => r.metric.month).filter(Boolean) },
   };
   const s = state.snap;
   P.renderDevices(m, nav); // before the flow rankings: they are fitted to the height the device list leaves
   P.renderFlows(s, nav);
   G.renderGlobe(s.flows);
   if (!flowsOk) $('arc-note').textContent = P.FLOW_TEXT.arcs;
+  renderGeoNote(s.geo);
   P.renderWan(s);
   P.renderInterfaces(s, state.seenIf, nav);
   P.renderWlan(s, state.seenWlan, nav);
@@ -236,6 +275,10 @@ function updateHealth() {
     state.promErr && `metrics: ${state.promErr}`, promStale ? 'metrics: no update for 2 cycles' : promLate > DEGRADED_AFTER_MS && 'metrics: update late',
     state.lokiErr && `logs: ${state.lokiErr}`, lokiStale && !state.lokiErr && 'logs: no update for 2 cycles',
     flowStale && 'flow source DOWN', s?.down.length && `targets DOWN: ${s.down.join(', ')}`,
+    s?.capture && s.capture.up !== 1 && 'packet capture stopped', s?.capture?.drops > 0 && `capture NIC dropping packets (${Math.round(s.capture.drops)} / 5 min)`,
+    s?.capture?.dumpDrops > 0 && `dumpcap dropped packets (${Math.round(s.capture.dumpDrops)} in the last hour, ended sessions)`,
+    s?.capture?.over === 1 && 'capture ring over its size limit',
+    OBS.flowSource === 'capture' && s?.geo.ageDays > GEOIP_STALE_DAYS && `GeoIP DB ${Math.floor(s.geo.ageDays)} days old (tools geoip update)`,
   ].filter(Boolean);
   const mode = promStale || state.waitFresh ? 'STALE' : reasons.length ? 'DEGRADED' : 'LIVE';
   const age = Number.isFinite(state.promOkAt) ? Math.max(0, promLate / 1000 + state.dataAgeAtOk) : null;
@@ -364,7 +407,7 @@ function refreshExposure() {
     cfgWatch.offer(freshCfg);
   });
 }
-const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)' };
+const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)', flowSource: 'pcap-replay' };
 async function applyObsInfo() {
   const { exposure, cfg } = await fetchObs();
   renderExposure(exposure);
@@ -377,6 +420,7 @@ async function applyObsInfo() {
     lab.classList.add('cfg-unknown');
     OBS.source = 'unknown (config unavailable)';
   }
+  if (cfg?.flow_source !== undefined) OBS.flowSource = cfg.flow_source;
   if (!cfg || cfg.profile === 'demo') return;
   OBS.profile = String(cfg.profile);
   const devices = Array.isArray(cfg.devices) ? cfg.devices.filter((d) => d && typeof d.name === 'string') : [];
@@ -387,6 +431,7 @@ async function applyObsInfo() {
   $('p-wlan').querySelector('.h-r').textContent = 'MIB unconfirmed';
   OBS.source = `inventory (${devices.length} devices)`;
   state.flowsConfigured = cfg.flows_configured !== false;
+  OBS.flowSource = cfg.flow_source ?? null;
   if (!state.flowsConfigured) setNoFlowSource();
   document.querySelector('.demo-label').hidden = true;
   document.title = document.title.replace(' (DEMO)', '');

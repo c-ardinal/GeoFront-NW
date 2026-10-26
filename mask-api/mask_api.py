@@ -18,6 +18,8 @@ Queries cannot test hidden digits:
 Alertmanager (/am/, from the proxy): the alert and silence lists are read the same way (masked); the one write path
 is the silence allowlist (create / extend / expire, for ACK and 抑止), see the "Alertmanager" section.
 
+Packet analysis (/pcap/, from the proxy): pcap_api.py, sharing this module's tokens, masking and write guards.
+
 Run: python mask_api.py            (listens on :8000)
      python mask_api.py --selftest
 """
@@ -29,13 +31,17 @@ import random
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections import OrderedDict
 from typing import NamedTuple
+
+import pcap_api
 
 PROM = os.environ.get("PROM_URL", "http://prometheus:9090")
 LOKI = os.environ.get("LOKI_URL", "http://loki:3100")
@@ -87,8 +93,37 @@ TOKEN_MSG = "unknown or expired address token; reload the page"
 # Opaque per-address tokens keep distinct addresses distinct in the UI (rows, keys, drill-downs)
 # without revealing them. The key is random per process, so tokens expire on restart.
 KEY = secrets.token_bytes(32)
-TOKENS = {}  # token -> address; written only by mask_json, from addresses Prometheus/Loki returned
-MAX_TOKENS = 65536  # ponytail: no eviction; past this, new addresses get no token and fall back to a.b.c.x
+MAX_TOKENS = 65536
+
+
+class TokenStore(OrderedDict):
+    """token -> address, most recently used kept: past MAX_TOKENS the oldest token is forgotten, so a flood of new
+    addresses (a large pcap) cannot use up the table. A forgotten token only means an old screen's drill-down or
+    silence asks to reload ("unknown or expired address token")."""
+
+    lock = threading.Lock()  # request threads share the table: check + move / evict as one step
+    pins = threading.local()  # .d: {token: address} collector of this thread (pcap_api.with_tokens), or None
+
+    def __setitem__(self, k, v):
+        got = getattr(self.pins, "d", None)
+        if got is not None:
+            got[k] = v
+        with self.lock:
+            if k in self:
+                self.move_to_end(k)
+            super().__setitem__(k, v)
+            while len(self) > MAX_TOKENS:
+                self.popitem(last=False)
+
+    def get(self, k, default=None):
+        with self.lock:
+            if k in self:
+                self.move_to_end(k)
+                return super().__getitem__(k)
+            return default
+
+
+TOKENS = TokenStore()  # written only by the masking (mask_json / pcap_api), from addresses the services returned
 
 
 class Rejected(ValueError):
@@ -104,8 +139,6 @@ def mask_value(s):
     if not m:
         return mask_text(s)
     tok = hmac.new(KEY, s.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN]
-    if tok not in TOKENS and len(TOKENS) >= MAX_TOKENS:
-        return m.group(1) + ".x"
     TOKENS[tok] = s
     return f"{m.group(1)}.x~{tok}"
 
@@ -116,8 +149,20 @@ def mask_json(v):
     if isinstance(v, list):
         return [mask_json(x) for x in v]
     if isinstance(v, dict):
-        return {mask_text(k): mask_json(x) for k, x in v.items()}
+        out = {mask_text(k): pcap_api.mask_free(x) if k in FREE_LABELS and isinstance(x, str) else mask_json(x) for k, x in v.items()}
+        labels, notes = v.get("labels"), out.get("annotations")
+        if isinstance(labels, dict) and isinstance(notes, dict):  # an alert: its text may quote those label values
+            raw = sorted((x for k, x in labels.items() if k in FREE_LABELS and isinstance(x, str) and x), key=len, reverse=True)
+            for x in raw:
+                notes = {k: n.replace(x, pcap_api.mask_free(x)) if isinstance(n, str) else n for k, n in notes.items()}
+            out["annotations"] = notes
+        return out
     return v
+
+
+# labels whose values are free text from the capture side (interface names like enx<MAC>, error reasons): flowd masks
+# them already; masked here too so older series in the TSDB never show them raw
+FREE_LABELS = {"iface", "reason"}
 
 
 # ---- literal checks and masked-form rewriting (shared) ------------------------------------------
@@ -847,6 +892,8 @@ def respond(method, raw_path, headers, read_body):
     try:
         if raw_path.startswith("/am/"):
             return am_handle(method, raw_path, headers, read_body)
+        if raw_path.startswith("/pcap/"):
+            return pcap_api.handle(method, raw_path, headers, read_body)
         url, post, err = route(method, raw_path)
         if err:
             return err[0], error_body(*err), "application/json"
@@ -865,8 +912,18 @@ def respond(method, raw_path, headers, read_body):
 class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         t0 = time.monotonic()
-        status, body, ctype = respond(self.command, self.path, self.headers, self.rfile.read)
+        got = [0]
+
+        def read_body(n):
+            data = self.rfile.read(n)
+            got[0] += len(data)
+            return data
+        status, body, ctype = respond(self.command, self.path, self.headers, read_body)
         self.send_response(status)
+        length = self.headers.get("Content-Length") or "0"
+        if not length.isdigit() or int(length) > got[0] or self.headers.get("Transfer-Encoding"):  # body left unread (early reject): never parse it as a request
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -1050,7 +1107,11 @@ def am_selftest(tok):
 
 def selftest():
     q = urllib.parse.quote
-    nested = {"status": "success", "data": {"result": [
+    assert mask_json({"metric": {"__name__": "obs_capture_up", "iface": "enx02005e100017"}})["metric"]["iface"] == "enx"
+    al = mask_json({"labels": {"alertname": "CaptureDown", "iface": "enx02005e100017"},
+                    "annotations": {"summary_ja": "enx02005e100017 でキャプチャが止まりました (5 分)"}})
+    assert al["labels"]["iface"] == "enx" and al["annotations"]["summary_ja"] == "enx でキャプチャが止まりました (5 分)", al
+    nested ={"status": "success", "data": {"result": [
         {"metric": {"dst_ip": "203.0.113.50", "mac": "02:00:5E:10:00:0A"}, "value": [1, "42"]},
         {"stream": {"host": "rtx1300"}, "values": [["1", "TCP 192.168.100.7:5555 > 192.0.2.10:443 02-00-5e-20-00-01"]]},
     ], "rules": [{"expr": 'x{dst_ip="198.51.100.20"}'}], "v6": "2001:db8::1", "oid": "1.3.6.1.2.1.1.3"}}
@@ -1322,9 +1383,20 @@ def selftest():
         assert plan(path)[2][0] == 403, path
     assert route("POST", pq("up"))[2][0] == 405
     assert request_role({}) == request_role({"X-Obs-Role": "admin"}) == request_role({"X-Obs-Role": " Viewer "}) == "viewer"
+    global MAX_TOKENS
+    keep, MAX_TOKENS = MAX_TOKENS, 3
+    t1 = mask_value("198.51.100.1")
+    for i in range(2, 6):
+        mask_value(f"198.51.100.{i}")
+    assert t1[-12:] not in TOKENS and len(TOKENS) <= 3 and mask_value("198.51.100.5")[-12:] in TOKENS  # LRU, bounded
+    MAX_TOKENS = keep
+    tok = mask_value("203.0.113.50")  # (re-register the token the alert tests use)
     am_selftest(tok)
+    pcap_api.selftest()
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
+
+pcap_api.setup(sys.modules[__name__])
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:

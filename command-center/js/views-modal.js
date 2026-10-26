@@ -129,7 +129,7 @@ export function destModal() {
     },
     async update(ctx) {
       const ok = ctx.snap.flowsOk;
-      const trendP = drawRange(trend, [{ q: `sum by (direction) (rate(demo_flow_bytes_total[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', 'Total flow by direction');
+      const trendP = drawRange(trend, [{ q: `sum by (direction) (rate(obs_flow_bytes_total[$RATE]) ${FLOWS_UP}) * 8 / 1e6`, name: (mt) => mt.direction }], HOUR, 'Mbps', 'Total flow by direction');
       if (!ok) { // flow source DOWN: drop the rows (an empty source would read as 0 Mbps / 0 destinations) and mark the view stale
         putIn(sum, flowsDownTiles(['Total flow', 'Destinations', 'Countries', 'Unknown share', 'Top country']));
         putIn(rank, el('p', 'na', FLOWS_DOWN));
@@ -138,7 +138,7 @@ export function destModal() {
         flowsMissing(ctx.snap);
         return;
       }
-      const [bytes, r] = await Promise.all([promQuery('sum by (dst_ip) (increase(demo_flow_bytes_total[15m]))'), trendP]);
+      const [bytes, r] = await Promise.all([promQuery('sum by (dst_ip) (increase(obs_flow_bytes_total[15m]))'), trendP]);
       lastR = r || lastR;
       const bmap = new Map(bytes.map((x) => [x.metric.dst_ip, Number(x.value[1])]));
       const flows = ctx.snap.flows;
