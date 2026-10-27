@@ -1,0 +1,11 @@
+# Device driver: YAMAHA WLX access points (docs/drivers.md). Selected by the inventory's `kind`.
+name: yamaha-wlx
+label: YAMAHA WLX (access point)
+kinds: [wlx]
+snmp_modules: [if_mib, system]
+lldp: true
+wan: false
+# the screens show a wireless client column for it; in prod the count stays unknown (the WLX private MIB for client
+# counts is unconfirmed, so nothing is collected), the demo has a synthetic demo_wlan_clients
+wireless_clients: true
+# syslog: PRI-only lines like the RTX (alloy/config.alloy keeps them verbatim); fixtures in syslog.jsonl.

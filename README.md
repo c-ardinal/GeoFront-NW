@@ -1,4 +1,9 @@
-# YAMAHA Network Observatory - Grafana-first 試行
+# GeoFront-NW — 宅内ネットワークの観測 (Grafana-first)
+
+ルーター・アクセスポイントの SNMP / syslog / パケットを集め、Grafana と自作の司令室画面 (command-center) で見るための
+docker compose 一式です。今は YAMAHA RTX / WLX 向けのドライバ (`drivers/`) があり、他社機はドライバを足して対応します
+(`docs/drivers.md`)。ライセンスは MIT (`LICENSE`)、同梱・利用する OSS とデータは `THIRD_PARTY_NOTICES.md`。
+旧名は YAMAHA Network Observatory (R1 で改名。既存の設置のデータはそのまま使えます: 下記「設定の置き場所」)。
 
 > **DEMO DATA / synthetic (demo profile)**
 > `demo` profile が表示するメトリクス・フロー・ログは、すべて `demo-gen` が生成した**疑似データ**です。
@@ -50,13 +55,59 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 
 保持期間: syslog (Loki) は `LOKI_RETENTION` (既定 720h = 30 日。`loki/loki-config.yaml` の compactor retention)。期限切れのデータは compactor が 10 分ごとに印を付け、2 時間後に削除します。メトリクス (Prometheus) は `PROM_RETENTION` (既定 30d)。SD カードの容量で抑えたいときは `PROM_RETENTION_SIZE` (例 `8GB`、古いブロックから消える)。
 
+## 設定の置き場所 (R1)
+
+現場固有の設定 (`.env`・機器台帳・通知先・バックアップ) はリポジトリに置かず、**設定ディレクトリ** `OBS_CONFIG_DIR` にまとめます。
+リポジトリにあるのは例 (`config.example/`) だけです。**コミットしてはいけないデータ (設定・アドレス・秘密値・pcap・DB) は
+決してコミットしない**でください (下記「漏洩防止」の `scripts/leak-scan.sh` と pre-commit フックで確かめられます)。
+
+```
+$OBS_CONFIG_DIR/                     例 /etc/geofront (root で運用) または ~/.config/geofront (既定)
+  .env                               設定と秘密値 (権限 600)。例: config.example/.env.example
+  inventory/devices.yaml             機器台帳。例: config.example/inventory/devices.example.yaml
+  alerting/receivers.yaml            通知先 (任意)。例: config.example/alerting/receivers.example.yaml
+  backups/                           tools backup の出力
+```
+
+- `./geofront` は `docker compose` の代わりに使うラッパーです (引数は同じ: `./geofront up -d --build`、`./geofront run --rm tools init`)。
+  設定ディレクトリの `.env` を `--env-file` で渡し、tools のコンテナには `/config` として入ります。`OBS_CONFIG_DIR` が無ければ、
+  リポジトリに `.env` がある場合は従来の配置 (リポジトリ内、git 管理外) をそのまま、無ければ `~/.config/geofront` (`$XDG_CONFIG_HOME/geofront`) を使います
+  (無ければ権限 700 で作ります)。パスは絶対パスで指定してください。
+- ラッパーなしでも動きます: `OBS_CONFIG_DIR=/etc/geofront docker compose --env-file /etc/geofront/.env ...` (tools init が `.env` に
+  `OBS_CONFIG_DIR` を書くので 2 回目からは `--env-file` だけでも可)。`OBS_CONFIG_DIR` を付けない `docker compose` は従来の配置 (リポジトリの `.env`) です。
+- すべての設定値は環境変数でも上書きできます (compose はシェルの値を `.env` より優先します)。
+- 秘密値はファイルからも渡せます (`./geofront` を使う場合): `GF_ADMIN_PASSWORD_FILE` / `SNMP_V3_AUTH_PASS_FILE` / `SNMP_V3_PRIV_PASS_FILE` /
+  `SNMP_COMMUNITY_FILE` / `SMTP_PASSWORD_FILE` / `SLACK_WEBHOOK_URL_FILE` / `DISCORD_WEBHOOK_URL_FILE` / `LINE_CHANNEL_ACCESS_TOKEN_FILE` /
+  `WEBHOOK_URL_FILE` / `WEBHOOK_BEARER_TOKEN_FILE` / `OBS_AUTH_SESSION_SECRET_FILE` / `OBS_AUTH_STORAGE_KEY_FILE` / `OBS_AUTH_PROXY_KEY_FILE`
+  (環境変数か `.env` に `<名前>_FILE=/path`。ファイルの中身が値になります。`tools init` はそれらを `.env` に書きません)。
+- compose のプロジェクト名 (コンテナ・データボリュームの名前) は、既存の設置のボリュームを失わないよう compose.yaml の既定を
+  R1 より前の `yamaha-observatory-trial` のままにしています。`tools init` は動いたプロジェクト名を `.env` の `COMPOSE_PROJECT_NAME` に固定し、
+  `./geofront` は新しい設置を `geofront-nw` で作ります (このホストに `yamaha-observatory-trial` のボリュームがあればそちら)。
+  testbed (`testbed/testbed.env`) は従来どおり `yamaha-observatory-testbed` です。
+
+### 従来の配置 (リポジトリ内の .env) からの移行
+
+```sh
+docker compose run --rm tools backup --include-env                          # 念のため (従来の配置のまま)
+OBS_CONFIG_DIR=/etc/geofront ./geofront run --rm tools migrate-config       # .env・台帳・通知先・backups/ を写す (元は残す)
+export OBS_CONFIG_DIR=/etc/geofront                                         # (シェルの設定や systemd に)
+./geofront up -d --build --remove-orphans && ./geofront run --rm tools check
+# 確認できたら、リポジトリ内の旧ファイル (migrate-config が表示) を消す。scripts/doctor.sh は残っていると WARN
+```
+
+- `migrate-config` は `.env` に `COMPOSE_PROJECT_NAME` (今までのプロジェクト名) と `OBS_CONFIG_DIR` を足すので、同じボリューム
+  (メトリクス・syslog・抑止・Grafana・ログインの利用者・証明書) をそのまま使います。移す先に同じファイルがあれば止まります (`--force` で上書き、元は `.bak-*`)。
+- 移さずにプロジェクト名だけ固定するなら `docker compose run --rm tools migrate-config` (`OBS_CONFIG_DIR` なし)。
+- Authelia の利用者・生成した設定・証明書は今までどおり Docker のボリューム (`authelia-data` / `generated` / `caddy-data`) にあり、
+  リポジトリには入りません (バックアップは `tools backup`)。
+
 ## デモで試す
 
 ```sh
 docker compose --profile demo up -d --build
 ```
 
-`.env` は無くても動きます (Grafana admin パスワードは "admin"、初回ログイン時に変更を促される)。`cp .env.example .env` して `COMPOSE_PROFILES=demo` を有効にすると `docker compose up -d` だけで起動できます。
+`.env` は無くても動きます (Grafana admin パスワードは "admin"、初回ログイン時に変更を促される)。`cp config.example/.env.example .env` して `COMPOSE_PROFILES=demo` を有効にすると `docker compose up -d` だけで起動できます。
 
 - コマンドセンター: http://127.0.0.1:8080/
 - Wallboard (ログイン不要・匿名 Viewer): http://127.0.0.1:8080/grafana/d/yamaha-wallboard?kiosk (以前の http://127.0.0.1:3000/d/yamaha-wallboard?kiosk も転送されます)
@@ -89,7 +140,7 @@ docker compose --profile demo up -d --build
 - アラートが 1 件でも発報中だと赤枠と `ALERT` バナー (アラート名つき) を表示し、解消すると戻ります。取得に失敗したときやデータが 2 周期 (20 秒) より古いときは `DEGRADED` / `STALE` を表示し、最後の値を薄く残します (0 にはしません)。`prefers-reduced-motion` の環境では回転・アーク・点滅を止めます。
 - ブラウザは Prometheus / Loki に直接つながりません。nginx が GET の `/prom/api/v1/{query,query_range,alerts}` と `/loki/loki/api/v1/query_range` だけを中継し、それ以外の `/prom/`・`/loki/` 配下は 403 を返します。
 - **外部依存 (インターネット接続が必要)**: globe.gl 2.46.2 (cdn.jsdelivr.net、SRI 付き)、three-globe 2.45.6 の地球夜景・地形・星空テクスチャ (cdn.jsdelivr.net)、Google Fonts (IBM Plex Sans / IBM Plex Mono / Orbitron)。オフラインでは地球儀が表示されません (他のパネルは動きます)。
-- 別テーマ: `http://127.0.0.1:8080/?theme=eva-film` (または上部バー右端の ⋯ 設定メニューの THEME ボタンで STD ↔ FILM を切り替え) で、アニメの指令室ディスプレイ風のデザインになります (黒地に橙、長体の極太明朝の見出し、六角ステータスセル、目盛りスケール、レーダースイープの地球儀、赤帯の「警報 ALERT」)。配置・内容・データは既定テーマと同じで、選択はブラウザに保存されます (`?theme=default` で既定に戻す)。以前の `?theme=eva` や保存済みの `eva` は `eva-film` として開きます。このテーマは追加で Google Fonts の Oswald / Shippori Mincho B1 (予備に Noto Serif JP) を使い、地球儀の陸地ドットに Natural Earth 110m の国境 GeoJSON (cdn.jsdelivr.net の globe.gl@2.46.2 example データ、SRI 検証付き) を読み込みます (取得できない場合は経緯線のみで表示)。
+- 別テーマ: `http://127.0.0.1:8080/?theme=film` (または上部バー右端の ⋯ 設定メニューの THEME ボタンで STD ↔ FILM を切り替え) で、アニメの指令室ディスプレイ風のデザインになります (黒地に橙、長体の極太明朝の見出し、六角ステータスセル、目盛りスケール、レーダースイープの地球儀、赤帯の「警報 ALERT」)。配置・内容・データは既定テーマと同じで、選択はブラウザに保存されます (`?theme=default` で既定に戻す)。以前の名前 (`?theme=eva-film` / `?theme=eva`、保存済みの値も) は `film` として開きます。このテーマは追加で Google Fonts の Oswald / Shippori Mincho B1 (予備に Noto Serif JP) を使い、地球儀の陸地ドットに Natural Earth 110m の国境 GeoJSON (cdn.jsdelivr.net の globe.gl@2.46.2 example データ、SRI 検証付き) を読み込みます (取得できない場合は経緯線のみで表示)。
 - 画面サイズ: 1280〜2399 px 幅が基準の壁面表示 (スクロールなし)。2400 px 以上の幅または 1400 px 以上の高さの大画面では文字と余白を最大 1.5 倍まで拡大し、一覧と syslog は空いた高さの分だけ行を増やします (横長 21:10 以上では syslog / 重要度 / 収集系統を右端の列に移動)。768〜1279 px のタブレットは、横向きが「地球儀 + 右列 (概要 / 通信 / 機器 / ログ / 警報 のタブ)」、縦向きが「地球儀を上に、パネルを 2 列」でページスクロールあり。768 px 未満のスマートフォンは要約カード・地球儀・タブで切り替えるパネル・下部のタブバーで構成し、詳細はボトムシート、全件表示は全画面で開きます。タッチ操作では地球儀の通信先を 1 回タップで概要、もう 1 回 (または OPEN DETAILS) で詳細を開きます。
 - 上部バーは、パネルにない情報だけを表示します: タイトル、アラートバナー (クリック / Enter で発報中アラートの一覧を開く。タブレット/スマホでは警報タブへ移動)、鮮度バッジ (`● LIVE 3s` / `▲ DEGRADED 12s` / `■ STALE 2m`。状態とデータの経過時間。経過時間は最後に取得に成功してからの時間に Prometheus 側で測ったサンプルの経過時間を足したもので、ブラウザとホストの時計のずれの影響を受けません。ツールチップに最終更新時刻と失敗しているソース・DOWN の対象を表示)、JST 時計、`DEMO` 表示、調査中の「✕ BACK TO LIVE」、⋯ (設定: THEME)。対象数・最大経過時間は COLLECTION HEALTH / DEVICE STATUS パネルで確認します。幅が足りないときは文言を短くして (JST の文字、DEMO、タイトル、バナーの前置き、バッジの状態語を DEGR などに) 1 行に収め、項目は隠しません。表示値の桁数や状態語が変わってもバッジ・時計・件数は固定幅で、他の項目の位置は動きません。
 - 鮮度の判定: 最後の成功が 1 周期 (10 秒 + 3 秒) 以内なら LIVE、それより遅れるか一部のソースが失敗 (ログ取得失敗・フロー停止・DOWN の対象あり) なら DEGRADED (理由はツールチップと読み上げ)、2 周期 (20 秒) 成功がなければ STALE。画面が固まったりタブが止まったりしても LIVE のまま残らないよう、更新が成功するたびに CSS アニメーションを再始動し、25 秒更新がなければスクリプトが止まっていても STALE 表示に切り替わります。タブを再表示したときは、最初の取得が成功するまで STALE を表示します。
@@ -136,8 +187,10 @@ mask-api の自己テスト (`python mask-api/mask_api.py --selftest`、イメ�
 実機 (RTX / WLX) での動作確認はまだです (下記「既知の制限」)。Pi で最初に確かめる手順は下記「検証」の「Pi で最初に」。
 
 ```sh
+# 0. 設定はリポジトリの外に置きます (推奨。上記「設定の置き場所」): 以下の `docker compose` を `./geofront` に読み替え、
+#    export OBS_CONFIG_DIR=/etc/geofront   (付けなければ ~/.config/geofront。従来どおりリポジトリ内なら docker compose のまま)
 # 1. 取得 (git clone など) して、そのディレクトリで:
-docker compose run --rm tools init          # 対話で .env と inventory/devices.yaml を作り、検証する
+docker compose run --rm tools init          # 対話で .env と inventory/devices.yaml を (設定ディレクトリに) 作り、検証する
 #    非対話: docker compose run --rm -e GF_ADMIN_PASSWORD=... -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... \
 #              tools init --yes --snmp-user obs --syslog-bind 192.168.100.10 \
 #              --device rtx1300,rtx,192.168.100.1 --device wlx413,wlx,192.168.100.2 --wan rtx1300:lan2
@@ -156,7 +209,7 @@ docker compose run --rm tools check
 この手順 (init → doctor → up → check → 画面と Grafana) は、実機の代わりに testbed を使って `scripts/e2e-fresh.sh open|auth` が
 まっさらな別プロジェクトで通しで確かめます (下記「検証」)。
 
-- 秘密値 (SNMP のパスワード・コミュニティ、Grafana 管理者パスワード) は `.env` にだけ入ります (git 管理外、権限 600)。機器台帳 `inventory/devices.yaml` (git 管理外。例は `inventory/devices.example.yaml`) には auth の名前だけを書きます。
+- 秘密値 (SNMP のパスワード・コミュニティ、Grafana 管理者パスワード) は設定ディレクトリの `.env` にだけ入ります (リポジトリの外、権限 600。`*_FILE` でファイルからも渡せます: 下記「設定の置き場所」)。機器台帳 `inventory/devices.yaml` (同じく設定ディレクトリ。例は `config.example/inventory/devices.example.yaml`) には auth の名前だけを書きます。台帳の `kind` (rtx / wlx / other) が機種ドライバ (`drivers/`) を選びます。
 - 機器台帳を変えたら `docker compose run --rm tools targets` (Prometheus の scrape 対象と、syslog の送信元 → 機器名の対応表を作り直します。再起動は不要)。`docker compose up` のたびにも `prod-setup` が作り直します。
 - SNMP: `snmp/auths.yml` が auth のテンプレートです。`yamaha_v3` (SNMPv3 authPriv、既定 SHA / AES) と `yamaha_v2c` (`SNMP_COMMUNITY` が空なら無効)。方式は `.env` から埋め込み、SNMPv3 のユーザー名とパスワードは snmp_exporter が起動時に環境変数から読みます (生成物にも書きません)。SNMPv2c のコミュニティは snmp_exporter が環境変数を展開しない項目のため、生成物 (generated ボリューム内の auths.yml、権限 600) に値を書きます (リポジトリやログには出しません)。モジュールは snmp_exporter 同梱の `if_mib` + `system` (IF-MIB / SNMPv2-MIB) です。
 - syslog: `.env` の `SYSLOG_BIND` をこのホストの LAN 側 IP (または `0.0.0.0`) にすると、UDP/TCP `SYSLOG_PORT` (既定 514) で機器から受けます。既定の 127.0.0.1 では LAN から届きません。送信元は機器台帳の `address` で機器名 (Loki の `host`) に対応付けます (IP なら送信元 IP、DNS 名なら送信元の逆引き名)。`host` は送信元アドレスだけで決め、syslog ヘッダのホスト名は使いません (LAN 上の誰でもヘッダに `rtx1300` と書けるため)。台帳に無い送信元は `host="unknown"` で、送信元 IP を `src_ip` ラベルに入れます (画面では伏せ字)。`.env` の `SYSLOG_DROP_UNKNOWN=1` で台帳に無い送信元の行を捨てます。ヘッダのホスト名が機器名と違うときは本文の先頭に残します (ホスト名を省いた RFC3164 で本文の先頭語が欠けることもありません)。`tools check` の syslog 受信待ちも、この送信元アドレスで決まった `host` で数えます。UDP の送信元アドレス自体は偽装できるので、これは認証ではなく取り違えの防止です。台帳の `address` は IP で書くのを勧めます。DNS 名で書くと逆引き名で照合するため、DHCP でホスト名を名乗れる端末に機器名を騙られる余地があります。インターネットから届くホストで `SYSLOG_BIND=0.0.0.0` にする場合は `SYSLOG_DROP_UNKNOWN=1` にし、FW で送信元を絞ってください。Alloy は送信元の逆引き名をキャッシュするため、機器の `address` は固定 IP (DHCP 予約) で書くのが確実です。DNS 名で書いた機器の IP が変わったら `docker compose restart alloy` してください (testbed の疑似機器を作り直したときも同じ。compose には疑似機器の更新時に Alloy も再起動する指定を入れてあります)。
@@ -196,7 +249,7 @@ WLX: Web GUI の SNMP 設定で SNMPv3 の読み取り専用ユーザー (同じ
 - 常駐サービス: healthcheck は 60 秒ごと (起動直後だけ 5 秒ごと)。Loki はキャッシュ・並列度・WAL の再生上限を小さく、Prometheus の同時評価は 4 件まで、Alloy の利用統計送信は無効、Grafana は自前のアラート評価と Live 配信を無効にしています。flowd は 5 秒ごとです。
 - Grafana は任意です。command-center は Grafana を使いません。Pi では `.env` に `OBS_GRAFANA=0` を勧めます (Grafana を起動しません。約 100 MB と常時の処理が減ります。`/grafana/` は 502、証跡の版情報の grafana は `unknown`、`tools check` は Grafana を確かめません)。
 - ログイン (Authelia、LAN 公開時): 起動直後の待機で約 60 MiB、ログインの後は 100〜170 MiB (Go の実行環境が次のログイン用に残す分。`GOMEMLIMIT` 160MiB で早めに返す)。ログイン 1 回ごとに argon2id (32 MiB・3 回・4 並列) で CPU を使い、上限 0.5 コアのこの PC での計測で 1 回約 1 秒、4 人同時で 1〜1.6 秒、8 人同時で 3〜4 秒 (メモリは上限 `AUTHELIA_MEM` 既定 256m に達しても止まらず全件成功。Pi 4 はこれより遅くなります)。待機中の CPU はほぼ 0。ログインなしの構成 (127.0.0.1) では待機するだけです (約 1 MiB)。画面の要求ごとの問い合わせ (forward_auth) は内部ネットワーク内で数 ms です。
-- メモリ / CPU の上限は `.env` の `*_MEM` / `*_CPUS` (`.env.example` の resources) で変えられます。既定値は計測した最大使用量のおよそ 2 倍以上の余裕を残しています。
+- メモリ / CPU の上限は `.env` の `*_MEM` / `*_CPUS` (`config.example/.env.example` の resources) で変えられます。既定値は計測した最大使用量のおよそ 2 倍以上の余裕を残しています。
 
 ### 表示端末 (ブラウザ) の GPU と描画モード
 
@@ -231,7 +284,7 @@ docker compose --env-file testbed/testbed.env down -v                       # �
 
 Alloy は syslog を raw で受け (PRI から重要度・facility だけを取り、残りはそのまま)、`loki.process` で RFC5424 / RFC3164 のヘッダがあれば外します。YAMAHA 形式 (PRI のみ・時刻 / ホスト名 / タグなし) は本文をそのまま残すので、以前の RFC3164 パーサで起きていた先頭語の欠け (`PP[01] Rejected at ...` が `01] Rejected at ...`、`LAN2: link up` が `link up` になる) は起きません。デモの syslog も同じ経路なので、デモのログ表示も先頭語まで出るようになりました。raw 受信は Alloy の experimental 機能のため、alloy は `--stability.level=experimental` で動かしています。
 
-- 回帰テスト: `docker compose run --rm tools test-syslog` (`testbed/fixtures/syslog.jsonl` の各行を UDP と TCP で Alloy に送り、Loki に入った行の host / severity / facility / 本文を期待値と比べる)。テストの送信元 (tools コンテナ) は台帳に無いので、すべて `host="unknown"`・`src_ip`=送信元になり、ヘッダのホスト名は本文の先頭に残ることも確かめます。テストの行は `[obs-test …]` の印つきで実際の Loki に入るので、本番では testbed で実行するのがおすすめです (`SYSLOG_DROP_UNKNOWN=1` のときは届きません)。
+- 回帰テスト: `docker compose run --rm tools test-syslog` (機種ドライバの fixture `drivers/*/syslog.jsonl` の各行を UDP と TCP で Alloy に送り、Loki に入った行の host / severity / facility / 本文を期待値と比べる)。テストの送信元 (tools コンテナ) は台帳に無いので、すべて `host="unknown"`・`src_ip`=送信元になり、ヘッダのホスト名は本文の先頭に残ることも確かめます。テストの行は `[obs-test …]` の印つきで実際の Loki に入るので、本番では testbed で実行するのがおすすめです (`SYSLOG_DROP_UNKNOWN=1` のときは届きません)。
 - fixtures はデモ生成ログ (demo-gen) の形と、公開仕様 (RFC 3164 / 5424) の例の形から作ったものです。**実機の syslog はまだ採取していません**。実機ログを採取したら fixtures に足して形式を確かめてください。
 - 受信時刻でタイムスタンプします (RFC3164 / YAMAHA 形式は時刻やタイムゾーンを持たない / 持たないことがあるため。RFC5424 の時刻も使いません)。
 
@@ -282,7 +335,7 @@ docker compose run --rm tools user list
 ## バックアップ / 復元
 
 ```sh
-docker compose run --rm tools backup                 # backups/obs-backup-<日時 (JST、.env の TZ で変更)>.tar.gz
+docker compose run --rm tools backup                 # <設定ディレクトリ>/backups/obs-backup-<日時 (JST、.env の TZ で変更)>.tar.gz
 docker compose run --rm tools backup --include-env   # .env (秘密値) も含める。取り扱い注意
 docker compose run --rm tools backup --include-captures  # キャプチャのリングとアップロードした pcap も (既定は含めない)
 ```
@@ -307,7 +360,7 @@ docker compose up -d
 ```sh
 docker compose run --rm tools backup --include-env  # 念のため (更新前の版で取る)
 git pull                              # compose.yaml のイメージ (タグ + digest) や設定が更新される
-docker compose pull                   # 固定された新しいイメージを取得
+docker compose pull --ignore-buildable  # 固定された新しいイメージを取得 (自作イメージは次の --build で作る。配布イメージを使う場合は下記「配布イメージ」)
 scripts/doctor.sh                     # 新しい版の自己診断 (動いたままで可)
 OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build --remove-orphans  # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す。OBS_COMMIT は証跡出力の版情報)
 docker compose run --rm tools check
@@ -324,7 +377,7 @@ docker compose run --rm tools check
 リポジトリの検証を 1 つにまとめています (bash。Pi の Raspberry Pi OS と Windows の Git Bash + Docker Desktop で動きます。ホストには docker と python3 (標準ライブラリだけ) が要ります)。各検査は自分の終了コードと記録 (ログ) を持ち、最後に表を出します。試験用の別プロジェクト (`obs-e2e-*`、別のポート・ボリューム・サブネット) を作って終わったら `down -v` で消し、運用中のプロジェクトには触れません (イメージを作り直すだけ)。
 
 ```sh
-scripts/verify.sh            # quick: selftests compose doctor (数分)
+scripts/verify.sh            # quick: selftests compose leak-scan doctor (数分)
 scripts/verify.sh full       # + e2e-open e2e-auth resilience backup-restore upgrade arm64 (この PC で約 1 時間)
 scripts/verify.sh e2e-auth backup-restore   # 名前を並べて一部だけ
 ```
@@ -332,12 +385,13 @@ scripts/verify.sh e2e-auth backup-restore   # 名前を並べて一部だけ
 | 検査 | 内容 |
 |---|---|
 | selftests | 自作イメージを全部ビルド (ビルド時の selftest) し、各 selftest をきれいなコンテナでもう一度 (mask-api / notify-relay / analyzer / flowd / demo-gen / capture / testbed / tools) |
-| compose | compose の設定が解決できる: デモ (.env なし)・`testbed/testbed.env`・LAN 公開 + ログイン (ダミー値) |
+| compose | compose の設定が解決できる: デモ (.env なし)・`testbed/testbed.env`・LAN 公開 + ログイン (ダミー値)・リポジトリ外の設定ディレクトリ (`OBS_CONFIG_DIR` が `/config` に入る)・CI のリリース用 bake 定義 |
+| leak-scan | `scripts/leak-scan.sh` の selftest と作業ツリーの検査 (NG が 0 件。履歴は `scripts/leak-scan.sh --history`、下記「漏洩防止」) |
 | doctor | `scripts/doctor.sh` (このツリーの .env。init 前なら足りないものを NG で出します) |
-| e2e-open / e2e-auth | `scripts/e2e-fresh.sh open|auth`: `git clone` 相当のコピーで init (非対話) → (利用者追加) → doctor → up (prod + testbed) → `tools check` すべて OK → doctor → 画面・API・Grafana admin・(ログインあり: 新しい CA での HTTPS、HTTP → HTTPS、ログインなしで開かない、cookie の属性、admin / viewer の役割、Grafana は admin だけ)。`E2E_LAN_IP=<この PC の LAN の IP>` で本当の LAN 公開、無ければ 127.0.0.1 + `OBS_AUTH=1`。`E2E_CAPTURE=1` で capture profile も (testbed のブリッジを取り込み → flowd → Prometheus) |
+| e2e-open / e2e-auth | `scripts/e2e-fresh.sh open|auth`: `git clone` 相当のコピーで init (非対話) → (利用者追加) → doctor → up (prod + testbed) → `tools check` すべて OK → doctor → 画面・API・Grafana admin・(ログインあり: 新しい CA での HTTPS、HTTP → HTTPS、ログインなしで開かない、cookie の属性、admin / viewer の役割、Grafana は admin だけ)。`E2E_LAN_IP=<この PC の LAN の IP>` で本当の LAN 公開、無ければ 127.0.0.1 + `OBS_AUTH=1`。`E2E_CONFIG=outside` で設定をコピーの外の設定ディレクトリに置く (R1 の配置。リポジトリ側に何も書かないことも確かめる)。`E2E_CAPTURE=1` で capture profile も (testbed のブリッジを取り込み → flowd → Prometheus) |
 | resilience | `scripts/resilience.sh`: loki / prometheus / authelia / mask-api / notify-relay を 1 つずつ止めて、画面の API がエラーを返す (画面は DEGRADED / STALE。空の 200 で正常に見せない)・Authelia なしでは何も開かない (fail closed) → 起動すると自動で戻る。`REBOOT_CMD="sudo systemctl restart docker"` でホスト再起動相当 (全コンテナが restart: unless-stopped で戻り、`tools check` が OK) も (Linux のみ。または手で本当に再起動。Docker Desktop の `docker desktop restart` は使わない: この PC ではエンジンが起動しなくなった)。対象は `scripts/resilience.sh [プロジェクト [ツリー]]` で明示したものだけ (既定 obs-e2e-auth。環境変数の COMPOSE_PROJECT_NAME は使わない) |
 | backup-restore | `scripts/backup-restore.sh`: 上記「バックアップ / 復元」の往復 (ログインあり、別プロジェクトへ) |
-| upgrade | `scripts/upgrade.sh [版]`: 1 つ前の版 (既定 bb2f21d = P6) のデータボリュームを今の版で起動 (上記「更新」) |
+| upgrade | `scripts/upgrade.sh [版]`: 前の版 (既定 bb2f21d = P6。R1 の確認は `scripts/upgrade.sh faa7ba6`) のデータボリュームを今の版で起動 (上記「更新」)。続けて `tools migrate-config` で設定をリポジトリの外へ移し、同じデータのまま起動できること (`UPGRADE_MIGRATE=0` で省略) |
 | arm64 | `scripts/arm64.sh`: 取得するイメージの digest がすべて linux/arm64 と linux/amd64 を含むこと、自作イメージの linux/arm64 ビルド (selftest 込み。amd64 上では QEMU なので既定は依存の多い tools / flowd / analyzer。`ARM64_IMAGES="..."` で全部) |
 
 ### Pi で最初に (この PC で確かめられなかったこと)
@@ -352,13 +406,13 @@ scripts/verify.sh e2e-auth backup-restore   # 名前を並べて一部だけ
 Prometheus のアラートはすべて Alertmanager に送られ、Alertmanager が重大度 (critical / warning / info) ごとの送り先・再通知・復旧通知・抑止を受け持ちます。実際の送信は notify-relay が行い、通知文は日本語で、機器名・対象 (ifName)・値・開始時刻 (JST)・画面へのリンク (`OBS_PUBLIC_URL/?open=alerts`、開くと警報一覧) を含み、IP / MAC は mask-api と同じ規則で伏せます (例 `192.168.100.x`、`00:a0:de:xx:xx:xx`)。復旧 (resolved) も通知します。
 - 通知記録 (Loki `{job="notify"}`、P6): ラベル値 (instance / ifName) が IPv4 アドレスそのもののときは、画面と同じ `a.b.c.x~<トークン>` で記録します (mask-api と同じ HMAC・同じ鍵)。画面・原因候補で同じ機器として突き合わせられます (証跡の zip ではトークンを除き、そのような機器の範囲では記録をトークンで正確に選びます)。鍵は mask-api のプロセスごとの鍵で、新しい秘密値は増やしていません: mask-api がメモリ上だけのボリューム (`token-key`、tmpfs) に書き、notify-relay が読み取り専用で読みます (他のコンテナは見えません)。鍵が無いとき (まだ書かれていない・読めない) は従来どおり `a.b.c.x` で記録します。mask-api は記録のトークンを今の鍵で確かめ、合わないもの (mask-api と notify-relay がどちらも止まって鍵が変わる前の記録など) はトークンを外して `a.b.c.x` で表示します。IPv6 アドレスそのもののラベル値は `x` です。通知先へ送る本文の伏せ字は変わりません (本文にトークンは入れません)。
 
-- **既定はどこにも送りません。** 通知先は `alerting/receivers.yaml` (git 管理外。書式は `alerting/receivers.example.yaml`) に書き、秘密値 (Webhook URL・トークン・SMTP パスワード) は `.env` だけに置きます。setup (prod-setup / `tools targets`) がこの 2 つから Alertmanager の設定 (秘密値なし) と notify-relay の設定 (秘密値あり、`generated` ボリュームに権限 600) を作ります。ログに秘密値は出しません。
+- **既定はどこにも送りません。** 通知先は設定ディレクトリの `alerting/receivers.yaml` (リポジトリの外。書式は `config.example/alerting/receivers.example.yaml`) に書き、秘密値 (Webhook URL・トークン・SMTP パスワード) は `.env` だけに置きます。setup (prod-setup / `tools targets`) がこの 2 つから Alertmanager の設定 (秘密値なし) と notify-relay の設定 (秘密値あり、`generated` ボリュームに権限 600) を作ります。ログに秘密値は出しません。
 - 通知先の種類: メール (SMTP。`SMTP_TLS=starttls` / `tls` / `none`)、Slack (Incoming Webhook)、Discord (Webhook)、LINE (Messaging API の push。LINE Notify は 2025 年に終了済みのため使いません。チャネルアクセストークンを `.env`、送り先のユーザー ID / グループ ID を receivers.yaml に)、汎用 Webhook (JSON を POST。任意で Bearer トークン)。秘密値は種類ごとに 1 組です (メールの宛先は 1 件に複数書けます)。
 - 重大度ごとの送り先と再通知の間隔は `routes:` に書きます。書かない重大度は既定で critical / warning がすべての通知先、info は通知しません。間隔は解消するまで繰り返す間隔です (例 critical 1h)。
 - demo profile では receivers.yaml を使わず、外部へ送らない「デモ用受信先」(`demo-sink`) に記録するだけです。DEMO_AUTO_FAULTS の障害で、記録 (Loki `{job="notify"}`) と画面の「通知済」が見えます。 警報の詳細には、送られたはずの通知文 (伏せ字済み) も表示します。
 
 ```sh
-cp alerting/receivers.example.yaml alerting/receivers.yaml   # 編集し、秘密値は .env へ (または tools init の対話で作る)
+mkdir -p "$OBS_CONFIG_DIR/alerting" && cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/receivers.yaml"   # 編集し、秘密値は .env へ (または tools init の対話で作る。従来の配置ならリポジトリの alerting/)
 docker compose run --rm tools targets       # 設定を生成し Alertmanager に読み込ませる (docker compose up -d でも生成)
 docker compose run --rm tools notify-test   # 各通知先にテスト送信 (Alertmanager 経由)。結果と応答 (HTTP / SMTP) を表で出す
 docker compose run --rm tools notify-test --receiver mail   # 1 つだけ
@@ -485,7 +539,7 @@ demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分�
 ### ネットワーク図
 
 - 地球儀の右上の操作部の先頭のボタン (`ネットワーク図` / `地球儀`) で、同じ場所・同じ大きさのまま地球儀とネットワーク図を切り替えます (選択はブラウザに保存)。図を出している間、地球儀は描画を止めます (データは更新を続けます)。見出しは `網構成 NETWORK MAP`、右端に「ノード数 · 線の数 · LLDP の線の数」。
-- 構成は機器台帳から作ります。台帳の任意項目 `parent` (つながっている上位の機器の name)・`parent_if` (上位側の ifName)・`uplink_if` (この機器側の ifName) を書くと線になります (`inventory/devices.example.yaml`。親が無い・ループは `tools check` / `tools targets` がエラーにします)。`wan_interface` を書いた機器の先に「インターネット」を描きます。parent の無い機器は「接続先未設定」の行に並びます。デモは rtx1300 の lan1 に wlx413 / wlx222 です。
+- 構成は機器台帳から作ります。台帳の任意項目 `parent` (つながっている上位の機器の name)・`parent_if` (上位側の ifName)・`uplink_if` (この機器側の ifName) を書くと線になります (`config.example/inventory/devices.example.yaml`。親が無い・ループは `tools check` / `tools targets` がエラーにします)。`wan_interface` を書いた機器の先に「インターネット」を描きます。parent の無い機器は「接続先未設定」の行に並びます。デモは rtx1300 の lan1 に wlx413 / wlx222 です。
 - LLDP の線は、台帳と同じ 2 台の間でポートが一致する (または片方が不明) ときだけ台帳の線にまとめ (`台帳+LLDP`)、一致しないときは別の `LLDP` の線として描きます。LLDP のポート ID が ifName でない機器 (MAC アドレスやポート番号で返す機器) では、台帳と同じ接続でも別の LLDP の線になります (既知の制限)。
 - LLDP: 機器が LLDP-MIB (lldpRemTable) に答えれば、Prometheus の `lldp` ジョブ (2 分ごと、`snmp/lldp.yml` のモジュール、SNMP の GET / WALK だけ) が隣接を取り、図に足します。線ごとに出所を表示します: `台帳` (実線) / `LLDP` (破線) / `台帳+LLDP` (両方で一致)。台帳に無い隣接機器は LLDP の名前で点線の枠のノードになります (最大 12 台、状態は「—」)。**RTX / WLX が LLDP-MIB に答えるかは未確認**です。答えなくても図は台帳だけで成り立ちます。答える機種でも SNMPv3 のビューが `1.3.6.1.2.1` だけなら LLDP-MIB は見えません。見せる場合は機器側で読み取りビューに `1.0.8802.1.1.2` を足します (手作業・読み取りのみ。例 `snmpv3 vacm view 1 include 1.3.6.1.2.1 1.0.8802.1.1.2`、書式は機種のコマンドリファレンスで確認)。
 - ノード: 機器名・種別・状態 (UP / DOWN / STALE、一覧と同じ幅固定の状態表示)・発報中の警報数。インターネットのノードは WAN の IF の状態と、急増の件数。線: 接続 IF、利用率 (rate 2 min、in / out の大きい方)、エラーの有無 (`ERR なし` / `ERR あり` / 不明は `ERR —`)。利用率 70 % 以上かエラーで黄、90 % 以上か link DOWN で赤。
@@ -505,6 +559,44 @@ demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分�
 - 並べ方 (画面の「並べ方の規則」に同じ文): 関連度 3 = 同じ IF (急増は WAN の IF を通る通信として WAN の IF と同じとみなす)・同じ通信先 (ASN、無ければ国)、2 = 同じ機器・同じ端末、0 = 同時期 (時間が近いだけ)。関連度の高い順、同じ関連度の中は時刻順。`時刻順` に切り替えもできます。画面の先頭に常に「相関の候補であり、原因と断定するものではありません」と出します。
 - 各項目から: `詳細` (警報・機器・IF・送信元・syslog 行の詳細)、`解析` (パケット解析。窓の中で閉じたリングファイル (窓の終わり = 再生位置より後のパケットを含まないもの)、急増ならその端末のフィルタ)、`証跡` (その項目の範囲で、窓の期間の証跡 zip)。窓全体の証跡も出せます。
 - API: `GET /correlate/events?at=&from=&to=&instance=&ifName=&host=&cc=&asn=&alertname=` (mask-api の `correlate.py`、読み取りのみ。proxy は GET / HEAD だけ通します)。Prometheus / Loki へは mask-api 自身の読み取り経路 (許可リストと伏せ字) で問い合わせ、上限は窓 2 時間・syslog は重要度ごとに 60 行・通知 200 行・返す項目 300 件・全体 10 秒・同時 2 件 (超えると 429)。取れなかったソースは画面に「一部の取得に失敗」と出します。履歴再生中は再生位置より後を含めません。
+
+## 漏洩防止 (R1)
+
+- `.gitignore` は `.env*`・機器台帳・通知先・バックアップ・鍵 / 証明書・pcap (デモの合成 pcap を除く)・SQLite / DB・GeoIP DB を除外します
+  (設定はそもそもリポジトリの外: 上記「設定の置き場所」)。
+- `scripts/leak-scan.sh`: コミットされうるファイル (追跡中 + 無視されていない未追跡) を検査します。`--staged` でインデックス (次のコミットの中身。pre-commit フック)、`--history` で全履歴
+  (`git log -p --all` の追加行・コミットメッセージ・追加されたことのある全パス)、`--all` で両方。値は伏せて表示します (CI のログに出るため)。
+  - NG: ドキュメント用 (RFC 5737 `192.0.2.0/24` `198.51.100.0/24` `203.0.113.0/24`)・ループバック・`0.0.0.0/8`・マルチキャスト・リンクローカル・
+    compose の内部サブネット `172.31.253.0/24`・範囲の定義 (`10.0.0.0/8` など) 以外の IPv4、`2001:db8::/32` (RFC 3849) 以外のグローバル IPv6、
+    機器固有の MAC (universally administered。`xxxx.xxxx.xxxx` の形も。`00:00:5e:00:53:xx` (RFC 7042) とデモの `02:00:5e:*` は可)、秘密鍵・証明書、トークンの形
+    (Slack / Discord の Webhook、GitHub、AWS)、argon2 のハッシュ、パスワード等の `KEY=値` / `KEY: 値` (接頭辞なしの `PASSWORD=` や小文字の YAML のキー `password:` も。値が `${...}`・`<...>`・dummy / example / testbed 等なら可)、
+    `.env` / `*.env`・鍵・証明書・pcap・DB・設定のファイル。
+  - WARN (失敗にしない): YAMAHA の工場出荷時の `192.168.100.0/24` (例として使用)、ユニークローカル IPv6、ローカル管理 MAC。
+  - 例外: テストの値は行単位だけ: `scripts/leak-allow.txt` (パスとその行そのもの・理由。ファイルや値の丸ごとの除外はしない。履歴にも効く) か、行に `leak-scan: allow` の印。
+    検査しないファイルは `testbed/testbed.env` (ダミーの資格情報) と `demo/demo-home.pcap` (合成) だけ。
+- 呼ばれる所: pre-commit フック (任意: `git config core.hooksPath scripts/git-hooks`)、CI (`.github/workflows/ci.yml`: push / PR で `--all`)、
+  `scripts/doctor.sh` (表の「コミットしてはいけないデータ」)、`scripts/verify.sh` の `leak-scan`。
+
+## 機種ドライバ (R1)
+
+機種固有のもの (SNMP のモジュール、LLDP を読むか、syslog の fixture、デモの機器) は `drivers/<vendor-model>/` にあり、台帳の
+`kind` で選びます: `drivers/yamaha-rtx` (rtx)・`drivers/yamaha-wlx` (wlx)・`drivers/generic` (other)。他社機の追加手順は `docs/drivers.md`。
+
+## 配布イメージ (GHCR、R1)
+
+- 自作イメージは `ghcr.io/c-ardinal/geofront-nw-<svc>` (tools / mask-api / analyzer / flowd / notify-relay / demo-gen / capture、
+  linux/amd64 + linux/arm64)。タグ `v*` を push すると GitHub Actions (`.github/workflows/release.yml`) が両方の CPU でビルドし
+  (各 Dockerfile のビルド時 selftest)、`scripts/verify.sh selftests compose` と全部のビルドが通ってから登録します。
+- 使う: `.env` に `GEOFRONT_VERSION=v1.0.0` → `./geofront pull` → `./geofront up -d`。既定の `GEOFRONT_VERSION=local` は登録されない名前で、
+  `up --build` で手元でビルドします (従来どおり。compose.yaml に `build:` を残しています)。
+- push / PR では `.github/workflows/ci.yml` が leak-scan (`--all`) と `scripts/verify.sh selftests compose leak-scan` を動かします。
+  外部イメージ・Actions の更新提案は Dependabot (`.github/dependabot.yml`: docker-compose・docker・github-actions)。
+
+## ライセンス・商標
+
+- 本体は MIT License (`LICENSE`、c-ardinal)。依存する OSS とデータ (globe.gl・Google Fonts は画面が実行時に取得、Python パッケージ・
+  tshark / dumpcap (GPLv2、ソースの入手先)・DB-IP Lite (CC BY 4.0) など) は `THIRD_PARTY_NOTICES.md`。フォントは同梱していません。
+- YAMAHA / RTX / WLX は Yamaha Corporation の商標で、対応機種の名前としてだけ使っています (本プロジェクトは同社と無関係)。
 
 ## 既知の制限 (P1 時点)
 

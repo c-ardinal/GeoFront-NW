@@ -21,6 +21,7 @@ for name in ${ARM64_IMAGES:-tools flowd analyzer}; do
   case "$name" in
     tools) ctx+=(--build-context "repo=$ROOT") ;;
     analyzer) ctx+=(--build-context "demo=$ROOT/demo") ;;
+    demo-gen|testbed) ctx+=(--build-context "drivers=$ROOT/drivers") ;;
   esac
   t0=$(date +%s)
   if docker buildx build --platform linux/arm64 "${ctx[@]}" --output type=cacheonly "$ROOT/$name" > "${TMPDIR:-/tmp}/arm64-$name.log" 2>&1; then

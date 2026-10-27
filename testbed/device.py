@@ -5,7 +5,8 @@ Used only by the `testbed` compose profile to exercise the prod path (snmp-expor
 Alloy -> Loki) without hardware. It is NOT a model of RTX/WLX firmware: the interface tables mirror
 demo-gen's, only standard MIB-II / IF-MIB / LLDP-MIB objects are simulated (no YAMAHA private MIB; whether RTX/WLX
 answer LLDP-MIB at all is unconfirmed), and the syslog
-lines are the "yamaha" fixtures from testbed/fixtures/syslog.jsonl (PRI only, no timestamp/host/tag).
+lines are the "yamaha" fixtures of the device drivers (drivers/*/syslog.jsonl, in the image at /drivers; PRI only,
+no timestamp/host/tag).
 
 Env: TB_DEVICE (rtx1300 | wlx413), SNMP_V3_USER / SNMP_V3_AUTH_PASS / SNMP_V3_PRIV_PASS /
 SNMP_V3_AUTH_PROTO / SNMP_V3_PRIV_PROTO, SNMP_COMMUNITY (optional v2c), SYSLOG_HOST, SYSLOG_PORT,
@@ -26,7 +27,7 @@ from pathlib import Path
 
 DATA_DIR = Path("/tmp/snmpdata")
 PID_FILE = Path("/tmp/snmpsim.pid")
-FIXTURES = Path(os.environ.get("TB_FIXTURES", "/fixtures/syslog.jsonl"))
+DRIVERS = Path(os.environ.get("TB_DRIVERS", "/drivers"))  # drivers/*/syslog.jsonl: the syslog fixtures
 SNMP_PORT = 1161
 # ifIndex, ifName, ifDescr, ifHighSpeed (Mbps), operStatus (1 up, 2 down), in/out bytes per second
 INTERFACES = {
@@ -106,7 +107,8 @@ def responder(argv):
 
 
 def fixture_lines(model):
-    rows = [json.loads(line) for line in FIXTURES.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [json.loads(line) for f in sorted(DRIVERS.glob("*/syslog.jsonl"))
+            for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [r["raw"] for r in rows if r["model"] == model and r["form"] == "yamaha"]
 
 

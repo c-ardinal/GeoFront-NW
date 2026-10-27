@@ -1,4 +1,4 @@
-// Globe: rendering (default photo style / eva-film tactical style), selection highlight, zoom, click & hover,
+// Globe: rendering (default photo style / film tactical style), selection highlight, zoom, click & hover,
 // drawing mode (GPU: animated, at most 30 fps / LITE: static, drawn on change; render-mode.js) and frame pacing.
 import { $, el, esc, fmtBps, maskIp, distKm, REDUCED_MOTION, uiZoom, refitTickers } from './util.js';
 import { probeGpu, storedChoice, storeChoice, nextChoice, resolveMode, choiceLabel } from './render-mode.js';
@@ -16,7 +16,7 @@ const ARC_DASH_MS = 2200;
 const STYLES = {
   default: { out: ['rgba(255,176,0,0.25)', '#ffb000'], in: ['rgba(0,229,255,0.25)', '#00e5ff'], dim: 'rgba(150,170,180,0.10)', ring: '0,229,255', atmo: '#33d6ff', atmoAlt: 0.22 },
   // film: green graticule, solid orange hex land, green range rings around HOME plus two slow radar sweeps
-  'eva-film': { out: ['rgba(255,140,0,0.3)', '#ff8c00'], in: ['rgba(61,242,154,0.3)', '#3df29a'], dim: 'rgba(140,80,0,0.14)', ring: '255,140,0', atmo: '#ff8c00', atmoAlt: 0.07,
+  'film': { out: ['rgba(255,140,0,0.3)', '#ff8c00'], in: ['rgba(61,242,154,0.3)', '#3df29a'], dim: 'rgba(140,80,0,0.14)', ring: '255,140,0', atmo: '#ff8c00', atmoAlt: 0.07,
     hex: 'rgba(255,140,0,0.75)', grid: { step: 15, color: 'rgba(61,242,154,0.2)' },
     ranges: [
       ...[4, 8, 12].map((deg) => ({ deg, color: 'rgba(61,242,154,0.55)', dash: 0.01, gap: 0.01 })),
@@ -25,10 +25,10 @@ const STYLES = {
     ] },
 };
 const theme = () => document.documentElement.dataset.theme;
-const isEva = () => theme() === 'eva-film'; // tactical (non-photo) globe
+const isFilm = () => theme() === 'film'; // tactical (non-photo) globe
 const style = () => STYLES[theme()] || STYLES.default;
 
-// Country outlines for the eva globe (Natural Earth 110m, fetched with SRI).
+// Country outlines for the film globe (Natural Earth 110m, fetched with SRI).
 const COUNTRIES_URL = 'https://cdn.jsdelivr.net/npm/globe.gl@2.46.2/example/datasets/ne_110m_admin_0_countries.geojson';
 const COUNTRIES_SRI = 'sha384-hAVr+/g2HDlVDeHrAVqTIQV3tH1JE5AbtuvCSCcoeG+ZDteCU2XGaE5yLDiLP9m5';
 const geo = { land: null, failed: false, loading: false };
@@ -126,7 +126,7 @@ function applyMotion() {
     .arcsTransitionDuration(ms ?? 1000).pointsTransitionDuration(ms ?? 1000).labelsTransitionDuration(ms ?? 1000);
   globe.controls().autoRotate = on && !loop.stopped;
   pulses?.setStatic(!on);
-  if (isEva()) globe.pathsData(evaPaths(style()));
+  if (isFilm()) globe.pathsData(filmPaths(style()));
   applyData();
   if (on) setRunning(true); else wake(600);
 }
@@ -173,7 +173,7 @@ export function initGlobe(h) {
     .onGlobeClick((c) => { const k = pointAt(c); if (k) pick(k); else hideCard(); }) // near-miss on a small point still selects it
     .onPointHover((d) => { host.style.cursor = d ? 'pointer' : ''; })
     .pointOfView(DEFAULT_POV, 0)
-    // eva-only layers (empty in the default theme)
+    // film-only layers (empty in the default theme)
     .pathPoints((d) => d.pts).pathPointLat((p) => p[0]).pathPointLng((p) => p[1]).pathPointAlt(0.002)
     .pathColor((d) => d.color).pathDashLength((d) => d.dash).pathDashGap((d) => d.gap).pathDashAnimateTime((d) => d.anim)
     .pathTransitionDuration(0)
@@ -183,7 +183,7 @@ export function initGlobe(h) {
   host.addEventListener('pointermove', (e) => { const r = host.getBoundingClientRect(); pointer = { x: e.clientX - r.left, y: e.clientY - r.top }; wake(400); }, { passive: true });
   pulses = pulseLayer(globe);
   labels = labelLayer(globe, host);
-  // per rendered frame: hide the hit-target point meshes once they exist; redraw the eva labels if the camera moved
+  // per rendered frame: hide the hit-target point meshes once they exist; redraw the film labels if the camera moved
   globe.scene().onBeforeRender = () => {
     if (hidePoints > 0) {
       let n = 0;
@@ -306,9 +306,9 @@ export function setSelection(sel) {
   if (globe) applyData();
 }
 
-// eva graticule as two paths (one draw call each instead of one per line): every meridian but 180° in one path (they
+// film graticule as two paths (one draw call each instead of one per line): every meridian but 180° in one path (they
 // meet at the poles), and every parallel in one path joined along the 180° meridian, which that path draws exactly once
-function evaPaths({ grid, ranges }) {
+function filmPaths({ grid, ranges }) {
   const g = { color: grid.color, dash: 1, gap: 0, anim: 0 };
   const meridians = [];
   for (let lng = -180 + grid.step, up = true; lng < 180; lng += grid.step, up = !up) {
@@ -337,16 +337,16 @@ function loadCountries() {
     .catch(() => { geo.failed = true; styleGlobe(); }) // graticule-only fallback, noted in the panel header
     .finally(() => { geo.loading = false; });
 }
-export const geoOutlineFailed = () => isEva() && geo.failed;
+export const geoOutlineFailed = () => isFilm() && geo.failed;
 // All countries as ONE MultiPolygon: three-globe builds one mesh + material per hex-polygon datum, and ~170
-// separate country meshes cost ~170 draw calls and program look-ups every frame (most of the eva CPU time).
+// separate country meshes cost ~170 draw calls and program look-ups every frame (most of the film CPU time).
 function landFeature(features) {
   const coordinates = features.flatMap((f) => (f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates));
   return { type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates } };
 }
 
 // Theme switch never reloads textures: the default-theme textures are loaded once (on first default use, so a
-// page opened in a tactical theme never flashes the photo globe when they land late) and kept; the eva looks
+// page opened in a tactical theme never flashes the photo globe when they land late) and kept; the film looks
 // detach them from the material (kept for reuse, not disposed) and hide the sky sphere.
 const saved = { map: null, bump: null };
 let texturesRequested = false;
@@ -355,8 +355,8 @@ export function styleGlobe() {
   const s = style();
   globe.atmosphereColor(s.atmo).atmosphereAltitude(s.atmoAlt);
   labels?.restyle();
-  if (isEva()) {
-    globe.pathsData(evaPaths(s)).hexPolygonsData(geo.land ? [geo.land] : []);
+  if (isFilm()) {
+    globe.pathsData(filmPaths(s)).hexPolygonsData(geo.land ? [geo.land] : []);
     darken();
     loadCountries();
   } else {
@@ -375,7 +375,7 @@ export function styleGlobe() {
   applyData();
   wake(1500); // texture / outline changes land over the next frames
 }
-// Plain dark sphere for eva; re-asserted on each render in case a texture load lands late.
+// Plain dark sphere for film; re-asserted on each render in case a texture load lands late.
 const DARK = '080808';
 function darken() {
   const mat = globe.globeMaterial();
@@ -465,7 +465,7 @@ function applyData() {
     placed.push(c);
     return true;
   });
-  if (isEva()) {
+  if (isFilm()) {
     darken();
     globe.labelsData([]);
     // drawing order = priority for the screen-space thinning: selected destination, then HOME, then by bps

@@ -16,8 +16,8 @@ rule_files:
 
 scrape_configs:
   # Standard snmp_exporter pattern. The targets file is written by the tools container for the active profile:
-  #   demo: rtx1300 / wlx413 / wlx222 via demo-gen (which impersonates snmp_exporter, module if_mib);
-  #   prod: inventory/devices.yaml via the real snmp-exporter (modules if_mib,system, auth per device).
+  #   demo: the drivers' demo devices (drivers/*/demo.json) via demo-gen (which impersonates snmp_exporter, module if_mib);
+  #   prod: the inventory via the real snmp-exporter (modules from the device's driver, auth per device).
   # Each target carries __device (-> instance), __exporter (-> __address__) and the module / auth params.
   - job_name: snmp
     metrics_path: /snmp
@@ -32,15 +32,16 @@ scrape_configs:
       - source_labels: [__exporter]
         target_label: __address__
 
-  # LLDP neighbours for the network map (P5): the same devices as `snmp`, module `lldp` (snmp/lldp.yml; demo-gen
-  # answers it for the demo), every 2 min (adjacency changes rarely). Read-only like every SNMP request. A device
-  # without LLDP-MIB returns no rows; the map then relies on the inventory. Only the neighbour series is kept.
+  # LLDP neighbours for the network map (P5): the devices of `snmp` whose driver reads LLDP-MIB (drivers/*/driver.yaml
+  # lldp; all of today's), module `lldp` (snmp/lldp.yml; demo-gen answers it for the demo), every 2 min (adjacency
+  # changes rarely). Read-only like every SNMP request. A device without LLDP-MIB returns no rows; the map then relies
+  # on the inventory. Only the neighbour series is kept.
   - job_name: lldp
     metrics_path: /snmp
     scrape_interval: 2m
     scrape_timeout: 14s
     file_sd_configs:
-      - files: [/etc/obs-generated/prometheus/snmp.json]
+      - files: [/etc/obs-generated/prometheus/lldp.json]
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

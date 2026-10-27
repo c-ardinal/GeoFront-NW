@@ -1,10 +1,10 @@
-# 機器台帳の例。実際の台帳は inventory/devices.yaml (git 管理外) に置く:
+# 機器台帳の例。実際の台帳は設定ディレクトリ (OBS_CONFIG_DIR) の inventory/devices.yaml に置く (リポジトリには置かない):
 #   docker compose run --rm tools init        (対話で作る)
-#   または cp inventory/devices.example.yaml inventory/devices.yaml して編集
+#   または cp config.example/inventory/devices.example.yaml "$OBS_CONFIG_DIR/inventory/devices.yaml" して編集 (従来の配置ならリポジトリの inventory/)
 # 編集後: docker compose run --rm tools targets   (scrape 対象と syslog の送信元対応表を作り直す)
 #
 #   name:      表示名。Prometheus の instance、Loki の host になる (英小文字・数字・- _)
-#   kind:      rtx | wlx | other
+#   kind:      rtx | wlx | other (drivers/ のドライバ: drivers/yamaha-rtx・drivers/yamaha-wlx・drivers/generic)
 #   address:   管理 IP (IPv4) か DNS 名。SNMP の宛先 (host:port でポート指定可、既定 161)。
 #              syslog の送信元もこれで照合する (IP は送信元 IP と、DNS 名は送信元の逆引き名と一致させる)
 #   snmp_auth: snmp/auths.yml の auth 名。yamaha_v3 (SNMPv3 authPriv、推奨) / yamaha_v2c

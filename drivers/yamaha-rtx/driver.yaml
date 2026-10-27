@@ -1,0 +1,16 @@
+# Device driver: YAMAHA RTX routers (docs/drivers.md). Selected by the inventory's `kind`.
+name: yamaha-rtx
+label: YAMAHA RTX (router)
+kinds: [rtx]
+# snmp_exporter modules for the `snmp` job (built into the snmp_exporter image: IF-MIB ifTable/ifXTable, SNMPv2-MIB
+# system). No YAMAHA private MIB is used.
+snmp_modules: [if_mib, system]
+# LLDP-MIB neighbours through the `lldp` job (snmp/lldp.yml). Unconfirmed on real RTX firmware (README).
+lldp: true
+# a router: `tools init` asks for its WAN interface (wan_interface)
+wan: true
+# no wireless client count column
+wireless_clients: false
+# syslog: RTX lines have only a PRI (no timestamp / hostname / tag); alloy/config.alloy keeps such lines verbatim.
+# syslog.jsonl here = this driver's regression fixtures (tools test-syslog, the testbed's simulated device).
+# demo.json = its devices in the demo profile (demo-gen).

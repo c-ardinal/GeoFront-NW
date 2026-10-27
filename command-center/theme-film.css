@@ -1,11 +1,11 @@
-/* Optional "eva-film" theme (?theme=eva-film or the THEME toggle: STD <-> FILM).
+/* Optional "film" theme (?theme=film or the THEME toggle: STD <-> FILM).
    Styled after the language of anime command-room displays:
    heavy elongated Mincho kanji on solid signal-orange blocks, pure black ground, green for normal,
    deep red for emergency, hex status cells, segmented gauges, tick scales, vertical edge labels, code IDs.
    All wording and art are original; no logos, emblems, organisation or character names, no copied assets.
    Same layout, panels and data as the default theme; only tokens and decoration change.
    Text contrast of every token is measured in the hand-off (>= 4.5:1, large >= 3:1). */
-:root[data-theme="eva-film"] {
+:root[data-theme="film"] {
   --bg: #000;
   --panel: #000;
   --hdr-bg: #000;
@@ -37,35 +37,35 @@
 }
 
 /* faint orange hex grid in the gutters (panels are opaque, so it never sits behind text) */
-[data-theme="eva-film"] body {
+[data-theme="film"] body {
   background-color: var(--bg);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='48' viewBox='0 0 28 48'%3E%3Cpath d='M14 0l14 8v16l-14 8-14-8V8z M14 32v16' fill='none' stroke='%23ff8c00' stroke-opacity='0.14' stroke-width='1'/%3E%3C/svg%3E");
   background-size: 28px 48px;
 }
 
 /* ---- top bar: thick ruled bar, big white kanji title, stacked EN + code line ---- */
-[data-theme="eva-film"] #topbar { border: 1px solid var(--frame); border-top: 0; box-shadow: inset 0 4px 0 var(--accent);
+[data-theme="film"] #topbar { border: 1px solid var(--frame); border-top: 0; box-shadow: inset 0 4px 0 var(--accent);
   clip-path: polygon(0 0, 100% 0, 100% 100%, var(--chamfer) 100%, 0 calc(100% - var(--chamfer))); }
-[data-theme="eva-film"] .title {
+[data-theme="film"] .title {
   display: grid; grid-template-columns: auto auto; column-gap: var(--s3); align-items: center;
   font: 700 16px/16px var(--display); letter-spacing: 0.1em; color: var(--accent);
 }
-[data-theme="eva-film"] .title-ja {
+[data-theme="film"] .title-ja {
   display: inline-block; grid-row: span 2; font: 800 26px/26px var(--ja); color: var(--text); letter-spacing: 0.02em;
   transform: var(--tall); margin-top: 4px;
 }
-[data-theme="eva-film"] .title::after { content: 'CMD-07 // NODE WATCH SYSTEM'; font: 500 13px/14px var(--display); letter-spacing: 0.2em; color: var(--text-2); }
-[data-theme="eva-film"] .k-v, [data-theme="eva-film"] .w-v, [data-theme="eva-film"] .badge,
-[data-theme="eva-film"] .row .c.n, [data-theme="eva-film"] #clock, [data-theme="eva-film"] #age { font-family: var(--display); }
-[data-theme="eva-film"] .row .c.n { font-size: 15px; font-weight: 500; letter-spacing: 0.02em; }
-[data-theme="eva-film"] .k-v { font-size: 26px; font-weight: 700; }
-[data-theme="eva-film"] .w-v { font-size: 30px; font-weight: 700; }
-[data-theme="eva-film"] .kv, [data-theme="eva-film"] .k-l { text-transform: uppercase; letter-spacing: 0.06em; }
-[data-theme="eva-film"] .demo-label { background: var(--warn); font-family: var(--display); }
-[data-theme="eva-film"] .badge { border-width: 2px; }
+[data-theme="film"] .title::after { content: 'CMD-07 // NODE WATCH SYSTEM'; font: 500 13px/14px var(--display); letter-spacing: 0.2em; color: var(--text-2); }
+[data-theme="film"] .k-v, [data-theme="film"] .w-v, [data-theme="film"] .badge,
+[data-theme="film"] .row .c.n, [data-theme="film"] #clock, [data-theme="film"] #age { font-family: var(--display); }
+[data-theme="film"] .row .c.n { font-size: 15px; font-weight: 500; letter-spacing: 0.02em; }
+[data-theme="film"] .k-v { font-size: 26px; font-weight: 700; }
+[data-theme="film"] .w-v { font-size: 30px; font-weight: 700; }
+[data-theme="film"] .kv, [data-theme="film"] .k-l { text-transform: uppercase; letter-spacing: 0.06em; }
+[data-theme="film"] .demo-label { background: var(--warn); font-family: var(--display); }
+[data-theme="film"] .badge { border-width: 2px; }
 
 /* emergency banner: hazard block + 警報 hex cell at the left, never behind the text */
-[data-theme="eva-film"] #alert-banner {
+[data-theme="film"] #alert-banner {
   background-color: var(--banner);
   background-image: repeating-linear-gradient(-45deg, #000 0 8px, var(--banner) 8px 16px);
   background-size: 48px 100%; background-repeat: no-repeat;
@@ -74,15 +74,15 @@
   --banner-need: 540px; /* stripes + hex tag + counts + a readable part of the names */
 }
 /* Oswald sits ~1.5 px low in its 17 px line: lift the counts and names to the optical centre of the band */
-[data-theme="eva-film"] #alert-banner :is(.tk-lead, .tk-view) { position: relative; top: -1px; }
-[data-theme="eva-film"] #alert-banner::before {
+[data-theme="film"] #alert-banner :is(.tk-lead, .tk-view) { position: relative; top: -1px; }
+[data-theme="film"] #alert-banner::before {
   content: '\8B66\5831'; display: inline-block; flex: none; font: 800 16px/17px var(--ja); color: var(--warn); background: #000; transform: var(--tall); /* 長体 like the headings */
   padding: 0 14px; margin-right: var(--s3);
   clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 8px 100%, 0 50%);
 }
 
 /* ---- panels: chamfered corners, thick orange top rule and a thin double outline (inset, no layout change) ---- */
-[data-theme="eva-film"] .panel {
+[data-theme="film"] .panel {
   border-color: var(--frame);
   box-shadow: inset 0 3px 0 var(--accent), inset 0 0 0 3px #000, inset 0 0 0 4px var(--frame-2);
   clip-path: polygon(0 0, calc(100% - var(--chamfer)) 0, 100% var(--chamfer), 100% 100%, var(--chamfer-s) 100%, 0 calc(100% - var(--chamfer-s)));
@@ -94,73 +94,73 @@
   background-position: 100% 0, 0 100%;
   background-repeat: no-repeat;
 }
-[data-theme="eva-film"] .panel.stale { border-style: dashed; border-color: var(--crit); }
+[data-theme="film"] .panel.stale { border-style: dashed; border-color: var(--crit); }
 
 /* headers: solid orange kanji block (black text) flush left, EN in tall condensed white, double rule under */
-[data-theme="eva-film"] .panel > h2 {
+[data-theme="film"] .panel > h2 {
   background: linear-gradient(var(--accent), var(--accent)) 0 calc(100% - 1px) / 100% 2px no-repeat,
               linear-gradient(var(--frame), var(--frame)) 0 calc(100% - 5px) / 100% 1px no-repeat;
   border-bottom: 0; padding-bottom: 5px;
 }
-[data-theme="eva-film"] .h-ja {
+[data-theme="film"] .h-ja {
   display: inline-block; margin-left: calc(var(--s1) - var(--pad-x)); padding: 0 10px 0 6px;
   font: 800 16px/20px var(--ja); color: #000; background: var(--accent); letter-spacing: 0.02em;
   transform: var(--tall);
   clip-path: polygon(0 0, 100% 0, 100% 70%, calc(100% - 6px) 100%, 0 100%);
 }
-[data-theme="eva-film"] .h-t { font: 700 15px var(--display); letter-spacing: 0.08em; color: var(--text); }
+[data-theme="film"] .h-t { font: 700 15px var(--display); letter-spacing: 0.08em; color: var(--text); }
 /* small code IDs at the right end of the header (omitted where the header is already full) */
-[data-theme="eva-film"] .panel > h2::before { order: 9; font: 500 13px var(--display); letter-spacing: 0.08em; color: var(--accent); }
-[data-theme="eva-film"] .panel.stale > h2::before { display: none; } /* the STALE tag needs the room */
-[data-theme="eva-film"] #p-devices > h2::before { content: 'D-01'; }
-[data-theme="eva-film"] #p-src > h2::before { content: 'D-03'; }
-[data-theme="eva-film"] #p-unknown > h2::before { content: 'D-04'; }
-[data-theme="eva-film"] #p-globe > h2::before { content: 'G-00'; }
-[data-theme="eva-film"] #p-wan > h2::before { content: 'L-01'; }
-[data-theme="eva-film"] #p-if > h2::before { content: 'L-02'; }
-[data-theme="eva-film"] #p-wlan > h2::before { content: 'L-03'; }
-[data-theme="eva-film"] #p-alerts > h2::before { content: 'A-01'; }
-[data-theme="eva-film"] #p-logs > h2::before { content: 'R-01'; }
+[data-theme="film"] .panel > h2::before { order: 9; font: 500 13px var(--display); letter-spacing: 0.08em; color: var(--accent); }
+[data-theme="film"] .panel.stale > h2::before { display: none; } /* the STALE tag needs the room */
+[data-theme="film"] #p-devices > h2::before { content: 'D-01'; }
+[data-theme="film"] #p-src > h2::before { content: 'D-03'; }
+[data-theme="film"] #p-unknown > h2::before { content: 'D-04'; }
+[data-theme="film"] #p-globe > h2::before { content: 'G-00'; }
+[data-theme="film"] #p-wan > h2::before { content: 'L-01'; }
+[data-theme="film"] #p-if > h2::before { content: 'L-02'; }
+[data-theme="film"] #p-wlan > h2::before { content: 'L-03'; }
+[data-theme="film"] #p-alerts > h2::before { content: 'A-01'; }
+[data-theme="film"] #p-logs > h2::before { content: 'R-01'; }
 
 /* ---- status: filled hex cells, black/white text plus an icon (never colour alone) ---- */
-[data-theme="eva-film"] .st {
+[data-theme="film"] .st {
   border: 0; font: 600 13px/18px var(--display); letter-spacing: 0.08em;
   clip-path: polygon(7px 0, calc(100% - 7px) 0, 100% 50%, calc(100% - 7px) 100%, 7px 100%, 0 50%);
 }
 /* notification slot: Japanese words (Orbitron has no kana); pending / none stay unfilled */
-[data-theme="eva-film"] .st.nt { font-family: var(--sans); letter-spacing: 0; }
-[data-theme="eva-film"] .st.nt-pending, [data-theme="eva-film"] .st.nt-none { box-shadow: inset 0 0 0 1px var(--text-2); }
-[data-theme="eva-film"] .st-ok { background: var(--ok); color: #000; }
-[data-theme="eva-film"] .st-warn { background: var(--warn); color: #000; }
-[data-theme="eva-film"] .st-crit { background: var(--crit-fill); color: #fff; }
-[data-theme="eva-film"] .st-unknown { background: var(--unknown); color: #000; }
-[data-theme="eva-film"] .st-info { background: var(--accent); color: #000; }
-[data-theme="eva-film"] .st-ok::before { content: '\25CF\00A0'; }
-[data-theme="eva-film"] .st-warn::before { content: '\25B2\00A0'; }
-[data-theme="eva-film"] .st-crit::before { content: '\25A0\00A0'; }
-[data-theme="eva-film"] .st-unknown { letter-spacing: 0.01em; }
-[data-theme="eva-film"] .st-unknown::before { content: '?\2009'; }
-[data-theme="eva-film"] .st-info::before { content: '\25C6\00A0'; }
+[data-theme="film"] .st.nt { font-family: var(--sans); letter-spacing: 0; }
+[data-theme="film"] .st.nt-pending, [data-theme="film"] .st.nt-none { box-shadow: inset 0 0 0 1px var(--text-2); }
+[data-theme="film"] .st-ok { background: var(--ok); color: #000; }
+[data-theme="film"] .st-warn { background: var(--warn); color: #000; }
+[data-theme="film"] .st-crit { background: var(--crit-fill); color: #fff; }
+[data-theme="film"] .st-unknown { background: var(--unknown); color: #000; }
+[data-theme="film"] .st-info { background: var(--accent); color: #000; }
+[data-theme="film"] .st-ok::before { content: '\25CF\00A0'; }
+[data-theme="film"] .st-warn::before { content: '\25B2\00A0'; }
+[data-theme="film"] .st-crit::before { content: '\25A0\00A0'; }
+[data-theme="film"] .st-unknown { letter-spacing: 0.01em; }
+[data-theme="film"] .st-unknown::before { content: '?\2009'; }
+[data-theme="film"] .st-info::before { content: '\25C6\00A0'; }
 /* DOWN: slow 2.4 s dim pulse of the whole cell (text keeps >= 4.5:1 at both ends) */
 /* (a black layer at 30 % over the cell = brightness 0.7, animated by opacity only) */
-[data-theme="eva-film"] .st-down { background: var(--crit-fill); }
-[data-theme="eva-film"] .st-down::after { z-index: 1; background: #000; opacity: 0; animation: film-dim 2.4s ease-in-out infinite; }
+[data-theme="film"] .st-down { background: var(--crit-fill); }
+[data-theme="film"] .st-down::after { z-index: 1; background: #000; opacity: 0; animation: film-dim 2.4s ease-in-out infinite; }
 @keyframes film-dim { 50% { opacity: 0.3; } }
 
 /* ---- segmented bar gauges ---- */
-[data-theme="eva-film"] .bar { height: 10px; background: repeating-linear-gradient(90deg, var(--track) 0 5px, transparent 5px 7px); }
-[data-theme="eva-film"] .bar::after { background: repeating-linear-gradient(90deg, var(--accent) 0 5px, transparent 5px 7px); }
+[data-theme="film"] .bar { height: 10px; background: repeating-linear-gradient(90deg, var(--track) 0 5px, transparent 5px 7px); }
+[data-theme="film"] .bar::after { background: repeating-linear-gradient(90deg, var(--accent) 0 5px, transparent 5px 7px); }
 
 /* ---- globe: vertical edge label, bearing scale along the bottom, latitude scale on the right ---- */
-[data-theme="eva-film"] .lg-out { background: #ff8c00; }
-[data-theme="eva-film"] .lg-in { background: #3df29a; }
-[data-theme="eva-film"] .globe-wrap { background: #000; }
-[data-theme="eva-film"] .globe-wrap::before {
+[data-theme="film"] .lg-out { background: #ff8c00; }
+[data-theme="film"] .lg-in { background: #3df29a; }
+[data-theme="film"] .globe-wrap { background: #000; }
+[data-theme="film"] .globe-wrap::before {
   content: '\5E83\57DF\8D70\67FB\3000GLOBAL SCAN \00B7 SECTOR 07'; position: absolute; left: var(--s3); top: var(--s3); z-index: 2; pointer-events: none;
   writing-mode: vertical-rl; font: 800 16px/20px var(--ja); letter-spacing: 0.16em; color: var(--accent);
   border-left: 2px solid var(--accent); padding-left: var(--s1);
 }
-[data-theme="eva-film"] .globe-wrap::after {
+[data-theme="film"] .globe-wrap::after {
   content: '000 030 060 090 120 150 180 210 240 270 300 330 360'; position: absolute; left: 56px; right: 64px; bottom: var(--s2); z-index: 2;
   pointer-events: none; height: 30px; padding-top: 12px;
   font: 500 13px/18px var(--display); letter-spacing: 0.04em; color: var(--text-2);
@@ -170,7 +170,7 @@
     linear-gradient(90deg, var(--accent) 0 1px, transparent 1px) 11px 0 / calc((100% - 22px) / 12) 10px repeat-x,
     linear-gradient(90deg, var(--frame) 0 1px, transparent 1px) 11px 0 / calc((100% - 22px) / 60) 5px repeat-x;
 }
-[data-theme="eva-film"] #p-globe::after {
+[data-theme="film"] #p-globe::after {
   content: '+60\A+30\A 00\A\2212 30\A\2212 60'; white-space: pre; position: absolute; right: var(--s3); top: 196px; z-index: 2; pointer-events: none;
   width: 44px; height: 400px; padding-right: 14px; text-align: right;
   font: 500 13px/80px var(--display); color: var(--text-2);
@@ -181,19 +181,19 @@
 }
 
 /* network map (P5): the edge label names the map; the globe's bearing / latitude scales are not shown over it */
-[data-theme="eva-film"] #p-globe.topo-on .globe-wrap::before { content: '\7DB2\69CB\6210\3000NETWORK MAP \00B7 SECTOR 07'; z-index: 3; }
-[data-theme="eva-film"] #p-globe.topo-on .globe-wrap::after, [data-theme="eva-film"] #p-globe.topo-on::after { display: none; }
-[data-theme="eva-film"] .topo { background: #000; padding-left: 40px; }
-[data-theme="eva-film"] .topo-node { background: #000; border-color: var(--frame); border-left: 4px solid var(--accent);
+[data-theme="film"] #p-globe.topo-on .globe-wrap::before { content: '\7DB2\69CB\6210\3000NETWORK MAP \00B7 SECTOR 07'; z-index: 3; }
+[data-theme="film"] #p-globe.topo-on .globe-wrap::after, [data-theme="film"] #p-globe.topo-on::after { display: none; }
+[data-theme="film"] .topo { background: #000; padding-left: 40px; }
+[data-theme="film"] .topo-node { background: #000; border-color: var(--frame); border-left: 4px solid var(--accent);
   clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%); }
-[data-theme="eva-film"] .topo-node.t-internet { border-left-color: var(--ok); }
-[data-theme="eva-film"] .topo-node.tn-down { background: var(--crit-tint); border-color: var(--crit-fill); }
-[data-theme="eva-film"] :is(.tn-name, .tn-kind, .tc-util) { font-family: var(--display); letter-spacing: 0.06em; }
-[data-theme="eva-film"] .topo-node.t-internet .tn-name { font: 800 16px/20px var(--ja); letter-spacing: 0; }
-[data-theme="eva-film"] .topo-chip { background: #000; border-color: var(--frame); }
-[data-theme="eva-film"] .topo-link { stroke: var(--frame); }
-[data-theme="eva-film"] .topo-link.k-ok { stroke: var(--ok); }
-[data-theme="eva-film"] .g-view { font-family: var(--sans); border-color: var(--accent); }
+[data-theme="film"] .topo-node.t-internet { border-left-color: var(--ok); }
+[data-theme="film"] .topo-node.tn-down { background: var(--crit-tint); border-color: var(--crit-fill); }
+[data-theme="film"] :is(.tn-name, .tn-kind, .tc-util) { font-family: var(--display); letter-spacing: 0.06em; }
+[data-theme="film"] .topo-node.t-internet .tn-name { font: 800 16px/20px var(--ja); letter-spacing: 0; }
+[data-theme="film"] .topo-chip { background: #000; border-color: var(--frame); }
+[data-theme="film"] .topo-link { stroke: var(--frame); }
+[data-theme="film"] .topo-link.k-ok { stroke: var(--ok); }
+[data-theme="film"] .g-view { font-family: var(--sans); border-color: var(--accent); }
 
 /* globe labels of this theme's tactical globe: drawn into one canvas over the globe (globe-layers.js) with the look and
    geometry of these rules, read from a hidden sample .glabel element */
@@ -208,27 +208,27 @@
 .glabel-home span { color: var(--text); border-left-color: var(--warn); font-size: 14px; }
 .glabel-home::before { background: var(--warn); }
 /* black chip, orange code bar */
-[data-theme="eva-film"] .glabel span { color: var(--text); border-left: 3px solid var(--accent); letter-spacing: 0.1em; }
-[data-theme="eva-film"] .glabel-home span { color: #000; background: var(--warn); border-left-color: #000; }
+[data-theme="film"] .glabel span { color: var(--text); border-left: 3px solid var(--accent); letter-spacing: 0.1em; }
+[data-theme="film"] .glabel-home span { color: #000; background: var(--warn); border-left-color: #000; }
 
 /* ---- emergency: hazard frame in the page gutter + red 警報 band at the foot of the alerts panel ---- */
-[data-theme="eva-film"] body.red-alert::before {
+[data-theme="film"] body.red-alert::before {
   border: 6px solid transparent;
   border-image: repeating-linear-gradient(-45deg, var(--crit-fill) 0 10px, #000 10px 20px) 6;
   animation-duration: 3s;
 }
-[data-theme="eva-film"] body.red-alert #topbar { box-shadow: inset 0 4px 0 var(--crit-fill); }
-[data-theme="eva-film"] body.red-alert #p-alerts { box-shadow: inset 0 3px 0 var(--crit-fill), inset 0 0 0 3px #000, inset 0 0 0 4px var(--crit-fill); }
-[data-theme="eva-film"] body.red-alert #p-alerts .h-ja { background: var(--crit-fill); color: #fff; }
-[data-theme="eva-film"] body.red-alert #p-alerts .rows.scroll { margin-bottom: 46px; }
+[data-theme="film"] body.red-alert #topbar { box-shadow: inset 0 4px 0 var(--crit-fill); }
+[data-theme="film"] body.red-alert #p-alerts { box-shadow: inset 0 3px 0 var(--crit-fill), inset 0 0 0 3px #000, inset 0 0 0 4px var(--crit-fill); }
+[data-theme="film"] body.red-alert #p-alerts .h-ja { background: var(--crit-fill); color: #fff; }
+[data-theme="film"] body.red-alert #p-alerts .rows.scroll { margin-bottom: 46px; }
 /* band = ::before (static red field, slow pulse); text = ::after, two identical halves scrolling as a seamless loop
    (transform only, ~65 px/s; paused on hover/focus; static under reduced motion). Decorative: empty alt text. */
-[data-theme="eva-film"] body.red-alert #p-alerts::before {
+[data-theme="film"] body.red-alert #p-alerts::before {
   content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 44px; z-index: 1;
   background: repeating-linear-gradient(-45deg, #000 0 8px, var(--crit-fill) 8px 16px) 0 0 / 100% 8px no-repeat, var(--banner);
   animation: film-band 3s ease-in-out infinite;
 }
-[data-theme="eva-film"] body.red-alert #p-alerts::after {
+[data-theme="film"] body.red-alert #p-alerts::after {
   content: '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 '
            '\8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 \8B66\5831\3000 ALERT\3000 ' / '';
   /* text centred in the red field under the 8 px hazard stripe (2 px bottom pad: the elongated Mincho ink sits low in its box) */
@@ -237,61 +237,61 @@
   font: 800 22px/1 var(--ja); letter-spacing: 0.14em; color: #fff; transform: scaleY(1.35);
   animation: film-scroll 18s linear infinite;
 }
-[data-theme="eva-film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
+[data-theme="film"] body.red-alert #p-alerts:is(:hover, :focus-within)::after { animation-play-state: paused; }
 /* the band dims to ~#7a0804 (69 % of the banner red over the dark panel) by opacity: no repaint per frame */
 @keyframes film-band { 50% { opacity: 0.69; } }
 @keyframes film-scroll { from { transform: scaleY(1.35); } to { transform: translateX(-50%) scaleY(1.35); } }
 
-[data-theme="eva-film"] :is(#theme-toggle, #render-toggle) { border-color: var(--accent); color: var(--text); font-family: var(--display); }
-[data-theme="eva-film"] :is(#pb-enter, #menu-logout) { border-color: var(--accent); color: var(--text); } /* kana: keeps the sans face (Oswald has none) */
+[data-theme="film"] :is(#theme-toggle, #render-toggle) { border-color: var(--accent); color: var(--text); font-family: var(--display); }
+[data-theme="film"] :is(#pb-enter, #menu-logout) { border-color: var(--accent); color: var(--text); } /* kana: keeps the sans face (Oswald has none) */
 
 /* ---- drawer / modal frames ---- */
-[data-theme="eva-film"] #drawer, [data-theme="eva-film"] #modal {
+[data-theme="film"] #drawer, [data-theme="film"] #modal {
   box-shadow: inset 0 4px 0 var(--accent), inset 0 0 0 3px #000, inset 0 0 0 4px var(--frame-2);
   clip-path: polygon(0 0, calc(100% - var(--chamfer)) 0, 100% var(--chamfer), 100% 100%, var(--chamfer-s) 100%, 0 calc(100% - var(--chamfer-s)));
 }
-[data-theme="eva-film"] .drawer-head, [data-theme="eva-film"] .modal-head {
+[data-theme="film"] .drawer-head, [data-theme="film"] .modal-head {
   background: linear-gradient(var(--accent), var(--accent)) 0 calc(100% - 1px) / 100% 2px no-repeat,
               linear-gradient(var(--frame), var(--frame)) 0 calc(100% - 5px) / 100% 1px no-repeat;
   border-bottom: 0; padding: 12px var(--pad-x) 12px;
 }
-[data-theme="eva-film"] #modal-title, [data-theme="eva-film"] #drawer-title { font: 700 22px var(--display); letter-spacing: 0.08em; }
-[data-theme="eva-film"] #drawer-title::before, [data-theme="eva-film"] #modal-title::before {
+[data-theme="film"] #modal-title, [data-theme="film"] #drawer-title { font: 700 22px var(--display); letter-spacing: 0.08em; }
+[data-theme="film"] #drawer-title::before, [data-theme="film"] #modal-title::before {
   content: '\8A73\7D30'; display: inline-block; margin-right: var(--s3); padding: 0 var(--s2);
   font: 800 18px/24px var(--ja); color: #000; background: var(--accent); transform: var(--tall);
 }
-[data-theme="eva-film"] .v-h { font-family: var(--display); letter-spacing: 0.1em; border-bottom: 3px double var(--frame); }
-[data-theme="eva-film"] .v-h::before { content: ''; width: 10px; height: 10px; background: var(--accent); flex: 0 0 auto; }
-[data-theme="eva-film"] .gtip { border-width: 2px; }
+[data-theme="film"] .v-h { font-family: var(--display); letter-spacing: 0.1em; border-bottom: 3px double var(--frame); }
+[data-theme="film"] .v-h::before { content: ''; width: 10px; height: 10px; background: var(--accent); flex: 0 0 auto; }
+[data-theme="film"] .gtip { border-width: 2px; }
 
 /* ---- PLAYBACK: the bar in the film language (Mincho tag block, display face for times); the quiet banner drops the hazard block ---- */
-[data-theme="eva-film"] .pb { background: #000; border: 1px solid var(--frame); border-left: 6px solid var(--accent); }
-[data-theme="eva-film"] .pb-tag { font: 800 17px/20px var(--ja); color: #000; transform: var(--tall); }
-[data-theme="eva-film"] :is(.pb-btn, #pb-speed, .pb-fld input) { background: #000; border-color: var(--frame); font-family: var(--display); letter-spacing: 0.04em; }
-[data-theme="eva-film"] .pb-btn:hover { background: var(--hover); border-color: var(--accent); }
-[data-theme="eva-film"] .tk-pb { font-family: var(--display); color: #000; }
-[data-theme="eva-film"] #alert-banner.pb-quiet { background: #000; background-image: none; padding-left: var(--s3); clip-path: none; color: var(--text); box-shadow: inset 0 0 0 2px var(--accent); }
-[data-theme="eva-film"] #alert-banner.pb-quiet::before { display: none; }
+[data-theme="film"] .pb { background: #000; border: 1px solid var(--frame); border-left: 6px solid var(--accent); }
+[data-theme="film"] .pb-tag { font: 800 17px/20px var(--ja); color: #000; transform: var(--tall); }
+[data-theme="film"] :is(.pb-btn, #pb-speed, .pb-fld input) { background: #000; border-color: var(--frame); font-family: var(--display); letter-spacing: 0.04em; }
+[data-theme="film"] .pb-btn:hover { background: var(--hover); border-color: var(--accent); }
+[data-theme="film"] .tk-pb { font-family: var(--display); color: #000; }
+[data-theme="film"] #alert-banner.pb-quiet { background: #000; background-image: none; padding-left: var(--s3); clip-path: none; color: var(--text); box-shadow: inset 0 0 0 2px var(--accent); }
+[data-theme="film"] #alert-banner.pb-quiet::before { display: none; }
 
 /* ---- tablet / phone ---- */
-[data-theme="eva-film"] #tabs button { font: 800 17px var(--ja); letter-spacing: 0.1em; color: var(--accent); background: #000; border-color: var(--frame); }
-[data-theme="eva-film"] #tabs button[aria-current="true"] { color: #000; background: var(--accent); border-color: var(--accent); box-shadow: none; }
-[data-theme="eva-film"] #tabs b:not(:empty) { font-family: var(--display); }
+[data-theme="film"] #tabs button { font: 800 17px var(--ja); letter-spacing: 0.1em; color: var(--accent); background: #000; border-color: var(--frame); }
+[data-theme="film"] #tabs button[aria-current="true"] { color: #000; background: var(--accent); border-color: var(--accent); box-shadow: none; }
+[data-theme="film"] #tabs b:not(:empty) { font-family: var(--display); }
 /* the latitude scale needs a tall globe (top 196 px + 400 px) */
 @media (max-width: 1279px) {
-  [data-theme="eva-film"] #p-globe::after { display: none; }
+  [data-theme="film"] #p-globe::after { display: none; }
   /* compact bar: while investigating the kanji title alone identifies the screen (room for BACK TO LIVE) */
-  [data-theme="eva-film"] #topbar:has(#back-live:not([hidden])) .title { font-size: 0; column-gap: 0; }
-  [data-theme="eva-film"] #topbar:has(#back-live:not([hidden])) .title::after { display: none; }
+  [data-theme="film"] #topbar:has(#back-live:not([hidden])) .title { font-size: 0; column-gap: 0; }
+  [data-theme="film"] #topbar:has(#back-live:not([hidden])) .title::after { display: none; }
 }
 @media (max-width: 767px) {
-  [data-theme="eva-film"] .title { font-size: 0; column-gap: 0; }
-  [data-theme="eva-film"] .title::after { display: none; }
-  [data-theme="eva-film"] .title-ja { font-size: 20px; line-height: 22px; margin-top: 0; }
-  [data-theme="eva-film"] .st { font-size: 14px; letter-spacing: 0.02em; }
-  [data-theme="eva-film"] .panel > h2::before { display: none; } /* code IDs: no room on a phone header */
-  [data-theme="eva-film"] .globe-wrap::before, [data-theme="eva-film"] .globe-wrap::after { display: none; } /* 300 px globe */
-  [data-theme="eva-film"] .row .c.n { font-size: 15px; }
-  [data-theme="eva-film"] #alert-banner { padding-left: 30px; background-size: 22px 100%; }
-  [data-theme="eva-film"] #alert-banner::before { padding: 0 10px; margin-right: var(--s2); }
+  [data-theme="film"] .title { font-size: 0; column-gap: 0; }
+  [data-theme="film"] .title::after { display: none; }
+  [data-theme="film"] .title-ja { font-size: 20px; line-height: 22px; margin-top: 0; }
+  [data-theme="film"] .st { font-size: 14px; letter-spacing: 0.02em; }
+  [data-theme="film"] .panel > h2::before { display: none; } /* code IDs: no room on a phone header */
+  [data-theme="film"] .globe-wrap::before, [data-theme="film"] .globe-wrap::after { display: none; } /* 300 px globe */
+  [data-theme="film"] .row .c.n { font-size: 15px; }
+  [data-theme="film"] #alert-banner { padding-left: 30px; background-size: 22px 100%; }
+  [data-theme="film"] #alert-banner::before { padding: 0 10px; margin-right: var(--s2); }
 }

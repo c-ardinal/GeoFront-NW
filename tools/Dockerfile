@@ -6,7 +6,7 @@ RUN pip install --no-cache-dir --only-binary=:all: PyYAML==6.0.3 argon2-cffi==25
 WORKDIR /app
 COPY obs.py notify.py capture.py auth.py doctor.py ./
 # the selftest reads a few repository files (compose: additional context "repo"); bound for this step only, not kept
-RUN --mount=type=bind,from=repo,source=README.md,target=/selftest/README.md     --mount=type=bind,from=repo,source=.env.example,target=/selftest/.env.example     --mount=type=bind,from=repo,source=snmp,target=/selftest/snmp     --mount=type=bind,from=repo,source=dashboards,target=/selftest/dashboards     OBS_WORK=/selftest OBS_GENERATED=/tmp/gen OBS_VOLUMES=/tmp/vol python obs.py --selftest
+RUN --mount=type=bind,from=repo,source=README.md,target=/selftest/README.md     --mount=type=bind,from=repo,source=config.example,target=/selftest/config.example     --mount=type=bind,from=repo,source=drivers,target=/selftest/drivers     --mount=type=bind,from=repo,source=snmp,target=/selftest/snmp     --mount=type=bind,from=repo,source=dashboards,target=/selftest/dashboards     OBS_WORK=/selftest OBS_CONFIG=/tmp/cfg OBS_GENERATED=/tmp/gen OBS_VOLUMES=/tmp/vol python obs.py --selftest
 ENV PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 ENTRYPOINT ["python", "/app/obs.py"]
 CMD ["help"]

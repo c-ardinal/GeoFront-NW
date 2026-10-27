@@ -40,7 +40,7 @@ def download(url, dest, opener=urllib.request.urlopen, timeout=60):
     """url (.mmdb.gz) -> dest (uncompressed), bounded; raises OSError / ValueError."""
     tmp = dest.with_name(f".{dest.name}.part")
     try:
-        with opener(urllib.request.Request(url, headers={"User-Agent": "yamaha-observatory-tools"}), timeout=timeout) as r, \
+        with opener(urllib.request.Request(url, headers={"User-Agent": "geofront-nw-tools"}), timeout=timeout) as r, \
                 gzip.GzipFile(fileobj=r) as gz, open(tmp, "wb") as out:
             total = 0
             while True:

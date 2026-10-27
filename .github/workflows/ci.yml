@@ -1,0 +1,39 @@
+# Push / pull request: the leak scan (working tree and full history) and the light verification (every self-built image
+# with its build-time selftest, each selftest again in a clean container, compose configurations). No secrets needed.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  leak-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0  # the whole history: --all scans every commit of every ref
+      - name: leak-scan selftest
+        run: python3 scripts/leak_scan.py --selftest
+      - name: leak-scan (working tree + history)
+        run: bash scripts/leak-scan.sh --all
+
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: scripts/verify.sh selftests compose leak-scan
+        env:
+          VERIFY_LOGS: ${{ runner.temp }}/verify
+        run: bash scripts/verify.sh selftests compose leak-scan
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: verify-logs
+          path: ${{ runner.temp }}/verify
+          retention-days: 7

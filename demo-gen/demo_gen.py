@@ -1,10 +1,12 @@
-"""Synthetic stand-in for YAMAHA RTX1300 / WLX413 / WLX222 (DEMO DATA, not observed reality).
+"""Synthetic demo devices (DEMO DATA, not observed reality): the device drivers' demo.json (drivers/*/demo.json, in the
+image at /drivers; today YAMAHA RTX1300 / WLX413 / WLX222).
 
 - GET /snmp?target=<dev>&module=if_mib  snmp_exporter-compatible exposition (module=lldp: LLDP neighbours only)
 - GET /flows                            demo_flow_bytes_total counters
 - GET /fault/{down,wanspike,logburst,counter_reset,status}
 - RFC3164 syslog over UDP to $SYSLOG_HOST:$SYSLOG_PORT
 """
+import json
 import math
 import os
 import random
@@ -13,17 +15,32 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 MBPS = 1_000_000 / 8  # bytes/s per Mbps
 
+
+def load_demo(root):
+    """drivers/*/demo.json (sorted by driver) -> (devices, log pool per device, error log pool of all drivers)."""
+    devices, logs, errors = {}, {}, []
+    for f in sorted(Path(root).glob("*/demo.json")):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        for name, dev in d["devices"].items():
+            devices[name] = dev
+            logs[name] = [tuple(x) for x in d["logs"]]
+        errors += [tuple(x) for x in d.get("error_logs", [])]
+    if not devices:
+        sys.exit(f"no demo devices in {root}/*/demo.json")
+    return devices, logs, errors
+
+
+DEMO, LOGS, ERR_LOGS = load_demo(os.environ.get("DEMO_DRIVERS", "/drivers"))
 # ifIndex, ifName, ifDescr, ifHighSpeed (Mbps), operStatus (1 up, 2 down)
-DEVICES = {
-    "rtx1300": [(1, "lan1", "LAN1 (LAN)", 1000, 1), (2, "lan2", "LAN2 (WAN)", 1000, 1), (3, "lan3", "LAN3", 1000, 2)],
-    "wlx413": [(1, "lan1", "LAN1", 1000, 1), (2, "wlan0", "WLAN 2.4GHz", 300, 1), (3, "wlan1", "WLAN 5GHz", 1200, 1)],
-    "wlx222": [(1, "lan1", "LAN1", 1000, 1), (2, "wlan0", "WLAN 2.4GHz", 300, 1), (3, "wlan1", "WLAN 5GHz", 866, 1)],
-}
-SSIDS = {"wlx413": ["home-main", "home-iot"], "wlx222": ["home-main"]}
+DEVICES = {n: [tuple(i) for i in d["interfaces"]] for n, d in DEMO.items()}
+SSIDS = {n: d["ssids"] for n, d in DEMO.items() if d.get("ssids")}
+ROUTER = next(n for n, d in DEMO.items() if "wan_if" in d)  # its WAN port carries the demo's traffic
+DOWN_TARGET = list(DEMO)[-1]  # the automatic "down" fault
 SRC_HOSTS = ["pc-living", "pc-study", "phone-a", "phone-b", "tv-living", "tablet-kids"]
 # dst_ip (documentation ranges only), country, city, lat, lon, asn, weight
 DESTS = [
@@ -44,27 +61,6 @@ DESTS = [
     ("203.0.113.60", "Unknown", "", "", "", "", 1),
 ]
 SEVERITY = {"err": 3, "warning": 4, "notice": 5, "info": 6}
-RTX_LOGS = [
-    ("info", "[INSPECT] PP[01][out][101098] TCP 192.168.100.{a}:{p} > 192.0.2.10:443 (2026/10/24 12:00:00)"),
-    ("info", "PP[01] Rejected at IN(1020) filter: TCP 198.51.100.{a}:{p} > 192.168.100.1:23"),
-    ("notice", "PP[01] Rejected at IN(1020) filter: UDP 203.0.113.{a}:{p} > 192.168.100.1:161"),
-    ("info", "[DHCPD] LAN1(1) Allocates 192.168.100.{a}: 02:00:5e:10:00:{a:02x}"),
-    ("info", "[DHCPD] LAN1(1) Extends 192.168.100.{a}"),
-    ("notice", "LAN2: link up (1000BASE-T full duplex)"),
-    ("info", "[DNS] Resolver cache entries: {p}"),
-]
-WLX_LOGS = [
-    ("info", "[WLAN] STA associated: 02:00:5e:20:00:{a:02x} SSID=home-main band=5GHz"),
-    ("info", "[WLAN] STA disassociated: 02:00:5e:20:00:{a:02x} reason=8"),
-    ("info", "[WLAN] STA associated: 02:00:5e:30:00:{a:02x} SSID=home-main band=2.4GHz"),
-    ("notice", "[WLAN] Channel changed: 5GHz ch36 -> ch44 (DFS)"),
-]
-ERR_LOGS = [
-    ("err", "LAN2: link down"),
-    ("err", "[WLAN] Radio 5GHz: TX failure count exceeded threshold"),
-    ("warning", "PP[01] PPPoE: LCP echo timeout, retrying"),
-    ("warning", "[DHCPD] LAN1(1) address pool exhausted"),
-]
 
 
 class State:
@@ -93,13 +89,16 @@ class State:
     def iface_rates(self, dev, now):
         """bytes/s (in, out) per ifIndex."""
         down, up = self.wan_rates(now)
-        if dev == "rtx1300":
-            return {1: (up * MBPS, down * MBPS), 2: (down * MBPS, up * MBPS), 3: (0.0, 0.0)}
-        share = 0.55 if dev == "wlx413" else 0.3
-        w24, w5 = down * share * 0.25, down * share * 0.75
-        u24, u5 = up * share * 0.25, up * share * 0.75
-        # wlan in = from stations (upload); lan1 in = from router (download)
-        return {1: ((w24 + w5) * MBPS, (u24 + u5) * MBPS), 2: (u24 * MBPS, w24 * MBPS), 3: (u5 * MBPS, w5 * MBPS)}
+        d = DEMO[dev]
+        if "wan_if" in d:  # router: WAN in = download, its LAN ports carry it the other way
+            return {i[0]: (down * MBPS, up * MBPS) if i[0] == d["wan_if"] else (up * MBPS, down * MBPS) for i in DEVICES[dev]}
+        ap = d["ap"]
+        w = [down * ap["share"] * f for _, f in ap["radios"]]
+        u = [up * ap["share"] * f for _, f in ap["radios"]]
+        # wlan in = from stations (upload); the uplink's in = from the router (download)
+        rates = {ap["uplink"]: (sum(w) * MBPS, sum(u) * MBPS)}
+        rates.update({idx: (u[k] * MBPS, w[k] * MBPS) for k, (idx, _) in enumerate(ap["radios"])})
+        return rates
 
     def advance(self, now):
         with self.lock:
@@ -166,7 +165,7 @@ class State:
         if dev in SSIDS:
             out.append("# HELP demo_wlan_clients SYNTHETIC associated client count (WLX MIB availability unconfirmed)")
             out.append("# TYPE demo_wlan_clients gauge")
-            base = 6 if dev == "wlx413" else 3
+            base = DEMO[dev]["clients_base"]
             for ssid in SSIDS[dev]:
                 for band in ("2.4GHz", "5GHz"):
                     n = max(0, base + int(2 * math.sin(now / 300 + len(ssid) + len(band))))
@@ -198,7 +197,7 @@ class State:
                 continue
             n = sum(self.rng.random() < 0.7 for _ in range(10 if burst else 1))
             for _ in range(n):
-                pool = RTX_LOGS if dev == "rtx1300" else WLX_LOGS
+                pool = LOGS[dev]
                 if burst and self.rng.random() < 0.4:
                     pool = ERR_LOGS
                 sev, tpl = self.rng.choice(pool)
@@ -212,7 +211,7 @@ class State:
 
 # LLDP neighbours (snmp/lldp.yml's shape): local ifIndex, remote sysName, remote port id / desc. wlx222 answers none, so
 # the demo map shows one link confirmed by LLDP (rtx1300 - wlx413) and one from the inventory only (rtx1300 - wlx222).
-LLDP = {"rtx1300": [(1, "wlx413", "lan1", "LAN1")], "wlx413": [(1, "rtx1300", "lan1", "LAN1 (LAN)")], "wlx222": []}
+LLDP = {n: [tuple(x) for x in d.get("lldp", [])] for n, d in DEMO.items()}
 
 
 def render_lldp(dev):
@@ -246,8 +245,8 @@ def tick_loop():
 
 
 def auto_fault_loop(interval):
-    cycle = [("down", {"target": "wlx222", "seconds": 120}), ("wanspike", {"seconds": 150}),
-             ("logburst", {"seconds": 60}), ("counter_reset", {"target": "rtx1300"})]
+    cycle = [("down", {"target": DOWN_TARGET, "seconds": 120}), ("wanspike", {"seconds": 150}),
+             ("logburst", {"seconds": 60}), ("counter_reset", {"target": ROUTER})]
     i = 0
     while True:
         time.sleep(interval)

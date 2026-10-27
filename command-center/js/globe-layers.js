@@ -1,7 +1,7 @@
 // Globe layers that cost one draw call and no per-frame JS work:
 //   pulses: the rings expanding from each destination, computed in a fragment shader from one time uniform (three-globe's
 //     ring layer creates a Line per ring and recolours / rescales every ring from JS on every frame)
-//   labels: the eva-film label chips, drawn into one 2D canvas over the globe and redrawn only when the camera, the size
+//   labels: the film label chips, drawn into one 2D canvas over the globe and redrawn only when the camera, the size
 //     or the labels changed (an HTML label layer repositions every label element on every frame)
 // globe.gl bundles three.js without exporting it: the few classes needed are taken from its own scene objects.
 import { uiZoom } from './util.js';
@@ -129,7 +129,7 @@ export function pulseLayer(globe) {
   };
 }
 
-// ---- eva-film labels --------------------------------------------------------------------------------------------------
+// ---- film labels --------------------------------------------------------------------------------------------------
 // Drawn exactly where the former HTML labels were: the .glabel box (marker ::before + chip span, styled in the
 // stylesheets) centred on the point. Geometry and colours are read from one hidden sample element per kind (a layout read
 // only for a label text not seen before). Labels on the far side of the globe are not drawn; a lower-priority label whose

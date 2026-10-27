@@ -1,0 +1,47 @@
+# Tag v*: build the self-built images for linux/amd64 and linux/arm64 (each Dockerfile runs its selftest during the build,
+# per platform), and only after every build and the selftests passed, push them to
+# ghcr.io/c-ardinal/geofront-nw-<svc>:<tag> (tools, mask-api, analyzer, flowd, notify-relay, demo-gen, capture).
+# Installations use them with GEOFRONT_VERSION=<tag> in their .env (README 「配布イメージ」).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    env:
+      GEOFRONT_VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+      - name: leak-scan (working tree + history)
+        run: bash scripts/leak-scan.sh --all
+      - name: selftests (amd64, clean containers)
+        env:
+          VERIFY_LOGS: ${{ runner.temp }}/verify
+        run: bash scripts/verify.sh selftests compose
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: build amd64 + arm64 (build-time selftests, nothing pushed yet)
+        run: OBS_COMMIT="${GITHUB_SHA::9}" docker buildx bake -f compose.yaml -f .github/docker-bake.hcl release
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: push (same build, from the cache)
+        run: OBS_COMMIT="${GITHUB_SHA::9}" docker buildx bake -f compose.yaml -f .github/docker-bake.hcl release --push
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-verify-logs
+          path: ${{ runner.temp }}/verify
+          retention-days: 7

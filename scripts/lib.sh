@@ -7,7 +7,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && { pwd -W 2>/dev/null || pwd; }
 PY="$(command -v python3 || command -v python || true)"
 case "$("$PY" -c 'print(1)' 2>/dev/null)" in 1) ;; *) PY="$(command -v python || true)" ;; esac  # Windows' python3 stub
 
-dc() { docker compose --project-directory "${DC_DIR:-$ROOT}" -f "${DC_DIR:-$ROOT}/compose.yaml" "$@"; }
+# the config directory (R1): OBS_CONFIG_DIR when set (its .env via --env-file once it exists), else the tree (legacy)
+cfg_dir() { printf '%s' "${OBS_CONFIG_DIR:-${DC_DIR:-$ROOT}}"; }
+dc() {
+  # a tree with the ./geofront wrapper: the same config / secret (*_FILE) resolution as the operator's commands. A
+  # throwaway tree (DC_DIR) keeps its config in the tree unless OBS_CONFIG_DIR says otherwise (never ~/.config/geofront)
+  if [ -f "${DC_DIR:-$ROOT}/geofront" ]; then
+    OBS_CONFIG_DIR="${OBS_CONFIG_DIR:-${DC_DIR:-}}" bash "${DC_DIR:-$ROOT}/geofront" "$@"
+    return
+  fi
+  local e=() off=()  # an older tree (scripts/upgrade.sh): plain compose
+  if [ -n "${OBS_CONFIG_DIR:-}" ]; then
+    if [ -f "$OBS_CONFIG_DIR/.env" ]; then e=(--env-file "$OBS_CONFIG_DIR/.env"); else off=(COMPOSE_DISABLE_ENV_FILE=1); fi
+  fi
+  env "${off[@]}" docker compose --project-directory "${DC_DIR:-$ROOT}" -f "${DC_DIR:-$ROOT}/compose.yaml" "${e[@]}" "$@"
+}
 
 # remove a throwaway project by name (containers, networks, its volumes) without its compose file: also when the copy
 # of the tree is not there (yet). Run from / so that no compose.yaml in the current directory is picked up.
@@ -22,9 +36,9 @@ die() { log "NG: $*"; exit 1; }
 # random secret for a throwaway project (never written to the repository)
 rand() { od -An -tx1 -N"${1:-12}" /dev/urandom | tr -d ' \n'; }
 
-# set KEY=VALUE in "$DC_DIR/.env" (replace the line or append)
+# set KEY=VALUE in the config's .env (replace the line or append)
 set_env() {
-  local f="${DC_DIR:-$ROOT}/.env"
+  local f; f="$(cfg_dir)/.env"
   if grep -q "^$1=" "$f" 2>/dev/null; then
     sed -i "s|^$1=.*|$1=$2|" "$f"
   else

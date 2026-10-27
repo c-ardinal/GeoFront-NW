@@ -29,8 +29,8 @@
 :is(#modal, #drawer) .tile-st { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.02em; overflow-wrap: anywhere; }
 :is(#modal, #drawer) .tile-s { font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
 :is(#modal, #drawer) .tile .spark { height: 28px; margin-top: var(--s1); }
-[data-theme="eva-film"] :is(#modal, #drawer) .tile-v { font-family: var(--display); font-weight: 700; font-size: 24px; letter-spacing: 0.02em; }
-[data-theme="eva-film"] :is(#modal, #drawer) .tile { border-left-width: 4px; }
+[data-theme="film"] :is(#modal, #drawer) .tile-v { font-family: var(--display); font-weight: 700; font-size: 24px; letter-spacing: 0.02em; }
+[data-theme="film"] :is(#modal, #drawer) .tile { border-left-width: 4px; }
 
 /* ---- SVG sparklines / small multiples ---- */
 :is(#modal, #drawer) .spark { display: block; width: 100%; height: 36px; overflow: visible; }
@@ -303,7 +303,7 @@
 #drawer .cr-why { font-size: var(--fs-s); color: var(--text-2); }
 #drawer .cr-acts { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: 2px; }
 #drawer.stale .cr-item :is(.cr-title, .cr-t) { color: var(--text-2); }
-[data-theme="eva-film"] #drawer :is(.cr-rel, .cr-t) { font-family: var(--display); }
+[data-theme="film"] #drawer :is(.cr-rel, .cr-t) { font-family: var(--display); }
 @media (max-width: 1279px) {
   #drawer .cr-ctl input[type="datetime-local"], #drawer .cr-rules summary { min-height: 44px; }
   #drawer .cr-rules summary { display: flex; align-items: center; }

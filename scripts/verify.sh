@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # One command for the checks of this repository; prints a result table (each check's own exit code, log per check).
-#   scripts/verify.sh                quick: selftests compose doctor
+#   scripts/verify.sh                quick: selftests compose leak-scan doctor
 #   scripts/verify.sh full           + e2e-open e2e-auth resilience backup-restore upgrade arm64
 #   scripts/verify.sh <check>...     any of the names below
 # Checks:
 #   selftests       build every self-built image (their build-time selftests) and run each selftest again in a clean container
-#   compose         compose config resolves: demo (no .env), testbed/testbed.env, a LAN exposure with login (dummy values)
+#   compose         compose config resolves: demo (no .env), testbed/testbed.env, a LAN exposure with login (dummy values),
+#                   a config directory outside the tree (OBS_CONFIG_DIR, mounted at /config) and the CI's bake file
+#   leak-scan       scripts/leak_scan.py selftest + the working tree (no NG); `scripts/leak-scan.sh --history` separately
 #   doctor          scripts/doctor.sh on this tree's .env (needs tools init first; on a fresh clone it says what is missing)
 #   e2e-open        scripts/e2e-fresh.sh open   (new install, 127.0.0.1 without login, testbed instead of devices)
 #   e2e-auth        scripts/e2e-fresh.sh auth   (with login; E2E_LAN_IP=<LAN IP> for a real LAN bind)
@@ -19,8 +21,8 @@ set -u
 . "$(dirname "$0")/lib.sh"
 S="$ROOT/scripts"
 case "${1:-quick}" in
-  quick) set -- selftests compose doctor ;;
-  full) set -- selftests compose e2e-open e2e-auth resilience backup-restore upgrade arm64 ;;
+  quick) set -- selftests compose leak-scan doctor ;;
+  full) set -- selftests compose leak-scan e2e-open e2e-auth resilience backup-restore upgrade arm64 ;;
 esac
 LOGS="${VERIFY_LOGS:-${TMPDIR:-/tmp}/obs-verify-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOGS"
@@ -29,19 +31,18 @@ needs_auth_kept=0
 case " $* " in *" resilience "*|*" backup-restore "*) needs_auth_kept=1 ;; esac
 
 selftests() {
-  local p imgs fail=0
+  local fail=0 v="${GEOFRONT_VERSION:-local}" g=ghcr.io/c-ardinal/geofront-nw
   dc --profile demo --profile prod --profile testbed --profile capture --profile tools build || return 1
-  p="$(dc config 2>/dev/null | sed -n 's/^name: //p' | head -1)"
   run1() { local n="$1"; shift; echo "== $n"; docker run --rm "$@"; local r=$?; echo "rc=$r"; [ "$r" = 0 ] || fail=1; }
-  run1 mask-api --entrypoint python "$p-mask-api" mask_api.py --selftest
-  run1 notify-relay --entrypoint python "$p-notify-relay" relay.py --selftest
-  run1 analyzer -e HOME=/tmp --entrypoint python "$p-analyzer" analyzer.py --selftest
-  run1 flowd --entrypoint python "$p-flowd" flowd.py --selftest
-  run1 demo-gen --entrypoint python "$p-demo-gen" demo_gen.py --selftest
-  run1 capture --entrypoint python "$p-capture" capture.py --selftest
-  run1 testbed --entrypoint python "$p-testbed-rtx" device.py --selftest
-  run1 tools --entrypoint python -v "$ROOT:/selftest:ro" -e OBS_WORK=/selftest -e OBS_GENERATED=/tmp/gen -e OBS_VOLUMES=/tmp/vol \
-    "$p-tools:local" /app/obs.py --selftest
+  run1 mask-api --entrypoint python "$g-mask-api:$v" mask_api.py --selftest
+  run1 notify-relay --entrypoint python "$g-notify-relay:$v" relay.py --selftest
+  run1 analyzer -e HOME=/tmp --entrypoint python "$g-analyzer:$v" analyzer.py --selftest
+  run1 flowd --entrypoint python "$g-flowd:$v" flowd.py --selftest
+  run1 demo-gen --entrypoint python "$g-demo-gen:$v" demo_gen.py --selftest
+  run1 capture --entrypoint python "$g-capture:$v" capture.py --selftest
+  run1 testbed --entrypoint python geofront-nw-testbed:local device.py --selftest
+  run1 tools --entrypoint python -v "$ROOT:/selftest:ro" -e OBS_WORK=/selftest -e OBS_CONFIG=/tmp/cfg -e OBS_GENERATED=/tmp/gen \
+    -e OBS_VOLUMES=/tmp/vol "$g-tools:$v" /app/obs.py --selftest
   return "$fail"
 }
 
@@ -53,6 +54,20 @@ compose_cfg() {
   dc --profile demo config -q && echo "demo OK" || fail=1
   dc --env-file "$ROOT/testbed/testbed.env" config -q && echo "testbed OK" || fail=1
   dc --env-file "$f" config -q && echo "LAN + login OK" || fail=1
+  # R1: a config directory outside the tree is what the tools services mount at /config
+  mkdir -p "$LOGS/cfg-outside"
+  OBS_CONFIG_DIR="$LOGS/cfg-outside" dc --profile tools config 2>/dev/null | grep -qF "source: $LOGS/cfg-outside" \
+    && echo "OBS_CONFIG_DIR mount OK" || { echo "NG: OBS_CONFIG_DIR is not mounted at /config"; fail=1; }
+  # the testbed's repository files resolve also with a config directory set (/work paths, not /config)
+  local inv
+  inv="$(OBS_CONFIG_DIR="$LOGS/cfg-outside" dc --env-file "$ROOT/testbed/testbed.env" --profile tools config 2>/dev/null |
+    sed -n 's/^ *OBS_INVENTORY: //p' | head -1)"
+  case "$inv" in
+    /work/*) [ -f "$ROOT/${inv#/work/}" ] && echo "testbed inventory with OBS_CONFIG_DIR OK ($inv)" ||
+      { echo "NG: testbed inventory $inv does not exist in the tree"; fail=1; } ;;
+    *) echo "NG: testbed inventory '$inv' does not resolve against /work (OBS_CONFIG_DIR set)"; fail=1 ;;
+  esac
+  docker buildx bake -f "$ROOT/compose.yaml" -f "$ROOT/.github/docker-bake.hcl" --print release > /dev/null && echo "bake OK" || fail=1
   return "$fail"
 }
 
@@ -60,6 +75,7 @@ run_check() {
   case "$1" in
     selftests) selftests ;;
     compose) compose_cfg ;;
+    leak-scan) "$PY" "$S/leak_scan.py" --selftest && bash "$S/leak-scan.sh" ;;
     doctor) bash "$S/doctor.sh" ;;
     e2e-open) bash "$S/e2e-fresh.sh" open ;;
     e2e-auth) KEEP=$needs_auth_kept bash "$S/e2e-fresh.sh" auth ;;

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Optional pre-commit hook: refuses a commit while scripts/leak-scan.sh finds an NG in what the commit records (the index,
+# also when the working tree differs from it).
+#   enable:  git config core.hooksPath scripts/git-hooks
+#   a finding that is a documented test value: add it to scripts/leak-allow.txt (path, value, reason)
+bash "$(git rev-parse --show-toplevel)/scripts/leak-scan.sh" --staged || {
+  echo "pre-commit: leak-scan found data that must not be committed (see above)" >&2
+  exit 1
+}

@@ -5,7 +5,8 @@
 # scripts/probe.py (command-center, APIs, Grafana admin; with login: HTTPS with the new CA, roles).
 #   scripts/e2e-fresh.sh open            127.0.0.1, no login
 #   scripts/e2e-fresh.sh auth            login: OBS_AUTH=1 on 127.0.0.1, or E2E_LAN_IP=<this host's LAN IP> for a LAN bind
-# Env: E2E_DIR (where the copies go, default ${TMPDIR:-/tmp}/obs-e2e), KEEP=1 leaves the project running (for
+# Env: E2E_DIR (where the copies go, default ${TMPDIR:-/tmp}/obs-e2e), E2E_CONFIG=outside (the config in OBS_CONFIG_DIR =
+# <copy>-config instead of the legacy layout inside the copy), KEEP=1 leaves the project running (for
 # scripts/resilience.sh / scripts/backup-restore.sh), otherwise it is removed with `down -v` (its own volumes only).
 # Secrets are random per run and stay in the copy's .env (outside the repository).
 set -u
@@ -22,6 +23,11 @@ E="$DC_DIR/e2e.env"  # this run's secrets for the other scripts (outside the rep
 
 down_project "$COMPOSE_PROJECT_NAME"
 copy_tree "$DC_DIR" || die "copy"
+if [ "${E2E_CONFIG:-tree}" = outside ]; then
+  # R1 layout: the site configuration in its own directory outside the tree (OBS_CONFIG_DIR); default: the legacy layout
+  export OBS_CONFIG_DIR="$DC_DIR-config"
+  rm -rf "$OBS_CONFIG_DIR" && (umask 077 && mkdir -p "$OBS_CONFIG_DIR") || die "config dir"
+fi
 trap '[ "${KEEP:-0}" = 1 ] || down_project "$COMPOSE_PROJECT_NAME"' EXIT  # also on a failure: no stack left behind
 GF="e2e-gf-$(rand)"; AU="e2e-auth-$(rand)"; PV="e2e-priv-$(rand)"; CM="e2e-c-$(rand 6)"
 ADMIN="e2eadmin:E2e-admin-$(rand)"; VIEWER="e2eview:E2e-view-$(rand)"
@@ -35,6 +41,14 @@ log "init ($MODE, $url) in $DC_DIR"
 dc run --rm -T -e GF_ADMIN_PASSWORD="$GF" -e SNMP_V3_AUTH_PASS="$AU" -e SNMP_V3_PRIV_PASS="$PV" -e SNMP_COMMUNITY="$CM" \
   tools init --yes --snmp-user obs-e2e --port "$OBS_PORT" --syslog-port "${N}8514" "${bind[@]}" \
   --device "rtx1300,rtx,$RTX:1161" --device "wlx413,wlx,$WLX:1161,yamaha_v2c" --wan rtx1300:lan2 || die "tools init"
+if [ -n "${OBS_CONFIG_DIR:-}" ]; then  # nothing site-specific in the tree, everything in the config directory
+  for f in .env inventory/devices.yaml; do
+    [ -e "$DC_DIR/$f" ] && die "init wrote $f into the tree"; [ -s "$OBS_CONFIG_DIR/$f" ] || die "init did not write $f to OBS_CONFIG_DIR"
+  done
+  grep -q "^OBS_CONFIG_DIR=" "$OBS_CONFIG_DIR/.env" && grep -q "^COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME$" "$OBS_CONFIG_DIR/.env" ||
+    die "init did not pin OBS_CONFIG_DIR / COMPOSE_PROJECT_NAME"
+  log "OK: config written to OBS_CONFIG_DIR only ($OBS_CONFIG_DIR)"
+fi
 # the testbed instead of the real devices, and this project's own names / ports / subnet (next to other stacks)
 set_env COMPOSE_PROFILES prod,testbed
 set_env COMPOSE_PROJECT_NAME "$COMPOSE_PROJECT_NAME"

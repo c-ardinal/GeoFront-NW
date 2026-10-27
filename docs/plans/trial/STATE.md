@@ -8,6 +8,51 @@
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
 
+## R1 (docs/plans/v2/R1-SPEC.md, GeoFront-NW) - items 1-6 implemented, uncommitted on main (HEAD faa7ba6), awaiting PM acceptance
+- Item 7 (history scan -> push) is NOT done: `scripts/leak-scan.sh --history` finds 2 NG IPv4 in commit 5e0e6ef
+  docs/plans/trial/STATE.md: the host's real LAN address and the Docker gateway (redacted).
+  History rewrite = owner's decision; CI (`--all`) and the release workflow fail until then (intended gate).
+- Config (item 1): site config in OBS_CONFIG_DIR (.env, inventory/devices.yaml, alerting/receivers.yaml, backups/),
+  mounted at /config in the tools services; unset = the repository (legacy layout, gitignored). Examples only in
+  config.example/. `./geofront` = docker compose with it (--env-file, default ~/.config/geofront when the repo has no
+  .env, <NAME>_FILE secrets for 13 secrets, explicit --env-file respected). tools init pins COMPOSE_PROJECT_NAME +
+  OBS_CONFIG_DIR; `tools migrate-config` copies the legacy files (keeps them) and pins the project name; doctor rows:
+  config location, legacy .env left behind, leak scan. Authelia users / generated config / CA stay in their volumes.
+- Project name: compose.yaml keeps `name: yamaha-observatory-trial` (existing volumes); new installs via ./geofront get
+  geofront-nw (legacy volumes present -> legacy name); testbed.env keeps yamaha-observatory-testbed.
+- Leak scan (item 2): scripts/leak_scan.py (+ leak-scan.sh, git-hooks/pre-commit --staged, leak-allow.txt for selftest
+  vectors, also applied to history); doctor.sh / verify.sh leak-scan / ci.yml. Values printed masked.
+- Drivers (item 3): drivers/{yamaha-rtx,yamaha-wlx,generic}/driver.yaml (kinds, snmp_modules, lldp, wan,
+  wireless_clients) + demo.json (demo-gen devices, output equal to before: snmp / lldp / flows / normal syslog compared;
+  only the logburst error-line pool order changed) + syslog.jsonl (split from testbed/fixtures). lldp job -> lldp.json.
+  UI: config.json devices carry `wireless`. docs/drivers.md.
+- Name / theme (4, 5): README / screen title / dashboard title GeoFront-NW (dashboard uid, provider and rule group
+  names, TOTP issuer, evidence manifest key kept); theme eva-film -> film (aliases eva, eva-film). LICENSE (MIT,
+  c-ardinal), THIRD_PARTY_NOTICES.md. No bundled fonts (Google Fonts at run time, OFL); no Evangelion / NERV marks.
+- GHCR (6): images ghcr.io/c-ardinal/geofront-nw-<svc>:${GEOFRONT_VERSION:-local} (+ build kept), testbed
+  geofront-nw-testbed:local; .github/workflows/ci.yml, release.yml, docker-bake.hcl, dependabot.yml. mask-api
+  Dockerfile: SELFTEST_EVIDENCE_BUDGET build arg (900 in the release bake; arm64 under QEMU took ~41 min).
+- Verification (after the last code change): verify.sh quick: selftests 8/8 rc=0, compose OK (incl. OBS_CONFIG_DIR
+  mount, bake print), leak-scan OK (tree 0 NG), doctor NG only for "no .env" in this tree (expected; run with
+  COMPOSE_PROJECT_NAME=obs-e2e-quick); e2e-open E2E_CONFIG=outside OK (nothing written into the tree) and legacy OK;
+  `scripts/upgrade.sh faa7ba6` OK (data kept after the update and again after migrate-config + up from OBS_CONFIG_DIR).
+  actionlint (container) clean; dry multi-arch bake of mask-api (amd64 + arm64, cacheonly) OK. Codex r1 (1 P1 + 2 P2)
+  and r2 (P2 wrapper --env-file fixed; P1 "history gate fails" = intended, needs the owner's history decision).
+- Not done / open: e2e-auth, resilience, backup-restore, arm64.sh not re-run; release workflow not run on GitHub;
+  docker-compose Dependabot ecosystem not exercised; empty dirs inventory/, alerting/, testbed/fixtures/ left in the
+  tree (untracked, removable). Containers: obs-e2e-* removed; main projects stopped, 22 volumes untouched.
+- Evidence: scratchpad r1/ (final/*, codex-r1.md, codex-r2.md, bake-mask-api2.log, leak-baseline.txt).
+- Follow-up (PM + review NO-GO B1/B2, O1-O8): real-subnet strings gone from the tree (local-only check outside the repo);
+  B1 testbed.env OBS_INVENTORY / OBS_RECEIVERS = /work/testbed/... and the wrapper picks no config dir for an
+  explicit --env-file (its <NAME>_FILE settings are still read: Codex r3 P2 fixed); verify compose checks the testbed
+  inventory with OBS_CONFIG_DIR set. B2 leak_scan: single-word keys, lower-case YAML keys, dotted MACs, IPv4 masked to
+  two octets, git core.quotePath=false, allow-list = exact (path, line) entries with the marker (no file-wide skips).
+  Wrapper: compose-like comment / quote handling, *_FILE must be a readable file (else exit 2), CR stripped.
+  .gitignore /inventory/ /alerting/ /backups/ anchored; workflow actions pinned to commit SHAs.
+  Re-run: leak selftest + tree 0 NG; testbed (prod+testbed, OBS_CONFIG_DIR set) tools check all OK (--syslog-wait 0:
+  throwaway container names); e2e-open outside OK; e2e-auth (real LAN bind) + resilience + backup-restore OK in the
+  legacy layout and in the outside layout. Logs: scratchpad r1/fu2/, codex-r3.md.
+
 ## H1 (docs/plans/v2/H1-SPEC.md) - implemented, uncommitted on main (HEAD 5e0e6ef), awaiting PM acceptance
 - tools doctor (tools/doctor.py pure assessments + obs.cmd_doctor; host facts from scripts/doctor.sh: engine >= 25,
   compose >= 2.20, arch, NTP (timedatectl), busy ports (ss / netstat), skipped while this stack runs): memory, disk vs
@@ -85,7 +130,7 @@
   cookie flags, Grafana roles, logout) + bruteforce 2/2 (bans revoked after), browser lan 81 OK (both themes, 390-2560).
   Codex r1 2 P2 fixed, r2 1 P1 + 1 P2 fixed, r3 clean; argon2 32 MiB + GOMEMLIMIT changed after r3 (measured), re-verified.
   Containers stopped (docker compose stop). Orphan grafana-guard container stopped (remove: up -d --remove-orphans).
-- Open / limits: sessions in Authelia memory; Docker Desktop shows every LAN client as 198.51.100.1 (ip bans hit all);
+- Open / limits: sessions in Authelia memory; Docker Desktop shows every LAN client as its gateway address (ip bans hit all);
   Grafana: admin only, auth proxy trusts the proxy's fixed address only (security review F2/F3).
 - Evidence: scratchpad p7/ (logs/final*-*.txt|log, shots/final*, codex-r1..3.md, lancheck.py, check-p7.js, selftests.sh).
 - Security review (conditional GO) fixes, same uncommitted set: F1 default GF_ADMIN_PASSWORD is an error with login

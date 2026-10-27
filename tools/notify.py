@@ -148,7 +148,7 @@ def check_receivers(doc, values, where="alerting/receivers.yaml"):
     errs, warns = [], []
     if doc is None:
         warns.append(f"通知先がありません ({where})。アラートは画面に出ますが、どこにも通知されません"
-                     " (例: alerting/receivers.example.yaml をコピーして編集)")
+                     " (例: config.example/alerting/receivers.example.yaml をコピーして編集)")
         doc = {}
     if not isinstance(doc, dict) or set(doc) - {"receivers", "routes", "timing"}:
         return ["通知先の設定は receivers: / routes: / timing: だけを持つ形にしてください"], warns, None
@@ -220,7 +220,7 @@ def notify_summary(plan):
 
 def render_receivers(doc):
     return ("# 通知先 (tools init が生成。手で編集してよい。変更後は `docker compose run --rm tools targets`)\n"
-            "# 秘密値 (Webhook URL・トークン・SMTP パスワード) はここに書かず .env に置く。書式: alerting/receivers.example.yaml\n"
+            "# 秘密値 (Webhook URL・トークン・SMTP パスワード) はここに書かず .env に置く。書式: config.example/alerting/receivers.example.yaml\n"
             + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 
 

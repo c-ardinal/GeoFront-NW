@@ -1,4 +1,4 @@
-"""Observatory setup / operations tool. Runs in the `tools` container: docker compose run --rm tools <command>.
+"""GeoFront-NW setup / operations tool. Runs in the `tools` container: docker compose run --rm tools <command>.
 
   init         .env と機器台帳 (inventory/devices.yaml) を対話または引数で作り、検証する
   check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表で出す
@@ -11,10 +11,12 @@
   geoip        DB-IP Lite (City + ASN) のダウンロード・更新 (update) / 版と鮮度 (status)
   user         ログインの利用者 (Authelia): add / passwd / role / remove / list、秘密値の生成 (secrets)
   doctor       導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。scripts/doctor.sh から)
+  migrate-config  従来の配置 (リポジトリ内の .env・台帳・通知先・backups) を OBS_CONFIG_DIR へ写す / プロジェクト名を固定する
 
 Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
-Paths: the repository is mounted at /work, the generated volume at /generated, data volumes under /vol.
-Configuration comes from the environment compose passes in (from .env or --env-file); `init` writes .env.
+Paths: the repository is mounted at /work, the site configuration (OBS_CONFIG_DIR on the host; unset = the repository,
+the legacy layout) at /config, the generated volume at /generated, data volumes under /vol. Configuration comes from the
+environment compose passes in (from the config's .env or --env-file); `init` writes .env. Device specifics: drivers/.
 """
 import argparse
 import base64
@@ -52,15 +54,18 @@ import auth as au  # authentication: Authelia's config, users and secrets (tools
 import doctor as dr  # preflight assessments (tools/doctor.py)
 
 WORK = Path(os.environ.get("OBS_WORK", "/work"))
+CONFIG = Path(os.environ.get("OBS_CONFIG", "/config"))  # .env, inventory, receivers, backups (OBS_CONFIG_DIR)
 GEN = Path(os.environ.get("OBS_GENERATED", "/generated"))
 VOL = Path(os.environ.get("OBS_VOLUMES", "/vol"))
 AUTH_TEMPLATE = WORK / "snmp/auths.yml"
-FIXTURES = WORK / "testbed/fixtures/syslog.jsonl"
-ENV_FILE = WORK / ".env"
-ENV_EXAMPLE = WORK / ".env.example"
-
-DEMO_DEVICES = ("rtx1300", "wlx413", "wlx222")
-KINDS = ("rtx", "wlx", "other")
+DRIVERS_DIR = WORK / "drivers"  # one directory per device driver (docs/drivers.md)
+ENV_FILE = CONFIG / ".env"
+ENV_EXAMPLE = WORK / "config.example/.env.example"
+# the compose project name before R1 (compose.yaml keeps it as its default so that existing volumes stay in use);
+# `tools init` pins the name it runs under into .env, new installs through ./geofront get geofront-nw
+LEGACY_PROJECT = "yamaha-observatory-trial"
+# secrets the ./geofront wrapper read from <NAME>_FILE (OBS_SECRET_FILES): never copied into .env
+SECRETS_FROM_FILES = frozenset(os.environ.get("OBS_SECRET_FILES", "").split())
 AUTH_PROTOS = ("SHA", "SHA224", "SHA256", "SHA384", "SHA512", "MD5")  # what snmp_exporter accepts
 PRIV_PROTOS = ("AES", "AES192", "AES256", "AES192C", "AES256C", "DES")
 TEMPLATE_VARS = ("SNMP_V3_AUTH_PROTO", "SNMP_V3_PRIV_PROTO")  # filled in by us; everything else stays ${...}
@@ -72,7 +77,6 @@ VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472
            "capture": (0, 0), "uploads": (65534, 65534),  # these two only with backup --include-captures
            "authelia": (au.AUTHELIA_UID, au.AUTHELIA_UID),
            "caddy": (0, 0)}  # the proxy's own CA (its key) and certificates: the LAN devices trust that root
-DEMO_HOSTS = {"192.168.100.1": "rtx1300"}  # the demo pcap's router (its other hosts are named by DHCP)
 IFNAME_RE = re.compile(r"[A-Za-z0-9_/:-]{1,64}")  # no dots: mask-api rejects digit.digit in query literals
 RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in the inventory (alloy/config.alloy)
 PUBLIC_URL_RE = re.compile(r"https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?")  # host name, IPv4 or [IPv6]
@@ -90,11 +94,13 @@ class Fail(Exception):
 
 
 def rel(path):
-    """Path as shown and stored: relative to the repository when inside it (test runs may point elsewhere)."""
-    try:
-        return str(Path(path).relative_to(WORK))
-    except ValueError:
-        return str(path)
+    """Path as shown and stored: relative to the config directory (or the repository) when inside it."""
+    for base in (CONFIG, WORK):
+        try:
+            return str(Path(path).relative_to(base))
+        except ValueError:
+            pass
+    return str(path)
 
 
 def env(key, default=""):
@@ -105,10 +111,67 @@ def env_map():
     return dict(os.environ)
 
 
+# ---- device drivers (drivers/<vendor-model>/: driver.yaml, demo.json, syslog.jsonl; docs/drivers.md) -------------
+
+@functools.cache
+def drivers():
+    """{inventory kind: driver} from drivers/*/driver.yaml (+ its demo.json devices); the generic driver last."""
+    out = {}
+    for f in sorted(DRIVERS_DIR.glob("*/driver.yaml"), key=lambda q: (q.parent.name == "generic", q.parent.name)):
+        d = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        demo_f = f.with_name("demo.json")
+        d["demo"] = json.loads(demo_f.read_text(encoding="utf-8"))["devices"] if demo_f.exists() else {}
+        for k in d.get("kinds", []):
+            out.setdefault(k, d)
+    return out
+
+
+def kinds():
+    return tuple(drivers())
+
+
+def driver(kind):
+    return drivers().get(kind) or {}
+
+
+def snmp_modules(kind):
+    return ",".join(driver(kind).get("snmp_modules") or ["if_mib", "system"])
+
+
+@functools.cache
+def demo_devices():
+    """{name: (kind, its demo.json record)} of every driver's demo devices, in driver order (demo-gen serves them)."""
+    out = {}
+    for d in {id(x): x for x in drivers().values()}.values():
+        for name, rec in d["demo"].items():
+            out[name] = (d["kinds"][0], rec)
+    return out
+
+
+def demo_names():
+    return tuple(demo_devices())
+
+
+def demo_hosts():
+    """The demo pcap's router (its other hosts are named by DHCP)."""
+    return {rec["pcap_address"]: n for n, (_, rec) in demo_devices().items() if rec.get("pcap_address")}
+
+
+def demo_links():
+    return [{"device": n, **rec["link"]} for n, (_, rec) in demo_devices().items() if rec.get("link")]
+
+
+def demo_wan():
+    for n, (_, rec) in demo_devices().items():
+        if "wan_if" in rec:
+            return {"device": n, "ifName": next(i[1] for i in rec["interfaces"] if i[0] == rec["wan_if"])}
+    return None
+
+
 # ---- inventory ----------------------------------------------------------------------------------
 
 def inventory_path():
-    return WORK / env("OBS_INVENTORY", "inventory/devices.yaml")
+    return CONFIG / env("OBS_INVENTORY", "inventory/devices.yaml")
 
 
 def split_address(address):
@@ -147,8 +210,8 @@ def check_devices(devices, known_auths):
         elif name in names:
             errs.append(f"{where}: name が重複しています")
         names.add(name)
-        if kind not in KINDS:
-            errs.append(f"{where}: kind は {' / '.join(KINDS)} のどれかにしてください")
+        if kind not in kinds():
+            errs.append(f"{where}: kind は {' / '.join(kinds())} のどれかにしてください (drivers/ のドライバ)")
         host, port = split_address(addr)
         looks_ip = re.fullmatch(r"[\d.]+", host) is not None
         if not addr or not (is_ipv4(host) if looks_ip else HOST_RE.fullmatch(host)) or (port and not 0 < int(port) < 65536):
@@ -220,21 +283,17 @@ def device_rows(devices):
              **{k: str(d[k]).strip() for k in TOPO_KEYS if d.get(k)}} for d in devices]
 
 
-DEMO_LINKS = [{"device": "wlx413", "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"},
-              {"device": "wlx222", "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"}]
-
-
 def topology_links(rows, demo):
     """Inventory links for the network map (parent / parent_if / uplink_if): names only, no addresses."""
     if demo:
-        return [dict(x) for x in DEMO_LINKS]
+        return demo_links()
     return [{"device": d["name"], **{k: d[k] for k in TOPO_KEYS if d.get(k)}} for d in rows if d.get("parent")]
 
 
 def wan_of(rows, demo):
     """-> {"device", "ifName"} of the WAN interface, or None (prod without wan_interface)."""
     if demo:
-        return {"device": "rtx1300", "ifName": "lan2"}
+        return demo_wan()
     return next(({"device": d["name"], "ifName": d["wan_interface"]} for d in rows if d.get("wan_interface")), None)
 
 
@@ -317,7 +376,8 @@ def check_env(values, used_auths=()):
     a_errs, a_warns = au.check(values)
     errs += a_errs
     warns += a_warns
-    if "yamaha_v3" in used_auths:
+    versions = auth_versions()
+    if any(versions.get(a) == 3 for a in used_auths):
         if not values.get("SNMP_V3_USER"):
             errs.append("SNMP_V3_USER が空です (SNMPv3 のユーザー名)")
         for key in ("SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
@@ -327,7 +387,7 @@ def check_env(values, used_auths=()):
             errs.append(f"SNMP_V3_AUTH_PROTO は {' / '.join(AUTH_PROTOS)} のどれかにしてください")
         if values.get("SNMP_V3_PRIV_PROTO", "") not in PRIV_PROTOS:
             errs.append(f"SNMP_V3_PRIV_PROTO は {' / '.join(PRIV_PROTOS)} のどれかにしてください")
-    if "yamaha_v2c" in used_auths:
+    if any(versions.get(a) == 2 for a in used_auths):
         if not values.get("SNMP_COMMUNITY"):
             errs.append("SNMP_COMMUNITY が空です (SNMPv2c のコミュニティ名)")
         elif values["SNMP_COMMUNITY"] in ("public", "private"):
@@ -350,7 +410,13 @@ def validate(values, devices):
 
 
 def _declared_auths():
-    return set((yaml.safe_load(AUTH_TEMPLATE.read_text(encoding="utf-8")) or {}).get("auths", {}))
+    return set(auth_versions())
+
+
+def auth_versions():
+    """{auth name: SNMP version} of snmp/auths.yml (the checks go by version, not by the auth's name)."""
+    auths = (yaml.safe_load(AUTH_TEMPLATE.read_text(encoding="utf-8")) or {}).get("auths") or {}
+    return {n: a.get("version") for n, a in auths.items()}
 
 
 # ---- generated files (Prometheus file_sd, Alloy host map, snmp_exporter auths) --------------------
@@ -380,18 +446,24 @@ def file_sd(rows, demo, values=None):
     flows = FLOW_TARGETS[flow_source(demo, values)]
     if demo:
         snmp = [{"targets": [n], "labels": {"__device": n, "__exporter": "demo-gen:9116", "__param_module": "if_mib"}}
-                for n in DEMO_DEVICES]
+                for n in demo_names()]
         return snmp, flows
     snmp = [{"targets": [d["address"]], "labels": {"__device": d["name"], "__exporter": "snmp-exporter:9116",
-                                                   "__param_module": "if_mib,system", "__param_auth": d["snmp_auth"]}}
+                                                   "__param_module": snmp_modules(d["kind"]), "__param_auth": d["snmp_auth"]}}
             for d in rows]
     return snmp, flows
+
+
+def lldp_sd(snmp, rows, demo):
+    """The `lldp` job's targets: the snmp targets whose driver reads LLDP-MIB (driver.yaml lldp)."""
+    kind = {n: k for n, (k, _) in demo_devices().items()} if demo else {d["name"]: d["kind"] for d in rows}
+    return [t for t in snmp if driver(kind.get(t["labels"]["__device"])).get("lldp")]
 
 
 def flow_hosts(rows, demo):
     """Inventory names for flowd's src_host (IPv4 management addresses only)."""
     if demo:
-        return dict(DEMO_HOSTS)
+        return demo_hosts()
     return {split_address(d["address"])[0]: d["name"] for d in rows if is_ipv4(split_address(d["address"])[0])}
 
 
@@ -411,7 +483,7 @@ def hostmap(rows, demo=False):
     for all three devices from one address, so only that sender may name them in its header, and only those names."""
     rules = []
     if demo:
-        rules.append(relabel_rule(["src_name", "hdr_host"], r"[^;]*demo-gen[^;]*;(" + "|".join(DEMO_DEVICES) + ")", "$1"))
+        rules.append(relabel_rule(["src_name", "hdr_host"], r"[^;]*demo-gen[^;]*;(" + "|".join(demo_names()) + ")", "$1"))
     for d in rows:
         host, _ = split_address(d["address"])
         if is_ipv4(host):
@@ -438,6 +510,7 @@ def write_generated(rows, values, demo, plan=None):
     snmp, flows = file_sd(rows, demo, values)
     write_atomic(GEN / "flowd/hosts.json", json.dumps(flow_hosts(rows, demo), indent=2) + "\n")
     write_atomic(GEN / "prometheus/snmp.json", json.dumps(snmp, indent=2) + "\n")
+    write_atomic(GEN / "prometheus/lldp.json", json.dumps(lldp_sd(snmp, rows, demo), indent=2) + "\n")
     write_atomic(GEN / "prometheus/flows.json", json.dumps(flows, indent=2) + "\n")
     write_atomic(GEN / "alloy/hostmap.alloy", hostmap([] if demo else rows, demo))
     auths = render_auths(values) if not demo else {}
@@ -458,7 +531,9 @@ def write_generated(rows, values, demo, plan=None):
 def ui_config(rows, demo, values=None):
     """What the command-center needs to know about the deployment (served by the proxy as /obs/config.json):
     no addresses or credentials, only names. flow_source: pcap-replay | demo-gen | capture | null (no flows)."""
-    devices = [{"name": n, "kind": n[:3]} for n in DEMO_DEVICES] if demo else [{"name": d["name"], "kind": d["kind"]} for d in rows]
+    devices = ([{"name": n, "kind": k} for n, (k, _) in demo_devices().items()] if demo
+               else [{"name": d["name"], "kind": d["kind"]} for d in rows])
+    devices = [{**d, "wireless": bool(driver(d["kind"]).get("wireless_clients"))} for d in devices]  # client column
     src = flow_source(demo, values)
     return {"profile": "demo" if demo else "prod", "flows_configured": src is not None, "flow_source": src, "devices": devices,
             "wan": wan_of(rows, demo), "bind": env("OBS_BIND", "127.0.0.1"), "links": topology_links(rows, demo),
@@ -533,7 +608,7 @@ ALERTMANAGER = "http://alertmanager:9093"
 
 
 def receivers_path():
-    return WORK / env("OBS_RECEIVERS", "alerting/receivers.yaml")
+    return CONFIG / env("OBS_RECEIVERS", "alerting/receivers.yaml")
 
 
 def load_receivers(path=None):
@@ -582,7 +657,7 @@ def cmd_targets(args):
         if errs:
             return 2
         write_generated([], values, demo=True, plan=DEMO_PLAN)
-        print(f"デモ用の scrape 対象を書きました: {', '.join(DEMO_DEVICES)} (demo-gen 経由)")
+        print(f"デモ用の scrape 対象を書きました: {', '.join(demo_names())} (demo-gen 経由)")
     else:
         errs, warns, rows = validate(values, load_inventory())
         n_errs, n_warns, plan = notify_plan(False, values)
@@ -789,8 +864,8 @@ def report(errs, warns):
 
 
 def fix_owner(*paths):
-    """Files written into the mounted repository belong to the repository's owner, not to root."""
-    st = WORK.stat()
+    """Files written into the mounted config directory belong to its owner, not to root."""
+    st = CONFIG.stat()
     for p in paths:
         try:
             os.chown(p, st.st_uid, st.st_gid)
@@ -873,7 +948,7 @@ def snmp_probe(d, m):
         url = "http://demo-gen:9116/snmp?" + urllib.parse.urlencode({"target": d["name"], "module": "if_mib"})
     else:
         url = "http://snmp-exporter:9116/snmp?" + urllib.parse.urlencode(
-            {"target": d["address"], "module": "if_mib,system", "auth": d["snmp_auth"]})
+            {"target": d["address"], "module": snmp_modules(d["kind"]), "auth": d["snmp_auth"]})
     try:
         _, body = http_get(url, timeout=SNMP_TIMEOUT)
     except urllib.error.HTTPError as e:
@@ -933,7 +1008,7 @@ def cmd_check(args):
         errs, warns, rows = validate(env_map(), safe_inventory())
     else:
         errs, warns = check_env(env_map())
-        rows = [{"name": n, "address": n, "snmp_auth": "-", "syslog": True, "kind": "demo"} for n in DEMO_DEVICES]
+        rows = [{"name": n, "address": n, "snmp_auth": "-", "syslog": True, "kind": "demo"} for n in demo_names()]
     print("■ 設定の検証")
     report(errs, warns)
     if not errs:
@@ -1106,7 +1181,7 @@ def cmd_notify_test(args):
         raise Fail(f"通知先 {args.receiver} はありません (ある通知先: {', '.join(names) or 'なし'})")
     names = [args.receiver] if args.receiver else names
     if not names:
-        raise Fail(f"通知先がありません。{rel(receivers_path())} を作って (例 alerting/receivers.example.yaml) "
+        raise Fail(f"通知先がありません。{rel(receivers_path())} を作って (例 config.example/alerting/receivers.example.yaml) "
                    "docker compose run --rm tools targets を実行してください")
     run, now = f"{int(time.time())}-{os.getpid()}", time.time()
     alert = lambda n, end: {"labels": {"alertname": TEST_ALERT, "severity": "info", "instance": "notify-test", "obs_test": run, "obs_test_receiver": n},
@@ -1167,7 +1242,7 @@ def render_env(values):
 
 def render_inventory(rows):
     head = ("# 機器台帳 (tools init が生成。手で編集してよい。変更後は `docker compose run --rm tools targets`)\n"
-            "#   name: 表示名 (Prometheus の instance / Loki の host)   kind: rtx | wlx | other\n"
+            f"#   name: 表示名 (Prometheus の instance / Loki の host)   kind: {' | '.join(kinds())} (drivers/ のドライバ)\n"
             "#   address: 管理 IP か DNS 名 (SNMP の宛先。syslog の送信元の照合にも使う)\n"
             "#   snmp_auth: snmp/auths.yml の auth 名 (yamaha_v3 / yamaha_v2c)   syslog: syslog を送ってくるか\n"
             "#   wan_interface: (任意、1 台だけ) WAN 側の ifName (例 lan2)。WAN 表示とアラート WanHighUtilization に使う\n"
@@ -1222,11 +1297,11 @@ def interactive(values, devices):
         name = ask("  機器名 (例 rtx1300)")
         if not name:
             break
-        kind = ask(f"  種別 ({'/'.join(KINDS)})", "rtx" if name.startswith("rtx") else "wlx" if name.startswith("wlx") else "other")
+        kind = ask(f"  種別 ({'/'.join(kinds())})", next((k for k in kinds() if name.startswith(k)), kinds()[-1]))
         addr = ask("  管理 IP または DNS 名")
         auth = ask("  SNMP 認証 (yamaha_v3 / yamaha_v2c)", "yamaha_v3")
         dev = {"name": name, "kind": kind, "address": addr, "snmp_auth": auth, "syslog": True}
-        if kind == "rtx" and not any("wan_interface" in x for x in devices):
+        if driver(kind).get("wan") and not any("wan_interface" in x for x in devices):
             wan = ask("  WAN 側インターフェースの ifName (例 lan2。WAN 表示とアラートに使う。空ならなし)")
             if wan:
                 dev["wan_interface"] = wan
@@ -1264,7 +1339,7 @@ def interactive_receivers(values):
         print(f"\n通知先: 既存の {rel(path)} を使います (変更は手で編集し、tools targets)")
         return None
     if ask("\nアラートの通知先 (メール / Slack / Discord / LINE / Webhook) を設定しますか? (y/N)", "n").lower() != "y":
-        print(f"通知先なし (アラートは画面にだけ出ます)。後から: alerting/receivers.example.yaml を {rel(path)} にコピーして編集")
+        print(f"通知先なし (アラートは画面にだけ出ます)。後から: config.example/alerting/receivers.example.yaml を {rel(path)} にコピーして編集")
         return None
     receivers = []
     while True:
@@ -1317,7 +1392,7 @@ def cmd_init(args):
     if exists and not args.force:
         raise Fail("既にあります: " + ", ".join(rel(p) for p in exists)
                    + "。作り直すなら --force (元のファイルは .bak に残します)")
-    values = {"COMPOSE_PROFILES": "prod", "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
+    values = {"COMPOSE_PROFILES": "prod", **pinned_settings(), "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
               "SYSLOG_PORT": args.syslog_port, "GF_ADMIN_PASSWORD": args.grafana_password or grafana_password_from_env(),
               "SNMP_V3_USER": args.snmp_user or env("SNMP_V3_USER"), "SNMP_V3_AUTH_PROTO": args.snmp_auth_proto,
               "SNMP_V3_AUTH_PASS": env("SNMP_V3_AUTH_PASS"), "SNMP_V3_PRIV_PROTO": args.snmp_priv_proto,
@@ -1354,10 +1429,13 @@ def cmd_init(args):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for p in exists:
         shutil.copy2(p, p.with_name(f"{p.name}.bak-{stamp}"))
-    write_atomic(ENV_FILE, render_env(values), mode=0o600)
+    write_atomic(ENV_FILE, render_env(env_file_values(values, read_env_file(ENV_FILE))), mode=0o600)
     write_atomic(inv, render_inventory(rows))
     fix_owner(ENV_FILE, inv, inv.parent)
-    print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)")
+    print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)"
+          + (f" — 設定ディレクトリ {env('OBS_CONFIG_DIR')}" if env("OBS_CONFIG_DIR") else
+             " — リポジトリ内 (従来の配置、git 管理外)。外に置くなら OBS_CONFIG_DIR (README「設定の置き場所」)")
+          + (f"。{', '.join(sorted(SECRETS_FROM_FILES))} は *_FILE から (.env には書きません)" if SECRETS_FROM_FILES else ""))
     if receivers is not None:
         write_atomic(receivers_path(), render_receivers(receivers))
         fix_owner(receivers_path())
@@ -1369,6 +1447,99 @@ def cmd_init(args):
     print("次: docker compose up -d   (COMPOSE_PROFILES=prod を .env に書いたので profile 指定は不要)\n"
           "    docker compose run --rm tools check   (SNMP 疎通・syslog 受信・health の確認)")
     return 0
+
+
+def pinned_settings():
+    """What `tools init` / `migrate-config` pin into .env: the compose project it runs under (existing volumes keep
+    their names whatever compose.yaml's default becomes) and the config directory (compose mounts it at /config)."""
+    return {"COMPOSE_PROJECT_NAME": env("COMPOSE_PROJECT_NAME") or LEGACY_PROJECT,
+            **({"OBS_CONFIG_DIR": env("OBS_CONFIG_DIR")} if env("OBS_CONFIG_DIR") else {})}
+
+
+def env_file_values(values, old_file, from_files=SECRETS_FROM_FILES):
+    """What init writes into .env: secrets ./geofront read from <NAME>_FILE stay out (their <NAME>_FILE line of the old
+    .env is kept, so `init --force` does not lose where they come from)."""
+    out = {k: v for k, v in values.items() if k not in from_files}
+    out.update({f"{k}_FILE": old_file[f"{k}_FILE"] for k in sorted(from_files) if f"{k}_FILE" in old_file})
+    return out
+
+
+def pin_env(path, settings):
+    """Append KEY=VALUE for the keys .env does not set yet (existing lines are never touched). -> keys added."""
+    have = read_env_file(path)
+    new = {k: v for k, v in settings.items() if k not in have}
+    if new:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        write_atomic(path, text + ("" if not text or text.endswith("\n") else "\n")
+                     + "".join(f"{k}={env_line_value(v)}\n" for k, v in new.items()), mode=0o600)
+    return list(new)
+
+
+def migration_plan(legacy_env, src, dst):
+    """-> [(source, destination)] of the legacy layout's files that exist: .env, the inventory and the receivers it
+    names (paths kept relative), backups/*."""
+    rels = [".env", legacy_env.get("OBS_INVENTORY") or "inventory/devices.yaml",
+            legacy_env.get("OBS_RECEIVERS") or "alerting/receivers.yaml"]
+    out = [(src / r, dst / r) for r in rels if not Path(r).is_absolute() and ".." not in Path(r).parts and (src / r).is_file()]
+    if (src / "backups").is_dir():
+        out += [(f, dst / "backups" / f.name) for f in sorted((src / "backups").iterdir()) if f.is_file()]
+    return out
+
+
+def cmd_migrate_config(args):
+    """Legacy layout (config inside the repository) -> OBS_CONFIG_DIR, or (without OBS_CONFIG_DIR) only pin the project
+    name into the repository's .env. Copies, never moves: the old files stay until the operator removes them."""
+    target = env("OBS_CONFIG_DIR")
+    if not target:
+        if not ENV_FILE.exists():
+            raise Fail("リポジトリ内に .env がありません (移すものがありません)。新しく作るなら tools init")
+        added = pin_env(ENV_FILE, pinned_settings())
+        fix_owner(ENV_FILE)
+        print(f"[OK] .env に {', '.join(added)} を固定しました (今のボリュームをそのまま使います)" if added
+              else "[OK] .env にプロジェクト名は固定済みです (変えません)")
+        print("設定をリポジトリの外へ移すには: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config")
+        return 0
+    legacy = read_env_file(WORK / ".env")
+    plan = migration_plan(legacy, WORK, CONFIG)
+    if not plan:
+        raise Fail("リポジトリ内に移す設定 (.env・台帳・通知先・backups) がありません")
+    clash = [d for _, d in plan if d.exists()]
+    if clash and not args.force:
+        raise Fail("移す先に既にあります: " + ", ".join(rel(d) for d in clash) + "。上書きするなら --force (元は .bak に残します)")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for src, dst in plan:
+        if dst.exists():
+            shutil.copy2(dst, dst.with_name(f"{dst.name}.bak-{stamp}"))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        if dst.name == ".env" or dst.parent.name == "backups":
+            os.chmod(dst, 0o600)
+        fix_owner(dst, dst.parent)
+    pin_env(ENV_FILE, {"COMPOSE_PROJECT_NAME": legacy.get("COMPOSE_PROJECT_NAME") or pinned_settings()["COMPOSE_PROJECT_NAME"],
+                       "OBS_CONFIG_DIR": target})
+    fix_owner(ENV_FILE)
+    old = [str(s.relative_to(WORK)) for s, _ in plan]
+    print(f"[OK] {len(plan)} 件を {target} に写しました: {', '.join(rel(d) for _, d in plan)}")
+    print(f"     .env に COMPOSE_PROJECT_NAME={read_env_file(ENV_FILE)['COMPOSE_PROJECT_NAME']} (今のボリュームのまま) と OBS_CONFIG_DIR を固定")
+    print("次: export OBS_CONFIG_DIR=" + target + " して ./geofront up -d (または docker compose --env-file " + target + "/.env ...)、"
+          "./geofront run --rm tools check で確認してから、リポジトリ内の旧ファイルを消してください: " + " ".join(old))
+    return 0
+
+
+def doctor_config_rows():
+    rows = []
+    if env("OBS_CONFIG_DIR"):
+        rows.append(("設定の場所", dr.OK, f"OBS_CONFIG_DIR ({env('OBS_CONFIG_DIR')})", ""))
+        if (WORK / ".env").exists():
+            rows.append(("旧配置の .env", dr.WARN, "リポジトリ内にも .env があります (使われません)", "移行を確かめてからリポジトリの .env を消す"))
+    else:
+        rows.append(("設定の場所", dr.WARN, "リポジトリ内 (従来の配置。git 管理外)",
+                     "外へ: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config (README「設定の置き場所」)"))
+    leak = env("OBS_DOCTOR_LEAK")  # scripts/doctor.sh runs scripts/leak-scan.sh on the host (git is not in this image)
+    if leak:
+        rows.append(("コミットしてはいけないデータ", dr.OK if leak == "OK" else dr.WARN, leak,
+                     "" if leak == "OK" or leak.startswith("省略") else "scripts/leak-scan.sh で場所を確認 (.gitignore / config の外出し)"))
+    return rows
 
 
 # ---- doctor (H1): preflight before `up` / `check`, no device traffic ---------------------------------
@@ -1501,7 +1672,8 @@ def doctor_grafana_rows(values):
 def cmd_doctor(args):
     file_env = read_env_file()
     values = {**file_env, **env_map()}
-    rows = doctor_host_rows(values, file_env) + doctor_env_rows(values, file_env) + doctor_access_rows(values) + doctor_grafana_rows(values)
+    rows = (doctor_host_rows(values, file_env) + doctor_config_rows() + doctor_env_rows(values, file_env) + doctor_access_rows(values)
+            + doctor_grafana_rows(values))
     print("■ 導入前の自己診断 (機器には接続しません)\n")
     table(("項目", "状態", "詳細", "直し方"), rows)
     ng = sum(r[1] == dr.NG for r in rows)
@@ -1574,7 +1746,7 @@ def write_archive(path, manifest, sources, tmp):
 
 def cmd_backup(args):
     prepare_volumes()
-    out = WORK / args.out
+    out = CONFIG / args.out
     out.mkdir(parents=True, exist_ok=True)
     fix_owner(out)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1711,9 +1883,9 @@ def check_manifest(manifest, members, with_config):
         if given is None:
             continue
         rp = Path(str(given))
-        dst = (WORK / rp).resolve()
+        dst = (CONFIG / rp).resolve()
         if (rp.is_absolute() or ".." in rp.parts or rp.suffix not in (".yaml", ".yml")
-                or not any(dst.is_relative_to((WORK / d).resolve()) for d in dirs)):
+                or not any(dst.is_relative_to((CONFIG / d).resolve()) for d in dirs)):
             raise Fail(f"manifest の{what}のパスが不正です ({' か '.join(d + '/' for d in dirs)} の .yaml のみ): {given!r}")
         out.append((str(rp), dst))
     if manifest.get("include_env"):
@@ -1725,7 +1897,7 @@ def check_manifest(manifest, members, with_config):
 
 
 def cmd_restore(args):
-    path = (WORK / args.archive) if not Path(args.archive).is_absolute() else Path(args.archive)
+    path = (CONFIG / args.archive) if not Path(args.archive).is_absolute() else Path(args.archive)
     if not path.exists():
         raise Fail(f"アーカイブがありません: {args.archive}")
     busy = running_services()
@@ -1906,7 +2078,8 @@ def cmd_geoip(args):
 # ---- syslog regression test ---------------------------------------------------------------------
 
 def load_fixtures():
-    return [json.loads(l) for l in FIXTURES.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [json.loads(l) for f in sorted(DRIVERS_DIR.glob("*/syslog.jsonl"))
+            for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 def send_tcp(host, port, msgs):
@@ -2048,7 +2221,7 @@ def selftest():
     assert file_sd(rows, demo=False, values={"OBS_CAPTURE": "1"})[1] == [{"targets": ["flowd:9100"], "labels": {"__metrics_path__": "/metrics"}}]
     assert file_sd([], demo=True, values={})[1][0]["targets"] == ["flowd-demo:9100"]
     assert file_sd([], demo=True, values={"DEMO_PCAP_REPLAY": "0"})[1] == [{"targets": ["demo-gen:9116"]}]
-    assert flow_hosts(rows, demo=False) == {"192.168.100.1": "rtx1300"} and flow_hosts([], demo=True) == DEMO_HOSTS
+    assert flow_hosts(rows, demo=False) == {"192.168.100.1": "rtx1300"} and flow_hosts([], demo=True) == {"192.168.100.1": "rtx1300"}
     assert [t["targets"] for t in file_sd([], demo=True)[0]] == [["rtx1300"], ["wlx413"], ["wlx222"]]
     hm = hostmap(rows)
     assert '"192\\\\.168\\\\.100\\\\.1"' in hm and '"testbed\\\\-wlx(\\\\..*)?"' in hm and hm.count("rule {") == 2, hm
@@ -2056,11 +2229,14 @@ def selftest():
     assert ui_config(rows, demo=False, values={}) == {"profile": "prod", "flows_configured": False, "flow_source": None, "wan": None,
                                                       "bind": env("OBS_BIND", "127.0.0.1"), "links": [],
                                                       "surge": {"factor": 3.0, "min_kbps": 200, "baseline": "1h"},
-                                                      "devices": [{"name": "rtx1300", "kind": "rtx"}, {"name": "wlx413", "kind": "wlx"}]}
+                                                      "devices": [{"name": "rtx1300", "kind": "rtx", "wireless": False},
+                                                                  {"name": "wlx413", "kind": "wlx", "wireless": True}]}
     # P5 network map: optional parent / parent_if / uplink_if; parents must exist, no loops
     trows = validate(good, [{**dev[0], "wan_interface": "lan2"}, {**dev[1], "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"}])[2]
     assert topology_links(trows, demo=False) == [{"device": "wlx413", "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"}]
-    assert ui_config(trows, demo=False, values={})["links"][0]["parent"] == "rtx1300" and ui_config([], demo=True)["links"] == DEMO_LINKS
+    assert ui_config(trows, demo=False, values={})["links"][0]["parent"] == "rtx1300" and ui_config([], demo=True)["links"] == [
+        {"device": "wlx413", "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"},
+        {"device": "wlx222", "parent": "rtx1300", "parent_if": "lan1", "uplink_if": "lan1"}]
     terrs = check_devices([{**dev[0], "parent": "wlx413"}, {**dev[1], "parent": "rtx1300"}], {"yamaha_v3"})
     assert any("ループ" in e for e in terrs), terrs
     terrs = check_devices([{**dev[0], "parent": "rtx1300", "parent_if": "ge0.1"}, {**dev[1], "parent_if": "lan1"}], {"yamaha_v3"})
@@ -2106,7 +2282,7 @@ def selftest():
     assert check_env({**good, "SLACK_WEBHOOK_URL": "https://x/'"})[0]  # quoting rules cover the notification secrets too
     werrs = check_devices([{**dev[0], "wan_interface": "ge0.1"}, {**dev[1], "wan_interface": "lan1"}], {"yamaha_v3"})
     assert any("ifName" in e for e in werrs) and any("1 台だけ" in e for e in werrs), werrs
-    assert ui_config([], demo=True)["devices"][2] == {"name": "wlx222", "kind": "wlx"} and ui_config([], demo=True)["flows_configured"]
+    assert ui_config([], demo=True)["devices"][2] == {"name": "wlx222", "kind": "wlx", "wireless": True} and ui_config([], demo=True)["flows_configured"]
     e = render_env({"OBS_BIND": "0.0.0.0", "SNMP_V3_AUTH_PASS": "pa$$ word", "COMPOSE_PROFILES": "prod", "NEW_KEY": "1"})
     assert "OBS_BIND=0.0.0.0\n" in e and "SNMP_V3_AUTH_PASS='pa$$ word'\n" in e and "COMPOSE_PROFILES=prod\n" in e and e.endswith("NEW_KEY=1\n")
     assert width("機器a") == 5 and split_address("h:1161") == ("h", "1161") and split_address("10.0.0.1") == ("10.0.0.1", None)
@@ -2161,7 +2337,7 @@ def selftest():
     mem = lambda *names: [types.SimpleNamespace(name=n, size=1, isfile=lambda: True) for n in names + ("loki/chunk",)]
     good_m = {"parts": ["loki"], "inventory": "inventory/devices.yaml", "include_env": True}
     assert check_manifest(good_m, mem("config/inventory/devices.yaml", "config/.env"), True) == [
-        ("inventory/devices.yaml", (WORK / "inventory/devices.yaml").resolve()), (".env", ENV_FILE)]
+        ("inventory/devices.yaml", (CONFIG / "inventory/devices.yaml").resolve()), (".env", ENV_FILE)]
     for bad_inv in ("../generated/alloy/hostmap.alloy", "/generated/alloy/hostmap.alloy", "inventory/../compose.yaml",
                     "snmp/auths.yml", "inventory/x.alloy"):
         try:
@@ -2230,6 +2406,28 @@ def selftest():
         want = {"OBS_PORT": "8443", "GF_ADMIN_PASSWORD": "a b#c", "SYSLOG_PORT": "", "PROM_LOCAL_PORT": "19090",
                 "GRAFANA_LOCAL_PORT": "13000", "OBS_PUBLIC_URL": "https://h#x", "SMTP_FROM": 'a "b" # c'}
         assert read_env_file(ef) == want, read_env_file(ef)
+    # R1 drivers: the inventory kind picks the driver (drivers/*/driver.yaml); the demo devices are the drivers' demo.json
+    assert {"rtx", "wlx", "other"} <= set(kinds()) and kinds()[-1] == "other" and snmp_modules("rtx") == snmp_modules("other") == "if_mib,system", kinds()
+    assert demo_names() == ("rtx1300", "wlx413", "wlx222") and demo_wan() == {"device": "rtx1300", "ifName": "lan2"}
+    assert [t["labels"]["__device"] for t in lldp_sd(snmp, rows, demo=False)] == ["rtx1300", "wlx413"]
+    assert len(lldp_sd(file_sd([], demo=True)[0], [], demo=True)) == 3 and auth_versions() == {"yamaha_v3": 3, "yamaha_v2c": 2}
+    fx = load_fixtures()
+    assert len(fx) == 17 and len({f["id"] for f in fx}) == 17 and {f["model"] for f in fx} == {"rtx", "wlx", "other"}
+    # R1 config layout: what migrate-config copies (relative paths kept), pinning never rewrites a line
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = Path(tmp, "repo"), Path(tmp, "cfg")
+        for rp in (".env", "inventory/devices.yaml", "backups/obs-backup-1.tar.gz", "testbed/devices.yaml"):
+            Path(src, rp).parent.mkdir(parents=True, exist_ok=True)
+            Path(src, rp).write_text("x\n", encoding="utf-8")
+        plan = migration_plan({"OBS_INVENTORY": "inventory/devices.yaml", "OBS_RECEIVERS": "../x.yaml"}, src, dst)
+        assert [(str(a.relative_to(src)), str(b.relative_to(dst))) for a, b in plan] == [
+            (".env", ".env"), (str(Path("inventory/devices.yaml")),) * 2, (str(Path("backups/obs-backup-1.tar.gz")),) * 2], plan
+        ef = Path(src, ".env")
+        ef.write_text("COMPOSE_PROJECT_NAME=old\nA=1", encoding="utf-8")
+        assert pin_env(ef, {"COMPOSE_PROJECT_NAME": "new", "OBS_CONFIG_DIR": "/etc/geofront"}) == ["OBS_CONFIG_DIR"]
+        assert ef.read_text(encoding="utf-8") == "COMPOSE_PROJECT_NAME=old\nA=1\nOBS_CONFIG_DIR=/etc/geofront\n"
+    assert env_file_values({"GF_ADMIN_PASSWORD": "s3cret", "OBS_PORT": "8080"}, {"GF_ADMIN_PASSWORD_FILE": "/run/gf"},
+                           frozenset({"GF_ADMIN_PASSWORD"})) == {"OBS_PORT": "8080", "GF_ADMIN_PASSWORD_FILE": "/run/gf"}
     pp = published_ports({"OBS_BIND": "192.0.2.10", "OBS_PORT": "443", "SYSLOG_BIND": "0.0.0.0"}, demo=False)
     assert ("tcp", "192.0.2.10", 443) in pp and ("udp", "0.0.0.0", 514) in pp and ("tcp", "127.0.0.1", 9116) not in pp, pp
     print("selftest ok")
@@ -2263,7 +2461,7 @@ def parser():
     t.add_argument("--demo", action="store_true", help="デモ用 (demo-gen) の対象を書く")
     b = sub.add_parser("backup", help="設定とデータを 1 つのアーカイブに")
     b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
-    b.add_argument("--out", default="backups", help="出力先 (リポジトリからの相対、既定 backups)")
+    b.add_argument("--out", default="backups", help="出力先 (設定ディレクトリ OBS_CONFIG_DIR からの相対、既定 backups)")
     b.add_argument("--include-captures", action="store_true", help="キャプチャのリングとアップロードした pcap も含める (既定は含めない)")
     r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana / alertmanager、キャプチャを含むなら capture / flowd / mask-api も停止しておく)")
     r.add_argument("archive")
@@ -2293,6 +2491,8 @@ def parser():
     u.add_argument("--display", default="", help="add: 表示名 (既定は利用者名)")
     u.add_argument("--email", default="", help="add: メールアドレス (TOTP の登録に必要。送信はしない。既定は <名前>@users.obs.invalid)")
     u.epilog = "パスワードは対話で 2 回入力 (TTY なしなら -e OBS_USER_PASSWORD=...)。保存は argon2id のハッシュだけです"
+    mc = sub.add_parser("migrate-config", help="従来の配置 (リポジトリ内) の設定を OBS_CONFIG_DIR へ写す (なければプロジェクト名を .env に固定)")
+    mc.add_argument("--force", action="store_true", help="移す先にあるファイルを上書き (元は .bak に残す)")
     sub.add_parser("doctor", help="導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。ホストの項目は scripts/doctor.sh から)")
     sub.add_parser("help", help="この説明")
     return p
@@ -2307,7 +2507,8 @@ def main(argv):
     cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
             "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
             "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test,
-            "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup, "user": cmd_user, "doctor": cmd_doctor}
+            "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup, "user": cmd_user, "doctor": cmd_doctor,
+            "migrate-config": cmd_migrate_config}
     if args.cmd not in cmds:
         p.print_help()
         return 0

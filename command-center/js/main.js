@@ -22,10 +22,10 @@ const LOKI_PANELS = ['p-logs', 'p-sev'];
 const FLOW_PANELS = ['p-dest', 'p-src', 'p-unknown', 'p-globe'];
 const FLOW_MAX_AGE_S = 4 * SCRAPE_S;
 
-// ---- theme: default (v3) or "eva-film"; ?theme= overrides, choice persisted when storage is available ----
-const THEMES = ['default', 'eva-film']; // toggle cycles in this order
-const THEME_LABEL = { default: 'THEME: STD', 'eva-film': 'THEME: FILM' };
-const THEME_ALIAS = { eva: 'eva-film' }; // the removed "eva" theme (stored or in old links) opens its successor
+// ---- theme: default (v3) or "film"; ?theme= overrides, choice persisted when storage is available ----
+const THEMES = ['default', 'film']; // toggle cycles in this order
+const THEME_LABEL = { default: 'THEME: STD', film: 'THEME: FILM' };
+const THEME_ALIAS = { eva: 'film', 'eva-film': 'film' }; // older names (stored or in old links) open the same theme
 function readStoredTheme() {
   try { return localStorage.getItem('cc-theme'); } catch { return null; }
 }
@@ -443,7 +443,7 @@ function initLayout() {
 
 // ---- boot sequence -----------------------------------------------------------------------------
 function boot() {
-  const lines = ['NETWORK OBSERVATORY // COMMAND CENTER', 'LINK prometheus ............ OK', 'LINK loki .................. OK',
+  const lines = ['GEOFRONT-NW // COMMAND CENTER', 'LINK prometheus ............ OK', 'LINK loki .................. OK',
     'LOAD geo layer ............. OK', `SOURCE: ${OBS.source}`, 'ESTABLISHING LIVE FEED_'];
   const pre = $('boot-text');
   const done = () => $('boot').classList.add('gone');

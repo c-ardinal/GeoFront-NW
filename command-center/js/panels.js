@@ -8,9 +8,10 @@ const WLX = new Set(['wlx413', 'wlx222']); // devices with a wireless client col
 export function setDevices(list) {
   DEVICES.splice(0, DEVICES.length, ...list.map((d) => d.name));
   WLX.clear();
-  for (const d of list) if (d.kind === 'wlx') WLX.add(d.name);
+  // the device's driver says whether it has a client column (config.json `wireless`; older configs: kind wlx)
+  for (const d of list) if (d.wireless ?? d.kind === 'wlx') WLX.add(d.name);
 }
-export const isWlx = (name) => WLX.has(name); // by inventory kind (demo: its two APs), never by name
+export const isWlx = (name) => WLX.has(name); // by the inventory kind's driver (demo: its two APs), never by name
 // WAN interface: the demo's rtx1300 lan2; in prod the inventory's wan_interface (setWan). instance null = not configured.
 export const WAN = { instance: 'rtx1300', ifName: 'lan2' };
 // Exposure of the screens for the LAN indicator: a fresh exposure.json, else a fresh config.json (it carries OBS_BIND),

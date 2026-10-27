@@ -1,0 +1,25 @@
+{
+  "_": "SYNTHETIC demo devices of this driver for demo-gen (DEMO DATA, not a model of real firmware). interfaces: ifIndex, ifName, ifDescr, ifHighSpeed (Mbps), operStatus (1 up, 2 down). wan_if: the WAN ifIndex (router traffic model). pcap_address: its address in demo/demo-home.pcap. lldp: local ifIndex, remote sysName, remote port id, remote port desc. logs / error_logs: [severity, template] ({a} = 2..250, {p} = port).",
+  "devices": {
+    "rtx1300": {
+      "interfaces": [[1, "lan1", "LAN1 (LAN)", 1000, 1], [2, "lan2", "LAN2 (WAN)", 1000, 1], [3, "lan3", "LAN3", 1000, 2]],
+      "wan_if": 2,
+      "pcap_address": "192.168.100.1",
+      "lldp": [[1, "wlx413", "lan1", "LAN1"]]
+    }
+  },
+  "logs": [
+    ["info", "[INSPECT] PP[01][out][101098] TCP 192.168.100.{a}:{p} > 192.0.2.10:443 (2026/10/24 12:00:00)"],
+    ["info", "PP[01] Rejected at IN(1020) filter: TCP 198.51.100.{a}:{p} > 192.168.100.1:23"],
+    ["notice", "PP[01] Rejected at IN(1020) filter: UDP 203.0.113.{a}:{p} > 192.168.100.1:161"],
+    ["info", "[DHCPD] LAN1(1) Allocates 192.168.100.{a}: 02:00:5e:10:00:{a:02x}"],
+    ["info", "[DHCPD] LAN1(1) Extends 192.168.100.{a}"],
+    ["notice", "LAN2: link up (1000BASE-T full duplex)"],
+    ["info", "[DNS] Resolver cache entries: {p}"]
+  ],
+  "error_logs": [
+    ["err", "LAN2: link down"],
+    ["warning", "PP[01] PPPoE: LCP echo timeout, retrying"],
+    ["warning", "[DHCPD] LAN1(1) address pool exhausted"]
+  ]
+}

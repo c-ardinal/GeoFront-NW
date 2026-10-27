@@ -1,13 +1,32 @@
+# Site configuration and data never belong in the repository (keep them in OBS_CONFIG_DIR, outside it).
+# The legacy layout (config inside the repository) is covered too. Check: scripts/leak-scan.sh
 .env
-.env.bak-*
+.env.*
+!config.example/.env.example
+*.env
+!testbed/testbed.env
 .claude/
-# real device inventory (only the example is tracked)
-inventory/*
-!inventory/devices.example.yaml
-backups/
-# real notification destinations (only the example is tracked)
-alerting/receivers.yaml
-alerting/receivers.yaml.bak-*
+# real device inventory / notification destinations (examples: config.example/)
+/inventory/
+/alerting/
+/backups/
+# keys, certificates, captures, databases, GeoIP databases
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.pcap
+*.pcapng
+!demo/demo-home.pcap
+*.sqlite
+*.sqlite3
+*.db
+*.mmdb
+*.tar.gz
+users_database.yml
 # Python bytecode (local selftest runs)
 __pycache__/
 *.pyc

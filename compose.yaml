@@ -1,8 +1,17 @@
+# GeoFront-NW. The default project name stays the pre-R1 one so that an existing installation keeps its volumes
+# (a new name would start with empty ones); `tools init` pins the project name into the config's .env and ./geofront
+# gives a new installation geofront-nw (README 「設定の置き場所」).
 name: yamaha-observatory-trial
 
+# Site configuration (.env, inventory, receivers, backups) lives in OBS_CONFIG_DIR (outside the repository; unset = the
+# repository itself, the legacy layout): ./geofront passes its .env (--env-file), compose mounts it at /config in the
+# tools services. Every setting can also come from the environment; secrets also as <NAME>_FILE (./geofront).
+# Self-built images: ghcr.io/c-ardinal/geofront-nw-<svc>:${GEOFRONT_VERSION} (published by CI for tags v*); the default
+# GEOFRONT_VERSION=local is never published, so `up --build` builds them here as before.
+#
 # Profiles (pick one; COMPOSE_PROFILES in .env does the same as --profile):
 #   demo     demo-gen: synthetic SNMP / flows / syslog (docker compose --profile demo up -d)
-#   prod     real devices: snmp-exporter (SNMPv3) + syslog from the LAN, targets from inventory/devices.yaml
+#   prod     real devices: snmp-exporter (SNMPv3) + syslog from the LAN, targets from the inventory (OBS_CONFIG_DIR)
 #   testbed  with prod: simulated devices (snmpsim SNMPv3 + syslog sender) to try the prod path without hardware
 #            (docker compose --env-file testbed/testbed.env up -d)
 #   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
@@ -12,7 +21,7 @@ name: yamaha-observatory-trial
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
 # Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|user|help>
 # Login (P7): a LAN exposure (OBS_BIND not 127.x) always requires a login (Authelia, HTTPS); 127.0.0.1 only with OBS_AUTH=1.
-# Notifications: alerting/receivers.yaml (destinations, routes per severity) + secrets in .env -> the setup step writes the
+# Notifications: alerting/receivers.yaml in OBS_CONFIG_DIR (destinations, routes per severity) + secrets in .env -> the setup step writes the
 # Alertmanager config and the notify-relay config (0600) into the `generated` volume. Demo: only the local demo sink.
 #
 # Images are pinned by tag + digest (multi-arch index: linux/amd64 and linux/arm64 both present).
@@ -32,6 +41,10 @@ x-python-base: &python-base
   "python:3.12-slim": docker-image://python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
 x-tools-env: &tools-env
+  # the config directory as the host sees it (tools init / migrate-config pin it into .env) and the project name
+  OBS_CONFIG_DIR: ${OBS_CONFIG_DIR:-}
+  COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-yamaha-observatory-trial}
+  OBS_SECRET_FILES: ${OBS_SECRET_FILES:-}  # secrets ./geofront read from <NAME>_FILE: tools init keeps them out of .env
   OBS_BIND: ${OBS_BIND:-127.0.0.1}
   OBS_PORT: ${OBS_PORT:-8080}
   OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
@@ -96,11 +109,12 @@ x-auth-secrets: &auth-secrets
 # it: several services building the same tag in one `up --build` race ("image already exists"); the others use the
 # image setup-check has just built and never try to pull it.
 x-tools: &tools
-  image: ${COMPOSE_PROJECT_NAME:-yamaha-observatory-trial}-tools:local
+  image: ghcr.io/c-ardinal/geofront-nw-tools:${GEOFRONT_VERSION:-local}
   pull_policy: never
   environment: *tools-env
   volumes:
     - ./:/work
+    - ${OBS_CONFIG_DIR:-.}:/config
     - generated:/generated
   logging:
     driver: json-file
@@ -112,6 +126,7 @@ x-setup-done: &setup-done
 # flowd (capture profile) and flowd-demo (demo): capture files -> obs_flow_bytes_total, through the analyzer sandbox
 x-flowd: &flowd
   <<: *ops
+  image: ghcr.io/c-ardinal/geofront-nw-flowd:${GEOFRONT_VERSION:-local}
   build:
     context: ./flowd
     additional_contexts: *python-base
@@ -149,6 +164,7 @@ services:
   # every profile: fails `up` with a clear message when no profile (so no setup) was chosen
   setup-check:
     <<: *tools
+    pull_policy: missing  # a published GEOFRONT_VERSION is pulled; local is built
     build:
       context: ./tools
       additional_contexts:
@@ -158,6 +174,7 @@ services:
     # root-owned: mask-api, as nobody, could not write uploads)
     volumes:
       - ./:/work
+      - ${OBS_CONFIG_DIR:-.}:/config
       - generated:/generated
       - capture-ring:/vol/capture
       - pcap-uploads:/vol/uploads
@@ -189,6 +206,7 @@ services:
       <<: [*tools-env, *notify-env, *auth-secrets]
     volumes:
       - ./:/work
+      - ${OBS_CONFIG_DIR:-.}:/config
       - generated:/generated
       - prometheus-data:/vol/prometheus
       - loki-data:/vol/loki
@@ -205,9 +223,12 @@ services:
   demo-gen:
     <<: *ops
     profiles: [demo]
+    image: ghcr.io/c-ardinal/geofront-nw-demo-gen:${GEOFRONT_VERSION:-local}
     build:
       context: ./demo-gen
-      additional_contexts: *python-base
+      additional_contexts:
+        <<: *python-base
+        drivers: ./drivers  # the demo devices (drivers/*/demo.json)
     environment:
       SYSLOG_HOST: alloy
       SYSLOG_PORT: "514"
@@ -284,6 +305,7 @@ services:
   capture:
     <<: *ops
     profiles: [capture]
+    image: ghcr.io/c-ardinal/geofront-nw-capture:${GEOFRONT_VERSION:-local}
     build:
       context: ./capture
       additional_contexts: *python-base
@@ -338,8 +360,11 @@ services:
   testbed-rtx:
     <<: *ops
     profiles: [testbed]
+    image: geofront-nw-testbed:local  # test fixture only, never published
     build:
       context: ./testbed
+      additional_contexts:
+        drivers: ./drivers  # the drivers' syslog fixtures (drivers/*/syslog.jsonl)
     # its reverse-DNS name is how Alloy maps its syslog lines to the inventory name (another name only for a second
     # testbed next to this one, e.g. scripts/e2e-fresh.sh: its inventory then uses that name as the address)
     container_name: ${TESTBED_RTX_NAME:-testbed-rtx}
@@ -368,8 +393,8 @@ services:
   testbed-wlx:
     <<: *ops
     profiles: [testbed]
-    build:
-      context: ./testbed
+    image: geofront-nw-testbed:local
+    pull_policy: never  # built by testbed-rtx (one build of the shared image per `up --build`)
     container_name: ${TESTBED_WLX_NAME:-testbed-wlx}
     hostname: testbed-wlx
     environment:
@@ -398,8 +423,8 @@ services:
   notifymock:
     <<: *ops
     profiles: [testbed]
-    build:
-      context: ./testbed
+    image: geofront-nw-testbed:local
+    pull_policy: never  # built by testbed-rtx
     command: [python, -u, notifymock.py]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
@@ -562,6 +587,7 @@ services:
 
   mask-api:
     <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-mask-api:${GEOFRONT_VERSION:-local}
     build:
       context: ./mask-api
       additional_contexts: *python-base
@@ -615,6 +641,7 @@ services:
   # mask-api (and flowd) reach it only through the Unix socket in the analyzer-run tmpfs volume.
   analyzer:
     <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-analyzer:${GEOFRONT_VERSION:-local}
     build:
       context: ./analyzer
       additional_contexts:
@@ -677,6 +704,7 @@ services:
   # Loki {job="notify"}. Internal network only. Secrets: the generated relay.json (0600) only.
   notify-relay:
     <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-notify-relay:${GEOFRONT_VERSION:-local}
     build:
       context: ./notify-relay
       additional_contexts: *python-base

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Preflight before `docker compose up` (tools doctor with the host's facts): Docker Engine / compose versions, CPU
-# architecture, NTP, ports already in use on this host; then .env, inventory, users, certificate, disk, memory and the
+# architecture, NTP, ports already in use on this host, the leak scan of this tree; then the config location, .env,
+# inventory, users, certificate, disk, memory and the
 # clock in the tools container. Nothing talks to a device. Exit 1 when anything is NG.
-#   scripts/doctor.sh                      (this repository's .env)
+#   scripts/doctor.sh                      (this repository's config: OBS_CONFIG_DIR, else the legacy .env in the tree)
 #   DC_DIR=<tree> COMPOSE_PROJECT_NAME=<p> scripts/doctor.sh   (another tree / project: scripts/e2e-fresh.sh)
 . "$(dirname "$0")/lib.sh"
 
@@ -32,4 +33,13 @@ case "$(uname -s)" in
       args+=(-e "OBS_DOCTOR_LISTEN=$(printf '%s\n' "$out" | awk 'NF { printf "%s:%s ", $1, $5 }') ")
     fi ;;
 esac
+# data that must never be committed, in this tree (scripts/leak-scan.sh; git is not in the tools image)
+tree="${DC_DIR:-$ROOT}"
+if [ -n "$PY" ] && [ -e "$tree/.git" ] && command -v git >/dev/null; then
+  if out="$("$PY" "$tree/scripts/leak_scan.py" 2>&1)"; then leak=OK
+  else leak="NG $(printf '%s\n' "$out" | grep -c '^  NG') 件 (値は scripts/leak-scan.sh で)"; fi
+else
+  leak="省略 (git の作業ツリーではない、または python3 なし)"
+fi
+args+=(-e "OBS_DOCTOR_LEAK=$leak")
 dc run --rm -T "${args[@]}" tools doctor

@@ -1,5 +1,5 @@
 # 通知先の設定例。alerting/receivers.yaml にコピーして編集する (実ファイルは git 管理外)。
-#   cp alerting/receivers.example.yaml alerting/receivers.yaml
+#   cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/receivers.yaml"  (従来の配置ならリポジトリの alerting/)
 #   docker compose run --rm tools targets       (設定を生成し Alertmanager に読み込ませる)
 #   docker compose run --rm tools notify-test   (各通知先にテスト送信して応答を表で確認)
 #
