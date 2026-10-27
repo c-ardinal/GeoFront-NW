@@ -46,6 +46,11 @@ export function configWatcher(applied, { mode, reload, defer = (f) => setTimeout
 }
 const isLocalBind = (b) => /^127\./.test(b) || b === 'localhost' || b === '::1';
 export function exposureOf(freshExp, freshCfg, cachedExp, cachedCfg) {
+  // with the login (P7) the screens are not open to the LAN: nothing to warn about (a remembered answer counts: the
+  // session may just have ended)
+  if (freshExp?.access === 'auth' || (!freshExp && cachedExp?.access === 'auth')) {
+    return { kind: 'auth', bind: String(freshExp?.bind || cachedExp?.bind || ''), cached: !freshExp };
+  }
   const fresh = freshExp?.bind || freshCfg?.bind;
   if (fresh) return { kind: isLocalBind(String(fresh)) ? 'local' : 'lan', bind: String(fresh), cached: false };
   const old = cachedExp?.bind || cachedCfg?.bind;

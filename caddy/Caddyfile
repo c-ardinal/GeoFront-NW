@@ -1,154 +1,142 @@
 # Front reverse proxy: the only service published beyond localhost.
-#   :80   -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/
+#   :8080 -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/,
+#            the login screen (Authelia) at /auth/ when authentication is on
 #   :9090 -> 127.0.0.1 only: Prometheus UI, read-only (the admin API used by `tools backup` is never proxied)
 #   :3000 -> 127.0.0.1 only: old Grafana URLs, redirected to /grafana/
-# Host allowlist (DNS rebinding): every site answers only for the names the screens are really opened with. :80 =
-# {$OBS_SITES}, built by the proxy's entrypoint (compose.yaml) from 127.0.0.1 / localhost / [::1], the host of
-# OBS_PUBLIC_URL and the LAN bind address. Any other Host (e.g. an attacker's name pointed at 127.0.0.1) gets 421 from
-# the catch-all blocks below: no screen, no masked data, no writes. LAN users open OBS_PUBLIC_URL.
+#   :80   -> not published: the container's own health check (and `tools check`)
+# Access mode (OBS_ACCESS, set by the proxy's entrypoint in compose.yaml from OBS_BIND / OBS_AUTH, never by hand):
+#   open  127.0.0.1 without authentication (the demo default): plain HTTP, no login, writes allowed by mask-api as "local"
+#   auth  always on a LAN exposure, or OBS_AUTH=1: HTTPS from Caddy's own CA (tls internal; plain HTTP on the same port is
+#         redirected to HTTPS), every request but the login screen first asked of Authelia (forward_auth). Authelia down,
+#         slow or unreachable -> 502 / 504: nothing is served without a verified login (fail closed).
+# The mode's parts are in access-<mode>-global.caddy (global options) and access-<mode>.caddy (snippets).
+# Host allowlist (DNS rebinding): the screens answer only for the names they are really opened with, {$OBS_SITES}, built
+# by the entrypoint (open: 127.0.0.1 / localhost / [::1] + OBS_PUBLIC_URL's host + the bind address; auth: OBS_PUBLIC_URL's
+# host + the bind address). Any other Host gets 421 from the catch-all below (over HTTPS a name the CA did not certify
+# fails already in the TLS handshake): no screen, no masked data, no writes.
 {
 	admin off
-	auto_https off
+	import /etc/caddy/access-{$OBS_ACCESS}-global.caddy
 }
 
-{$OBS_SITES:http://127.0.0.1:80, http://localhost:80, http://[::1]:80} {
-	# A role / user header only ever comes from the auth layer below, never from the client.
-	request_header -X-Obs-Role
-	request_header -X-Obs-User
+import /etc/caddy/access-{$OBS_ACCESS}.caddy
 
-	# ---- authentication insertion point (P1: no authentication) -------------------------------------
-	# Put a forward-auth provider (Authelia, authentik, oauth2-proxy, ...) on the compose network and enable:
-	#
-	# forward_auth authelia:9091 {
-	# 	uri /api/authz/forward-auth
-	# 	copy_headers Remote-User Remote-Groups
-	# }
-	# @admins header Remote-Groups *obs-admin*
-	# request_header @admins X-Obs-Role admin
-	# request_header X-Obs-User {http.request.header.Remote-User}   # operator name in ACK comments / createdBy
-	#
-	# mask-api reads X-Obs-Role (today it always treats the request as viewer and keeps masking on; with
-	# OBS_OPS_TRUST_ROLE=1 operator / admin may write silences, see /am/ below).
-	# Grafana can trust the same identity with GF_AUTH_PROXY_ENABLED / GF_AUTH_PROXY_HEADER_NAME=Remote-User.
-	# ---------------------------------------------------------------------------------------------------
-
-	handle /obs/exposure.json {
-		header Content-Type application/json
-		header Cache-Control no-store
-		respond `\{"bind":"{$OBS_BIND:127.0.0.1}"\}` 200
-	}
-	# profile / flow source / inventory device names for the command-center (written by the setup step)
-	handle /obs/config.json {
-		root * /srv/obs-generated/ui
-		rewrite * /config.json
-		header Cache-Control no-store
-		file_server
-	}
-	handle /healthz {
-		respond "ok" 200
-	}
-	# Alerts / silences for the command-center, through mask-api: reads are masked like /prom/ and /loki/; the only
-	# writes are creating / extending / expiring silences (ACK). mask-api checks each write (allowlist, same origin,
-	# X-Obs-Csrf header, matchers and duration). Writes are refused here as well while the screens are on the LAN: there
-	# is no authentication yet. An authentication layer above may open them for X-Obs-Role operator / admin instead:
-	# replace @amLanWrite with a check of that role and set OBS_OPS_TRUST_ROLE=1 for mask-api.
-	handle /am/* {
-		@amLanWrite {
-			not method GET HEAD
-			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
-		}
-		header @amLanWrite Content-Type application/json
-		respond @amLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中は抑止・確認の操作はできません (認証がありません)"\}` 403
-		reverse_proxy mask-api:8000
-	}
-	# Packet analysis for the command-center, through mask-api (pcap_api.py): reads (file list, packets, details, hex,
-	# statistics, filter checks) are masked; the only writes are uploading / deleting an uploaded pcap, checked by
-	# mask-api like the silences (same origin + X-Obs-Csrf, rate limit, size / magic bytes) and refused here as well
-	# while the screens are on the LAN.
-	handle /pcap/* {
-		@pcapLanWrite {
-			not method GET HEAD
-			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
-		}
-		header @pcapLanWrite Content-Type application/json
-		respond @pcapLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中は pcap のアップロード・削除はできません (認証がありません)"\}` 403
-		request_body {
-			max_size {$PCAP_UPLOAD_MAX_MB:50}MB
-		}
-		reverse_proxy mask-api:8000
-	}
-	# Evidence export (mask-api evidence.py): GET / HEAD, plus one POST: the same export with the browser's screen snapshot
-	# (PNG body). The zip is assembled by mask-api from its own masked read paths; it limits the window / rows / lines /
-	# bytes / time itself, runs one export at a time and a few per minute (429). The POST is checked by mask-api like the
-	# silences (same origin + X-Obs-Csrf, PNG size / dimensions) and refused here as well while the screens are on the LAN
-	# (the screen then exports without the snapshot). Same Host allowlist as every route of this site.
-	handle /evidence/* {
-		@evidenceWrite {
-			not method GET HEAD
-			not {
-				method POST
-				path /evidence/export
-			}
-		}
-		header @evidenceWrite Content-Type application/json
-		respond @evidenceWrite `\{"status":"error","error":"read-only (POST only to /evidence/export, with a snapshot)"\}` 405
-		@evidenceLanWrite {
-			method POST
-			path /evidence/export
-			expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
-		}
-		header @evidenceLanWrite Content-Type application/json
-		respond @evidenceLanWrite `\{"status":"error","errorType":"forbidden","error":"LAN 公開中はスナップショット付きの証跡出力はできません (認証がありません)。スナップショットなしで出力できます"\}` 403
-		request_body {
-			max_size {$EVIDENCE_SNAPSHOT_MAX_MB:8}MB
-		}
-		# above mask-api's export time budget (EVIDENCE_TIME_BUDGET, 60 s): the zip, or its own error, always arrives;
-		# a client that gives up closes the upstream connection and mask-api abandons the export (its slot is freed)
-		reverse_proxy mask-api:8000 {
-			transport http {
-				response_header_timeout 90s
-			}
-		}
-	}
-	# 原因候補 (mask-api correlate.py): read-only, GET / HEAD only; mask-api reads Prometheus / Loki through its own
-	# masked read paths, bounded (window, lines, items, a 10 s budget, two at a time: 429)
-	handle /correlate/* {
-		@correlateWrite not method GET HEAD
-		header @correlateWrite Content-Type application/json
-		respond @correlateWrite `\{"status":"error","error":"read-only"\}` 405
-		reverse_proxy mask-api:8000 {
-			transport http {
-				response_header_timeout 30s
-			}
-		}
-	}
-	redir /grafana /grafana/ 308
-	handle /grafana/* {
-		# Published beyond localhost, every /grafana/ request is first asked of `grafana-guard` (internal network only):
-		# it answers 200 only while its last check of grafana.db was positive (no admin with a default password) and at
-		# most two check intervals old. 403 from the guard is passed to the client; a stopped, frozen or slow guard means
-		# no answer within 2 s -> 502 / 504. Fail closed by construction. On 127.0.0.1 nothing is asked.
-		@onLan expression `!("{$OBS_BIND:127.0.0.1}".startsWith("127.") || "{$OBS_BIND:127.0.0.1}" == "localhost")`
-		forward_auth @onLan grafana-guard:8099 {
-			uri /allow
-			transport http {
-				dial_timeout 2s
-				response_header_timeout 2s
-			}
-		}
-		reverse_proxy grafana:3000
-	}
-	handle {
-		reverse_proxy command-center:80
+# mask-api: with the proxy's key, so mask-api believes the identity headers set above only from here (mask_api.identity)
+(mask_api) {
+	reverse_proxy mask-api:8000 {
+		header_up X-Obs-Auth "{$OBS_AUTH_PROXY_KEY}"
+		{block}
 	}
 }
 
-# Host not in the allowlist: nothing (the health check of `tools check` stays answerable)
-:80 {
+{$OBS_SITES} {
+	import site_tls
+	# Everything in written order: first the identity (client copies of the identity headers removed, then the login
+	# check and the verified user / role in access-<mode>.caddy), then the routes.
+	route {
+		import identity
+
+		handle /obs/exposure.json {
+			header Content-Type application/json
+			header Cache-Control no-store
+			respond `\{"bind":"{$OBS_BIND:127.0.0.1}","access":"{$OBS_ACCESS}"\}` 200
+		}
+		# profile / flow source / inventory device names for the command-center (written by the setup step)
+		handle /obs/config.json {
+			root * /srv/obs-generated/ui
+			rewrite * /config.json
+			header Cache-Control no-store
+			file_server
+		}
+		handle /healthz {
+			respond "ok" 200
+		}
+		import login_portal
+		# Writes (silences / ACK, pcap upload / delete, the evidence export with a snapshot): with authentication only for
+		# a verified operator / admin (X-Obs-Role set above); mask-api checks each write again (role from the proxy only,
+		# same origin, X-Obs-Csrf header, allowlists, sizes).
+		@viewerWrite {
+			not method GET HEAD
+			path /am/* /pcap/* /evidence/*
+			expression `"{$OBS_ACCESS}" != "open"`
+			not header_regexp X-Obs-Role ^(operator|admin)$
+		}
+		handle @viewerWrite {
+			header Content-Type application/json
+			respond `\{"status":"error","errorType":"forbidden","error":"この操作には operator 以上の役割が必要です"\}` 403
+		}
+		# Alerts / silences for the command-center, through mask-api: reads are masked like /prom/ and /loki/; the only
+		# writes are creating / extending / expiring silences (ACK).
+		handle /am/* {
+			import mask_api
+		}
+		# Packet analysis for the command-center, through mask-api (pcap_api.py): reads (file list, packets, details, hex,
+		# statistics, filter checks) are masked; the only writes are uploading / deleting an uploaded pcap (same origin +
+		# X-Obs-Csrf, rate limit, size / magic bytes). The size cap is in MiB, as in mask-api.
+		handle /pcap/* {
+			request_body {
+				max_size {$PCAP_UPLOAD_MAX_MB:50}MiB
+			}
+			import mask_api
+		}
+		# Evidence export (mask-api evidence.py): GET / HEAD, plus one POST: the same export with the browser's screen
+		# snapshot (PNG body, cap in MiB as in mask-api). The zip is assembled by mask-api from its own masked read paths;
+		# it limits the window / rows / lines / bytes / time itself, runs one export at a time and a few per minute (429).
+		handle /evidence/* {
+			@evidenceWrite {
+				not method GET HEAD
+				not {
+					method POST
+					path /evidence/export
+				}
+			}
+			header @evidenceWrite Content-Type application/json
+			respond @evidenceWrite `\{"status":"error","error":"read-only (POST only to /evidence/export, with a snapshot)"\}` 405
+			request_body {
+				max_size {$EVIDENCE_SNAPSHOT_MAX_MB:8}MiB
+			}
+			# above mask-api's export time budget (EVIDENCE_TIME_BUDGET, 60 s): the zip, or its own error, always arrives;
+			# a client that gives up closes the upstream connection and mask-api abandons the export (its slot is freed)
+			import mask_api {
+				transport http {
+					response_header_timeout 90s
+				}
+			}
+		}
+		# 原因候補 (mask-api correlate.py): read-only, GET / HEAD only
+		handle /correlate/* {
+			@correlateWrite not method GET HEAD
+			header @correlateWrite Content-Type application/json
+			respond @correlateWrite `\{"status":"error","error":"read-only"\}` 405
+			import mask_api {
+				transport http {
+					response_header_timeout 30s
+				}
+			}
+		}
+		redir /grafana /grafana/ 308
+		handle /grafana/* {
+			import grafana_access
+			reverse_proxy grafana-front:3000
+		}
+		handle {
+			reverse_proxy command-center:80
+		}
+	}
+}
+
+# Host not in the allowlist: nothing
+{$OBS_CATCHALL} {
+	import site_tls
+	respond "misdirected request: open the screens with OBS_PUBLIC_URL" 421
+}
+
+# the container's health check and `tools check` (internal only, not published)
+http://:80 {
 	handle /healthz {
 		respond "ok" 200
 	}
-	respond "misdirected request: open the screens with OBS_PUBLIC_URL (or 127.0.0.1)" 421
+	respond "misdirected request" 421
 }
 
 http://127.0.0.1:9090, http://localhost:9090, http://[::1]:9090 {
@@ -162,19 +150,26 @@ http://127.0.0.1:9090, http://localhost:9090, http://[::1]:9090 {
 	reverse_proxy prometheus:9090
 }
 
-:9090 {
+http://:9090 {
 	respond "misdirected request" 421
 }
 
+# old Grafana URLs on 127.0.0.1: an identity is never passed here; with authentication nothing is served (Grafana only
+# through the screens' URL, for the role admin: access-auth.caddy)
 http://127.0.0.1:3000, http://localhost:3000, http://[::1]:3000 {
+	request_header -X-Obs-User
+	request_header -X-Obs-Role
+	request_header -X-Obs-Grafana-Role
+	request_header -X-Obs-Auth
+	import grafana_local
 	handle /grafana/* {
-		reverse_proxy grafana:3000
+		reverse_proxy grafana-front:3000
 	}
 	handle {
 		redir * /grafana{uri} 302
 	}
 }
 
-:3000 {
+http://:3000 {
 	respond "misdirected request" 421
 }

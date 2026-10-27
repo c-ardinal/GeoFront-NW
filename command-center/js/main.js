@@ -1,7 +1,7 @@
 // Command-center entry: theme, polling, wallboard rendering, and wiring of modals/drawers/globe interactions.
 // Reads Prometheus/Loki only through the same-origin nginx proxy. All data in this trial is SYNTHETIC (demo-gen).
 import { $, el, vmap, scalar, has, jstClock, jstFull, REDUCED_MOTION, LARGE, WALLBOARD, now, isPlayback, setCursor, SCRAPE_S, RATE_WIN } from './util.js';
-import { promQuery, promRange, promAlerts, promAlertsAt, lokiRange, lokiMetric, flattenStreams } from './api.js';
+import { promQuery, promRange, promAlerts, promAlertsAt, lokiRange, lokiMetric, flattenStreams, amOps } from './api.js';
 import * as P from './panels.js';
 import * as G from './globe.js';
 import * as UI from './ui.js';
@@ -11,7 +11,7 @@ import { setNoFlowSource } from './views-common.js';
 import * as AL from './alerting.js';
 import * as PA from './views-pcap.js';
 import * as PB from './playback.js';
-import { downloadEvidence } from './evidence.js';
+import { downloadEvidence, snapshotGate } from './evidence.js';
 import * as T from './topology.js';
 import * as C from './correlate.js';
 
@@ -453,15 +453,30 @@ function boot() {
 }
 
 // ---- deployment info from the front proxy, applied before the bar fitter first measures and before the first render.
-//   /obs/exposure.json: the address the screens are published on (OBS_BIND). Beyond localhost they are on the LAN
-//     without authentication, which the bar says permanently.
+//   /obs/exposure.json: the address the screens are published on (OBS_BIND) and the access mode (open / auth). Without a
+//     login beyond localhost (only before P7, or an unknown answer) the bar says so permanently; with the login it says
+//     nothing (who is logged in is in the ⋯ menu).
 //   /obs/config.json: profile, whether a flow source is configured, the inventory devices, OBS_BIND (setup step).
 // Fresh answers are remembered; a remembered config keeps a prod screen from turning into the demo look when the proxy
 // is slow. The exposure indicator trusts fresh answers only (panels.exposureOf); both are fetched again every
 // OBS_REFRESH_MS, so a later recovery or an OBS_BIND change updates it. With no config at all the bar says so.
 const OBS_REFRESH_MS = 60000;
+// The login session ended (Authelia answers a background request with 401 or a redirect to its login screen): reload,
+// so the browser shows the login screen instead of a screen going STALE. At most once a minute (no reload loop).
+function loginLost(r) {
+  if (!(r.status === 401 || (r.redirected && new URL(r.url).pathname.startsWith('/auth')))) return false;
+  const last = Number(sessionStorage.getItem('obs-relogin') || 0);
+  if (Date.now() - last > 60000) {
+    sessionStorage.setItem('obs-relogin', String(Date.now()));
+    location.reload();
+  }
+  return true;
+}
 const obsJson = (path) => fetch(path, { cache: 'no-store', signal: AbortSignal.timeout(3000) })
-  .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  .then((r) => {
+    const lost = loginLost(r); // also for a non-OK answer (401)
+    return r.ok && !lost ? r.json() : null;
+  }).catch(() => null);
 function stored(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
 }
@@ -480,7 +495,7 @@ const LAN_TEXT = '認証なしで LAN 公開中';
 function renderExposure(x) {
   const lab = $('lan-label');
   const was = [lab.hidden, lab.textContent].join('|');
-  if (x.kind === 'local') {
+  if (x.kind === 'local' || x.kind === 'auth') {
     lab.hidden = true;
   } else {
     lab.textContent = x.kind === 'lan' ? LAN_TEXT : 'LAN 公開: 不明';
@@ -493,11 +508,24 @@ function renderExposure(x) {
   return was !== [lab.hidden, lab.textContent].join('|');
 }
 let cfgWatch = { offer() {}, modeChanged() {} };
+// ⋯ menu: the logged-in user, the role and logout (mask-api /am/ops: the proxy's verified identity); nothing without a login
+const ROLE_TEXT = { viewer: 'viewer (閲覧のみ)', operator: 'operator (抑止・確認・アップロード)', admin: 'admin (operator + 利用者の管理)' };
+function renderLogin(o) {
+  const on = !!(o?.auth && o.user);
+  $('menu-user').hidden = !on;
+  $('menu-logout').hidden = !on;
+  $('menu-admin').hidden = !(on && o.role === 'admin');
+  if (!on) return;
+  $('menu-user-name').textContent = o.user;
+  $('menu-role').textContent = ROLE_TEXT[o.role] || o.role;
+}
+const refreshLogin = () => amOps().then(renderLogin).catch(() => {});
 function refreshExposure() {
   fetchObs().then(({ exposure, freshCfg }) => {
     if (renderExposure(exposure)) UI.refitTopbar(); // the bar's cached compaction does not track this item
     cfgWatch.offer(freshCfg);
   });
+  refreshLogin();
 }
 const OBS = { profile: 'demo', source: 'demo-gen (SYNTHETIC DATA)', flowSource: 'pcap-replay', cfg: null };
 // the network map's devices: the inventory's (config.json), in its order; the demo's three without a config
@@ -508,6 +536,7 @@ async function applyObsInfo() {
   OBS.cfg = cfg || null;
   C.setSurgeConfig(cfg?.surge);
   renderExposure(exposure);
+  refreshLogin();
   cfgWatch = P.configWatcher(cfg, { mode: UI.mode, reload: () => location.reload() });
   setInterval(refreshExposure, OBS_REFRESH_MS);
   if (!cfg) { // never seen: neither the demo label nor prod assumptions
@@ -588,9 +617,10 @@ PB.initPlayback({
   },
   exportWindow: (button, status) => {
     const w = PB.pbWindow();
-    downloadEvidence({ scope: 'all', from: (w.from / 1000).toFixed(3), to: (w.to / 1000).toFixed(3) }, button, status);
+    downloadEvidence({ scope: 'all', from: (w.from / 1000).toFixed(3), to: (w.to / 1000).toFixed(3) }, button, status, { snapshot: $('pb-snap').checked });
   },
 });
+snapshotGate($('pb-snap'), $('pb-snap').parentElement);
 $('pb-enter').addEventListener('click', () => { UI.closeMenu(); PB.enterDefault(); });
 $('pb-corr').addEventListener('click', () => nav.correlate({ at: now(), label: `再生位置 ${jstClock.format(new Date(now()))}`, ctx: {} }));
 boot();

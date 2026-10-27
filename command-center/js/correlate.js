@@ -7,7 +7,7 @@ import { el, jstClock, jstFull, now, isPlayback, maskText, fixed, badge, has } f
 import { fetchWithTimeout } from './api.js';
 import { section, rangeSelect, dataView, listSection, putIn, tiles } from './views-common.js';
 import { DEVICES, WAN } from './panels.js';
-import { downloadEvidence } from './evidence.js';
+import { downloadEvidence, snapshotGate } from './evidence.js';
 
 const HALVES = [['±5 分', 300], ['±10 分', 600], ['±30 分', 1800]];
 const REFRESH_MS = 60000; // a live window still open at its end: asked again at most once a minute
@@ -89,7 +89,7 @@ export function correlateView(anchor) {
     const detail = detailOf(i, nav);
     if (detail) btn('詳細', detail, `details: ${i.title}`);
     btn('解析', () => nav.packets({ ...(i.kind === 'surge' ? { src: i.host } : {}), since: win.from, until: win.to }), `packet analysis around ${kt}`);
-    btn('証跡', (e) => downloadEvidence({ ...evidenceScope(i), from: win.from.toFixed(3), to: win.to.toFixed(3) }, e.currentTarget, s.evStatus), `export evidence of the window for ${kt}`);
+    btn('証跡', (e) => downloadEvidence({ ...evidenceScope(i), from: win.from.toFixed(3), to: win.to.toFixed(3) }, e.currentTarget, s.evStatus, { snapshot: s.snap.checked }), `export evidence of the window for ${kt}`);
     row.append(head, title, why, acts);
     return row;
   }
@@ -172,10 +172,19 @@ export function correlateView(anchor) {
       evStatus.setAttribute('role', 'status');
       evBtn.addEventListener('click', () => {
         const d = st.data;
-        if (d) downloadEvidence({ scope: 'all', from: d.window.from.toFixed(3), to: Math.min(d.window.to, windowOf().to).toFixed(3) }, evBtn, evStatus);
+        if (d) downloadEvidence({ scope: 'all', from: d.window.from.toFixed(3), to: Math.min(d.window.to, windowOf().to).toFixed(3) }, evBtn, evStatus, { snapshot: snap.checked });
       });
-      ev.body.append(evBtn, evStatus);
-      s = { sum: el('div'), list, rules: rulesBox.querySelector('ul'), partial, status, evStatus };
+      // screen snapshot for this window's exports (and each item's 「証跡」): off by default, not remembered
+      const snapL = el('label', 'fld chk');
+      const snap = el('input');
+      snap.type = 'checkbox';
+      snapL.title = '画面のスナップショット (PNG) を含める: このブラウザで今の画面 (伏せ字済み) を画像にします。項目ごとの「証跡」にも使います';
+      snapL.append(snap, document.createTextNode(' 画面の画像'));
+      snapshotGate(snap, snapL);
+      const evRow = el('div', 'filters ops');
+      evRow.append(evBtn, snapL);
+      ev.body.append(evRow, evStatus);
+      s = { sum: el('div'), list, rules: rulesBox.querySelector('ul'), partial, status, evStatus, snap };
       body.append(notice, ctl, s.sum, rulesBox, partial, list.wrap, ev.wrap);
       VIEWS.add(handle);
       if (lastCtx) render(lastCtx.nav, true); // back / breadcrumb: the last answer at once (into the new body), clipped

@@ -450,6 +450,22 @@ def stale_acks(silences, alerts, now):
     return out
 
 
+ACK_USER_RE = re.compile(re.escape(ACK_BY) + r" \(([A-Za-z0-9._@-]{1,64})\)")  # mask-api: "command-center (<user>)"
+
+
+def ack_record(s, now, key):
+    """The notification record of an ACK this relay expired (Loki {job="notify"}, receiver "ack"): who acknowledged it
+    (the logged-in user mask-api wrote into createdBy; "local" on the 127.0.0.1 screen) and what it covered. No
+    fingerprint: the screens' per-alert notification state does not count it."""
+    m = ACK_USER_RE.fullmatch(str(s.get("createdBy", "")))
+    by = m.group(1) if m else "local"
+    labels = {x.get("name"): str(x.get("value", "")) for x in s.get("matchers") or [] if isinstance(x, dict) and not x.get("isRegex")}
+    return {"t": now, "receiver": "ack", "type": "ack", "status": "resolved", "result": "expired", "starts": s.get("startsAt", ""),
+            "detail": f"ACK by {by}: alert resolved, ACK expired", "fingerprint": "", "alertname": labels.get("alertname", ""),
+            "instance": label_value(labels.get("instance", ""), key), "ifName": label_value(labels.get("ifName", ""), key),
+            "severity": labels.get("severity", ""), "repeat_s": None, "test": "", "by": by}
+
+
 def reap_pass(silences, alerts, am_up_s, now, counts):
     """-> ACK ids to expire now. counts: silence id -> consecutive passes without a matching alert (updated)."""
     if am_up_s < REAP_MIN_UPTIME_S:  # Alertmanager just (re)started: its alert list is not complete yet
@@ -475,10 +491,13 @@ def reap_loop():
             silences = am_json("/api/v2/silences")
             if not (started and isinstance(alerts, list) and isinstance(silences, list)):
                 continue
+            by_id = {s.get("id"): s for s in silences if isinstance(s, dict)}
             for sid in reap_pass(silences, alerts, now - started.timestamp(), now, counts):
                 am_json(f"/api/v2/silence/{sid}", "DELETE")
                 counts.pop(sid, None)
-                log(f"ACK {sid}: no matching alert on {REAP_PASSES} passes (resolved), silence expired")
+                rec = ack_record(by_id.get(sid, {}), now, token_key())
+                push_loki([rec])
+                log(f"ACK {sid} by {rec['by']}: no matching alert on {REAP_PASSES} passes (resolved), silence expired")
         except (OSError, ValueError) as e:
             log(f"ack reaper: Alertmanager unavailable ({type(e).__name__})", err=True)
         except Exception as e:  # noqa: BLE001 - one bad pass must never stop the reaper thread
@@ -616,6 +635,12 @@ def selftest():
     assert stale_acks([{**ack, "startsAt": "2026-10-26T05:59:30Z"}], [], now) == []  # grace period
     assert stale_acks([{**ack, "status": {"state": "expired"}}], [], now) == []
     assert stale_acks([{**ack, "createdBy": "command-center (alice)"}], [], now) == ["a1"] and stale_acks(["junk", None], [], now) == []
+    # P7: the record of an expired ACK names the logged-in user who made it (mask-api's createdBy), tokens as elsewhere
+    rec = ack_record({**ack, "createdBy": "command-center (alice)", "matchers": ack["matchers"] + [{"name": "ifName", "value": "192.0.2.10"}]}, now, bytes(range(32)))
+    assert rec["by"] == "alice" and rec["detail"].startswith("ACK by alice") and rec["alertname"] == "DeviceDown" and rec["fingerprint"] == ""
+    assert rec["instance"] == "wlx222" and rec["ifName"] == "192.0.2.x~141e10c52e03" and rec["receiver"] == "ack", rec
+    assert ack_record(ack, now, None)["by"] == "local" and ack_record({**ack, "createdBy": "command-center (a b)"}, now, None)["by"] == "local"
+    assert ack_record({}, now, None)["by"] == "local"
     # restart safety: nothing while Alertmanager is young, then only after REAP_PASSES unmatched passes in a row
     counts = {}
     assert reap_pass([ack], [], REAP_MIN_UPTIME_S - 1, now, counts) == [] and counts == {}

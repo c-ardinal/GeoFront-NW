@@ -957,28 +957,63 @@ def error_body(status, msg):
     return json.dumps({"status": "error", "errorType": "masked_query" if status == 400 else "proxy", "error": msg}).encode()
 
 
+# ---- identity (P7): who is asking, as the front proxy says after Authelia -----------------------------------------------
+# The proxy (caddy/Caddyfile) strips every client copy of X-Obs-User / X-Obs-Role / X-Obs-Auth, asks Authelia, and sets
+# the verified user and role (viewer / operator / admin from the Authelia groups). It adds X-Obs-Auth: OBS_AUTH_PROXY_KEY
+# (a secret from .env) on the requests it sends here, so the identity is believed only from the proxy, never from another
+# container on the internal network or from a client: no key configured, a wrong key, a header given twice, an unknown role
+# or a malformed name -> no identity at all (viewer, no writes). Masking and query restrictions never depend on the role.
 ROLE_HEADER = "X-Obs-Role"
-ROLES = ("viewer",)  # P1: no authentication layer yet, so no role may unmask anything
+USER_HEADER = "X-Obs-User"
+AUTH_KEY_HEADER = "X-Obs-Auth"
+ROLES = ("viewer", "operator", "admin")
+OPS_ROLES = ("operator", "admin")
+AUTH_KEY_MIN = 32
+OPERATOR_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+
+
+class Identity(NamedTuple):
+    user: str
+    role: str
+
+
+def one_header(headers, name):
+    """The header's value when it is there exactly once, else None (a duplicate is never resolved in anyone's favour)."""
+    if hasattr(headers, "get_all"):
+        vals = headers.get_all(name) or []
+        return vals[0] if len(vals) == 1 else None
+    return headers.get(name)
+
+
+def identity(headers):
+    """-> Identity from the proxy, or None."""
+    key = os.environ.get("OBS_AUTH_PROXY_KEY", "")
+    got = one_header(headers, AUTH_KEY_HEADER)
+    if len(key) < AUTH_KEY_MIN or got is None or not hmac.compare_digest(got.encode(), key.encode()):
+        return None
+    user, role = one_header(headers, USER_HEADER), one_header(headers, ROLE_HEADER)
+    if user is None or role is None or not OPERATOR_RE.fullmatch(user) or role not in ROLES:
+        return None
+    return Identity(user, role)
 
 
 def request_role(headers):
-    """Role for a request. Insertion point for the future auth layer: the front proxy strips X-Obs-Role from
-    clients and only its forward-auth step may set it (caddy/Caddyfile). Until roles that may see more exist
-    (SEC-03), every request is a viewer whatever the header says: masking and query restrictions always apply."""
-    claimed = (headers.get(ROLE_HEADER) or "").strip().lower()
-    return claimed if claimed in ROLES else "viewer"
+    """Role for a request: the proxy's verified role, else viewer. It only decides writes (writable()): every role sees
+    the same masked data (伏せ字の解除は無い)."""
+    ident = identity(headers)
+    return ident.role if ident else "viewer"
 
 
 # ---- Alertmanager (/am/): masked reads, and the only writes: silences (ACK) --------------------------------------------
 # Reads: the alert and silence lists, masked like every other response (exact IPv4 values become tokens, so the screens
 # can match them to Prometheus' alerts). Writes: create / extend / expire a silence, nothing else. A write must come from
 # the command-center itself (same origin + the X-Obs-Csrf header, which a cross-site form cannot send and a cross-site
-# script cannot send without a CORS preflight that is never granted), while the screens are on 127.0.0.1 only (or, with
-# OBS_OPS_TRUST_ROLE=1, for X-Obs-Role operator / admin from a future authentication layer). Matchers: equality on
+# script cannot send without a CORS preflight that is never granted), by a verified operator / admin (identity()), or
+# without authentication only while the screens are on 127.0.0.1 (the demo default). Matchers: equality on
 # alertname / instance / ifName / severity only (no regex: a silence must name what it mutes), addresses only as tokens
 # the screen was given; duration at most 7 days (also counted from an extended silence's start); comment bounded;
 # createdBy is always "command-center (<operator>)" and an ACK comment always "ACK by <operator>[: note]". The operator
-# is the authentication layer's user (X-Obs-User, only with OBS_OPS_TRUST_ROLE=1), else "local".
+# is the verified user (X-Obs-User from the proxy, identity()), else "local".
 # Origins: only the names the proxy answers for (loopback, OBS_PUBLIC_URL's host, the bind address): with the proxy's
 # Host allowlist this keeps a DNS-rebinding page (evil.example -> 127.0.0.1) out, even if the proxy rule were removed.
 
@@ -995,34 +1030,33 @@ CLOCK_SLACK_S = 300  # browser vs server clock
 COMMENT_MAX = 200
 WRITE_MAX_BODY = 8192
 CREATED_BY = "command-center"
-OPERATOR_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}")
-USER_HEADER = "X-Obs-User"
-OPS_ROLES = ("operator", "admin")
 CSRF_HEADER = "X-Obs-Csrf"
 WRITES_PER_MIN = 30
 _writes = []  # monotonic times of recent writes (rate limit)
 
 
 def bind_is_local():
-    b = os.environ.get("OBS_BIND", "127.0.0.1")
-    return b == "localhost" or b.startswith("127.")
+    """localhost or a loopback IPv4 address (the same strict rule as compose.yaml's entrypoints and tools/auth.py);
+    anything else, also a malformed value, is a LAN exposure (login required)."""
+    b = os.environ.get("OBS_BIND") or "127.0.0.1"
+    if b == "localhost":
+        return True
+    try:
+        return ipaddress.IPv4Address(b).is_loopback
+    except ValueError:
+        return False
 
 
-def ops_role(headers):
-    """operator / admin from the authentication layer, only when the deployment says it has one (never by default)."""
-    if os.environ.get("OBS_OPS_TRUST_ROLE") != "1":
-        return None
-    r = (headers.get(ROLE_HEADER) or "").strip().lower()
-    return r if r in OPS_ROLES else None
+def auth_required():
+    """The screens need a login: always on a LAN exposure, on 127.0.0.1 when .env says OBS_AUTH=1 (same rule as the
+    proxy's entrypoint in compose.yaml)."""
+    return os.environ.get("OBS_AUTH") == "1" or not bind_is_local()
 
 
 def operator(headers):
-    """Who writes: the authentication layer's user (only when trusted), else "local" (the 127.0.0.1 screen)."""
-    if os.environ.get("OBS_OPS_TRUST_ROLE") == "1":
-        u = (headers.get(USER_HEADER) or "").strip()
-        if OPERATOR_RE.fullmatch(u):
-            return u
-    return "local"
+    """Who writes: the verified user, else "local" (the 127.0.0.1 screen without authentication)."""
+    ident = identity(headers)
+    return ident.user if ident else "local"
 
 
 def is_ours(s):
@@ -1050,12 +1084,15 @@ def allowed_hosts():
 
 
 def writable(headers):
-    if bind_is_local():
+    """-> (allowed, reason). Fail closed: with authentication required, only a verified operator / admin writes."""
+    ident = identity(headers)
+    if ident and ident.role in OPS_ROLES:
+        return True, f"role {ident.role}: silences / ACK allowed"
+    if not auth_required():
         return True, "127.0.0.1 only: silences / ACK allowed"
-    role = ops_role(headers)
-    if role:
-        return True, f"role {role}: silences / ACK allowed"
-    return False, "LAN 公開中は抑止・確認の操作はできません (認証がありません)"
+    if ident:
+        return False, f"役割 {ident.role} では抑止・確認の操作はできません (operator 以上が必要です)"
+    return False, "利用者を確認できないため抑止・確認の操作はできません (ログインが必要です)"
 
 
 def same_origin(headers):
@@ -1188,7 +1225,9 @@ def am_handle(method, raw_path, headers, read_body):
             return am_json(400, {"status": "error", "error": "no parameters accepted here"})
         if path == AM_OPS:
             ok, reason = writable(headers)
-            return am_json(200, {"writable": ok, "reason": reason, "max_s": SILENCE_MAX_S, "labels": SILENCE_LABELS})
+            ident = identity(headers)  # for the settings menu: who the screens are logged in as (the proxy's word)
+            return am_json(200, {"writable": ok, "reason": reason, "max_s": SILENCE_MAX_S, "labels": SILENCE_LABELS,
+                                 "auth": auth_required(), "user": ident.user if ident else None, "role": request_role(headers)})
         if path not in AM_READ:
             return am_json(403, {"status": "error", "error": "forbidden"})
         status, raw = am_request(AM_READ[path])
@@ -1232,7 +1271,6 @@ def am_handle(method, raw_path, headers, read_body):
 
 def respond(method, raw_path, headers, read_body, gone=None):
     """-> (status, body, content type[, extra headers]) for one request. gone(): the client has disconnected."""
-    _role = request_role(headers)  # always "viewer": masking never depends on it (writes: see writable())
     try:
         if raw_path.startswith("/am/"):
             return am_handle(method, raw_path, headers, read_body)
@@ -1257,13 +1295,23 @@ def respond(method, raw_path, headers, read_body, gone=None):
         return 502, error_body(502, "upstream unavailable"), "application/json"
 
 
+BODY_IDLE_S = 15  # longest pause between two pieces of a request body
+
+
 class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         t0 = time.monotonic()
         got = [0]
 
-        def read_body(n):
-            data = self.rfile.read(n)
+        def read_body(n, deadline=None):
+            """n bytes (fewer at the end of the body). With a deadline (monotonic): at most one read from the socket, waiting
+            no longer than the time left, so the caller can enforce a total time limit on a trickling upload."""
+            idle = BODY_IDLE_S if deadline is None else max(0.05, min(BODY_IDLE_S, deadline - time.monotonic()))
+            self.connection.settimeout(idle)  # a client that stops sending mid-body does not hold the thread
+            try:
+                data = self.rfile.read(n) if deadline is None else self.rfile.read1(n)
+            finally:
+                self.connection.settimeout(None)
             got[0] += len(data)
             return data
         status, body, ctype, *extra = respond(self.command, self.path, self.headers, read_body, self._gone)
@@ -1420,9 +1468,10 @@ def am_selftest(tok):
             return (200, json.dumps(store.get(sid) or {}).encode()) if method == "GET" else (200, b"")
         return 404, b"{}"
     real, am_request = am_request, fake
-    env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_OPS_TRUST_ROLE", "OBS_PUBLIC_URL")}
+    env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_AUTH", "OBS_AUTH_PROXY_KEY", "OBS_PUBLIC_URL")}
     try:
-        os.environ["OBS_BIND"], os.environ["OBS_OPS_TRUST_ROLE"], os.environ["OBS_PUBLIC_URL"] = "127.0.0.1", "0", "http://127.0.0.1:8080"
+        os.environ["OBS_BIND"], os.environ["OBS_AUTH"], os.environ["OBS_PUBLIC_URL"] = "127.0.0.1", "0", "http://127.0.0.1:8080"
+        os.environ.pop("OBS_AUTH_PROXY_KEY", None)
         hdr = {"Origin": "http://127.0.0.1:8080", "X-Forwarded-Host": "127.0.0.1:8080", "X-Obs-Csrf": "1", "Content-Type": "application/json",
                "Sec-Fetch-Site": "same-origin"}
         now = time.time()
@@ -1492,16 +1541,56 @@ def am_selftest(tok):
         store[sid] = {**store[sid], "createdBy": "amtool"}
         assert am_handle("DELETE", f"/am/api/v2/silence/{sid}", hdr, None)[0] == 400  # not ours
         assert am_handle("DELETE", "/am/api/v2/silences", hdr, None)[0] == 403
-        # LAN exposure: no writes, whatever the headers say; a trusted auth layer's operator role may write
+        # P7 LAN exposure: authentication required. A role / user is believed only with the proxy's key (X-Obs-Auth):
+        # client-made or forged headers give no identity (no writes); viewer reads only; operator / admin write as themselves
         os.environ["OBS_BIND"] = "192.168.100.10"
-        lan = {**hdr, "Origin": "http://192.168.100.10:8080", "X-Forwarded-Host": "192.168.100.10:8080", "X-Obs-Role": "admin"}
-        st, out = post(good, lan)
-        assert st == 403 and out["errorType"] == "forbidden" and json.loads(am_handle("GET", AM_OPS, lan, None)[1])["writable"] is False
-        os.environ["OBS_OPS_TRUST_ROLE"] = "1"
-        assert post(good, lan)[0] == 200 and post(good, {**lan, "X-Obs-Role": "viewer"})[0] == 403
-        assert post(good, {**lan, "X-Obs-User": "alice"})[0] == 200
+        key = "K" * 43
+        os.environ["OBS_AUTH_PROXY_KEY"] = key
+        lan = {**hdr, "Origin": "https://192.168.100.10:8080", "X-Forwarded-Host": "192.168.100.10:8080"}
+        spoofed = [{**lan, "X-Obs-Role": "admin", "X-Obs-User": "mallory"},                                  # no key: a client's own headers
+                   {**lan, "X-Obs-Role": "admin", "X-Obs-User": "mallory", "X-Obs-Auth": "K" * 42},          # wrong key
+                   {**lan, "X-Obs-Role": "admin", "X-Obs-User": "mallory", "X-Obs-Auth": ""}]
+        for h in spoofed:
+            st, out = post(good, h)
+            ops = json.loads(am_handle("GET", AM_OPS, h, None)[1])
+            assert st == 403 and out["errorType"] == "forbidden" and ops["writable"] is False and ops["auth"] is True, (h, out)
+            assert ops["user"] is None and ops["role"] == "viewer" and request_role(h) == "viewer", ops
+        ok = {**lan, "X-Obs-Auth": key, "X-Obs-User": "alice"}
+        assert post(good, {**ok, "X-Obs-Role": "viewer"})[0] == 403 and "viewer" in post(good, {**ok, "X-Obs-Role": "viewer"})[1]["error"]
+        assert json.loads(am_handle("GET", AM_OPS, {**ok, "X-Obs-Role": "viewer"}, None)[1])["user"] == "alice"
+        for bad_role in ("Admin", " admin", "root", "operator,admin", ""):  # only the exact names the proxy sets
+            assert post(good, {**ok, "X-Obs-Role": bad_role})[0] == 403, bad_role
+        assert post(good, {**ok, "X-Obs-Role": "operator"})[0] == 200
         assert calls[-1][2]["createdBy"] == "command-center (alice)" and calls[-1][2]["comment"].startswith("ACK by alice")
-        assert post(good, {**lan, "X-Obs-User": "bad user;"})[0] == 200 and calls[-1][2]["createdBy"] == "command-center (local)"
+        assert post(good, {**ok, "X-Obs-Role": "admin", "X-Obs-User": "bob"})[0] == 200 and calls[-1][2]["createdBy"] == "command-center (bob)"
+        assert post(good, {**ok, "X-Obs-Role": "admin", "X-Obs-User": "bad user;"})[0] == 403  # malformed name: no identity
+        ops = json.loads(am_handle("GET", AM_OPS, {**ok, "X-Obs-Role": "operator"}, None)[1])
+        assert ops == {**ops, "writable": True, "user": "alice", "role": "operator", "auth": True}, ops
+        os.environ["OBS_AUTH_PROXY_KEY"] = "short"  # a key too short to be the generated one is never accepted
+        assert post(good, {**ok, "X-Obs-Auth": "short", "X-Obs-Role": "admin"})[0] == 403
+        os.environ["OBS_AUTH_PROXY_KEY"] = ""  # no key configured: nobody is verified (fail closed)
+        assert post(good, {**ok, "X-Obs-Auth": "", "X-Obs-Role": "admin"})[0] == 403
+        os.environ["OBS_AUTH_PROXY_KEY"] = key
+        from email.message import Message  # a header given twice (http.server's headers) is never resolved
+        twice = Message()
+        for k, v in {**ok, "X-Obs-Role": "operator"}.items():
+            twice[k] = v
+        twice["X-Obs-Role"] = "admin"
+        assert identity(twice) is None
+        twice.replace_header("X-Obs-Role", "operator")  # (replaces the first; the second stays: still twice)
+        assert identity(twice) is None
+        for bad_bind in ("127.evil", "127.0.0.01", "127.0.0.256", "0.0.0.0", ""):  # strict loopback rule: else LAN
+            os.environ["OBS_BIND"] = bad_bind
+            assert (bind_is_local() is (bad_bind == "")) and auth_required() is (bad_bind != ""), bad_bind
+        os.environ["OBS_BIND"] = "127.1.2.3"
+        assert bind_is_local()
+        # 127.0.0.1 with OBS_AUTH=1: same rules as the LAN; without it, the demo default (no login, writes as "local")
+        os.environ["OBS_BIND"], os.environ["OBS_AUTH"] = "127.0.0.1", "1"
+        assert post(good, {**hdr, "X-Obs-Role": "admin"})[0] == 403 and post(good, {**hdr, "X-Obs-Auth": key, "X-Obs-User": "carol", "X-Obs-Role": "operator"})[0] == 200
+        os.environ["OBS_AUTH"] = "0"
+        assert post(good, hdr)[0] == 200 and calls[-1][2]["createdBy"] == "command-center (local)"
+        os.environ["OBS_BIND"] = "192.168.100.10"
+        lan = {**ok, "X-Obs-Role": "operator"}
         _writes[:] = [time.monotonic()] * WRITES_PER_MIN
         assert post(good, lan)[0] == 429  # rate limit
         _writes.clear()
@@ -1964,7 +2053,7 @@ def selftest():
     for path in ("/prom/api/v1/status/config", "/prom/api/v1/query/../admin/tsdb/snapshot", "/loki/loki/api/v1/push", "/loki/loki/api/v1/query"):
         assert plan(path)[2][0] == 403, path
     assert route("POST", pq("up"))[2][0] == 405
-    assert request_role({}) == request_role({"X-Obs-Role": "admin"}) == request_role({"X-Obs-Role": " Viewer "}) == "viewer"
+    assert request_role({}) == request_role({"X-Obs-Role": "admin"}) == request_role({"X-Obs-Role": " Viewer "}) == "viewer"  # no key: viewer
     global MAX_TOKENS
     keep, MAX_TOKENS = MAX_TOKENS, 3
     t1 = mask_value("198.51.100.1")

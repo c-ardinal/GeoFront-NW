@@ -1,9 +1,11 @@
 // "証跡を出力": downloads the evidence zip that mask-api assembles server-side (/evidence/export, read-only, masked).
 // The window is the playback window while playing back, else the last hour (an alert: from 10 min before it fired).
-// Optional screen snapshot (P6, drawer only, off by default): a PNG made in this browser (snapshot.js) is sent with the
-// request (POST, the write rules of the silences); when it cannot be made or sent, the zip is exported without it and the
-// reason is shown.
+// Optional screen snapshot (off by default; drawer, playback bar, 原因候補): a PNG made in this browser (snapshot.js) is
+// sent with the request (POST, the write rules of the silences: with a login operator / admin only); when it cannot be
+// made or sent, the zip is exported without it and the reason is shown. Without the permission the option is disabled
+// with the reason.
 import { el, now, fmtBytes, maskText } from './util.js';
+import { amOps } from './api.js';
 import { snapshotPng } from './snapshot.js';
 import { section } from './views-common.js';
 import { pbWindow } from './playback.js';
@@ -11,7 +13,7 @@ import { pbWindow } from './playback.js';
 const LIVE_S = 3600;
 const BEFORE_ALERT_S = 600;
 const MAX_S = 7 * 86400; // mask-api's window cap
-const SNAP_MAX = 8000000; // bytes: the proxy's body cap (EVIDENCE_SNAPSHOT_MAX_MB, 8 MB)
+const SNAP_MAX = 8 * 2 ** 20; // bytes: the proxy's and mask-api's body cap (EVIDENCE_SNAPSHOT_MAX_MB, 8 MiB)
 const SNAP_FALLBACK = new Set(['forbidden', 'csrf', 'snapshot']); // refused snapshot: export without it
 
 // scope: { scope, instance?, ifName?, cc?, city?, ip?, host?, alertname?, severity? }; since: ms (alert activation)
@@ -79,6 +81,17 @@ export async function downloadEvidence(params, button, status, { snapshot = fals
   }
 }
 
+// The snapshot option: disabled with the reason when this login may not write (mask-api /am/ops, the same rule)
+export function snapshotGate(input, label) {
+  amOps().then((o) => {
+    if (o?.writable) return;
+    input.checked = false;
+    input.disabled = true;
+    label.classList.add('is-off');
+    label.title = `画面の画像は入れられません: ${o?.reason || '操作の可否を確認できません'}`;
+  }).catch(() => {});
+}
+
 // optional packet statistics: a stored capture / upload / the demo pcap (never the raw packets)
 async function pcapOptions(sel) {
   try {
@@ -108,10 +121,11 @@ export function evidenceSection(scopeOf, sinceOf = () => undefined) {
   snap.type = 'checkbox'; // off by default, not remembered
   sl.title = '画面のスナップショット (PNG) を含める: このブラウザで今の画面 (伏せ字済み) を画像にします';
   sl.append(snap, document.createTextNode(' 画面の画像'));
+  snapshotGate(snap, sl);
   row.append(b, l, sl);
   const status = el('p', 'ops-note ops-status');
   status.setAttribute('role', 'status');
-  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip にします。期間は履歴再生中はその範囲、ライブでは直近 1 時間です。生アドレス・生 pcap は含みません。「画面の画像」で今の画面の PNG (snapshot.png) も入れます (LAN 公開中は入れられません)。');
+  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip にします。期間は履歴再生中はその範囲、ライブでは直近 1 時間です。生アドレス・生 pcap は含みません。「画面の画像」で今の画面の PNG (snapshot.png) も入れます (ログインありでは operator 以上)。');
   s.body.append(row, status, note);
   pcapOptions(sel); // listed when the drawer opens
   b.addEventListener('click', () => {

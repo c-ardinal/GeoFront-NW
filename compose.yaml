@@ -10,7 +10,8 @@ name: yamaha-observatory-trial
 # Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
 # run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
-# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|help>
+# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|user|help>
+# Login (P7): a LAN exposure (OBS_BIND not 127.x) always requires a login (Authelia, HTTPS); 127.0.0.1 only with OBS_AUTH=1.
 # Notifications: alerting/receivers.yaml (destinations, routes per severity) + secrets in .env -> the setup step writes the
 # Alertmanager config and the notify-relay config (0600) into the `generated` volume. Demo: only the local demo sink.
 #
@@ -44,8 +45,16 @@ x-tools-env: &tools-env
   SNMP_V3_PRIV_PROTO: ${SNMP_V3_PRIV_PROTO:-AES}
   SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
   SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
-  OBS_GRAFANA_ANON_ON_LAN: ${OBS_GRAFANA_ANON_ON_LAN:-0}
   OBS_GRAFANA: ${OBS_GRAFANA:-1}
+  # login (P7, tools/auth.py): non-secret settings; the secrets are in x-auth-secrets
+  OBS_AUTH: ${OBS_AUTH:-0}
+  OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
+  OBS_AUTH_EXPIRATION: ${OBS_AUTH_EXPIRATION:-12h}
+  OBS_AUTH_REMEMBER_ME: ${OBS_AUTH_REMEMBER_ME:-0}
+  OBS_AUTH_MAX_RETRIES: ${OBS_AUTH_MAX_RETRIES:-5}
+  OBS_AUTH_FIND_TIME: ${OBS_AUTH_FIND_TIME:-10m}
+  OBS_AUTH_BAN_TIME: ${OBS_AUTH_BAN_TIME:-15m}
+  OBS_AUTH_TOTP: ${OBS_AUTH_TOTP:-0}
   TZ: ${TZ:-Asia/Tokyo}
   OBS_CAPTURE: ${OBS_CAPTURE:-0}
   DEMO_PCAP_REPLAY: ${DEMO_PCAP_REPLAY:-1}
@@ -76,6 +85,12 @@ x-notify-env: &notify-env
   LINE_API_URL: ${LINE_API_URL:-}
   WEBHOOK_URL: ${WEBHOOK_URL:-}
   WEBHOOK_BEARER_TOKEN: ${WEBHOOK_BEARER_TOKEN:-}
+
+# Login secrets (generated into .env by tools init / tools user secrets): only for the steps that check them (setup, tools)
+x-auth-secrets: &auth-secrets
+  OBS_AUTH_SESSION_SECRET: ${OBS_AUTH_SESSION_SECRET:-}
+  OBS_AUTH_STORAGE_KEY: ${OBS_AUTH_STORAGE_KEY:-}
+  OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}
 
 # One image for every tools-based service. Only setup-check (in every profile) and tools (`docker compose run`) build
 # it: several services building the same tag in one `up --build` race ("image already exists"); the others use the
@@ -119,6 +134,8 @@ services:
     <<: *tools
     profiles: [demo]
     command: [targets, --demo]
+    environment:
+      <<: [*tools-env, *auth-secrets]
     restart: "no"
 
   prod-setup:
@@ -126,7 +143,7 @@ services:
     profiles: [prod]
     command: [targets]
     environment:
-      <<: [*tools-env, *notify-env]
+      <<: [*tools-env, *notify-env, *auth-secrets]
     restart: "no"
 
   # every profile: fails `up` with a clear message when no profile (so no setup) was chosen
@@ -144,6 +161,7 @@ services:
       - generated:/generated
       - capture-ring:/vol/capture
       - pcap-uploads:/vol/uploads
+      - authelia-data:/vol/authelia  # owner fixed for Authelia (uid 10091)
     depends_on:
       demo-setup: {condition: service_completed_successfully, required: false}
       prod-setup: {condition: service_completed_successfully, required: false}
@@ -159,40 +177,6 @@ services:
       prod-setup: {condition: service_completed_successfully, required: false}
     restart: "no"
 
-  # every profile, long-running: checks every OBS_GRAFANA_GUARD_INTERVAL s from the stored hashes (a read-only copy of
-  # grafana.db; it never logs in) that no Grafana server admin has a default password (the .env value only applies when
-  # Grafana creates its database), and answers the proxy's forward_auth for /grafana/ on a LAN exposure on :8099
-  # (internal network only): 200 only after a positive check at most two intervals old. Guard down = Grafana closed.
-  # Unhealthy = a LAN exposure is being kept closed (reason in its log). Runs only with Grafana (OBS_GRAFANA).
-  grafana-guard:
-    <<: *tools
-    scale: ${OBS_GRAFANA:-1}
-    command: [grafana-guard]
-    environment:
-      <<: *tools-env
-      OBS_GRAFANA_GUARD_INTERVAL: ${OBS_GRAFANA_GUARD_INTERVAL:-60}
-    volumes:
-      - ./:/work
-      - generated:/generated
-      - grafana-data:/vol/grafana:ro
-    depends_on:
-      grafana: {condition: service_healthy}
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: ${LOG_MAX_SIZE:-10m}
-        max-file: "${LOG_MAX_FILE:-3}"
-    healthcheck:
-      test: ["CMD", "python", "/app/obs.py", "guard-health"]
-      interval: 60s
-      timeout: 10s
-      retries: 2
-      start_period: 30s
-      start_interval: 5s
-    mem_limit: 96m  # peak ~41 MiB measured (sqlite copy + checks): 2x headroom
-    cpus: 0.25
-
   tools:
     <<: *tools
     build:
@@ -202,7 +186,7 @@ services:
     pull_policy: build
     profiles: [tools]
     environment:
-      <<: [*tools-env, *notify-env]
+      <<: [*tools-env, *notify-env, *auth-secrets]
     volumes:
       - ./:/work
       - generated:/generated
@@ -213,6 +197,7 @@ services:
       - capture-ring:/vol/capture
       - pcap-uploads:/vol/uploads
       - geoip:/vol/geoip
+      - authelia-data:/vol/authelia
     restart: "no"
 
   # ---- demo ---------------------------------------------------------------------------------------
@@ -509,31 +494,37 @@ services:
     mem_limit: ${ALLOY_MEM:-256m}
     cpus: ${ALLOY_CPUS:-0.5}
 
-  # Optional: OBS_GRAFANA=0 leaves Grafana (and grafana-guard) out; the command-center does not need it (/grafana/ then
+  # Optional: OBS_GRAFANA=0 leaves Grafana out; the command-center does not need it (/grafana/ then
   # answers 502, evidence exports say grafana "unknown"). Raspberry Pi: saves ~100 MB and its background work.
   grafana:
     <<: *ops
     scale: ${OBS_GRAFANA:-1}
     image: grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
-    # Anonymous Viewer (no login) only while the screens are on 127.0.0.1. Published beyond localhost (OBS_BIND) Grafana
-    # requires a login, unless OBS_GRAFANA_ANON_ON_LAN=1 opts back in (with a warning): its views are not masked.
+    # Without the screens' login (127.0.0.1): anonymous Viewer. With it (always on a LAN exposure, or OBS_AUTH=1): only the
+    # role admin reaches Grafana (it shows raw, unmasked IP / MAC values), as the same user through the proxy's auth proxy
+    # headers (X-Obs-User, X-Obs-Grafana-Role Admin); no anonymous access, no own login form, no basic auth. The headers
+    # are believed only from the proxy's fixed address on the grafana-front network (GF_AUTH_PROXY_WHITELIST): another
+    # container sending them to grafana:3000 is refused.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        export GF_AUTH_ANONYMOUS_ENABLED=true
-        case "$$OBS_BIND" in
-          127.*|localhost) ;;
-          *) if [ "$$OBS_GRAFANA_ANON_ON_LAN" = 1 ]; then
-               echo "WARNING: OBS_BIND=$$OBS_BIND and OBS_GRAFANA_ANON_ON_LAN=1 - Grafana is viewable on the LAN WITHOUT login (raw, unmasked values)" >&2
-             else
-               export GF_AUTH_ANONYMOUS_ENABLED=false
-               echo "OBS_BIND=$$OBS_BIND: Grafana anonymous access disabled (login required on the LAN)" >&2
-             fi ;;
-        esac
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        if [ "$$lan" = 1 ] || [ "$$OBS_AUTH" = 1 ]; then
+          export GF_AUTH_ANONYMOUS_ENABLED=false GF_AUTH_PROXY_ENABLED=true GF_AUTH_PROXY_HEADER_NAME=X-Obs-User \
+                 GF_AUTH_PROXY_HEADER_PROPERTY=username GF_AUTH_PROXY_AUTO_SIGN_UP=true GF_AUTH_PROXY_SYNC_TTL=1 \
+                 GF_AUTH_PROXY_HEADERS="Role:X-Obs-Grafana-Role" GF_AUTH_DISABLE_LOGIN_FORM=true GF_AUTH_BASIC_ENABLED=false \
+                 GF_AUTH_SIGNOUT_REDIRECT_URL=/auth/logout GF_AUTH_PROXY_WHITELIST="$$OBS_GRAFANA_PROXY_IP"
+          echo "login on: Grafana users come from the screens' login (auth proxy); no anonymous access, no own login form" >&2
+        else
+          export GF_AUTH_ANONYMOUS_ENABLED=true
+        fi
         exec /run.sh
     environment:
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
-      OBS_GRAFANA_ANON_ON_LAN: ${OBS_GRAFANA_ANON_ON_LAN:-0}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_GRAFANA_PROXY_IP: ${OBS_GRAFANA_PROXY_IP:-172.31.253.2}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_USERS_DEFAULT_THEME: dark
@@ -552,6 +543,9 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./dashboards:/dashboards:ro
       - grafana-data:/var/lib/grafana
+    networks:
+      default: {}
+      grafana-front: {aliases: [grafana-front]}  # the proxy reaches it only as grafana-front (this network)
     depends_on: [prometheus, loki]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
@@ -575,10 +569,11 @@ services:
       # evidence export (/evidence/): the Loki retention bounds the playback range; GRAFANA_URL for its version
       LOKI_RETENTION: ${LOKI_RETENTION:-720h}
       GRAFANA_URL: http://grafana:3000
-      # silence / ACK writes (the only writes, /am/...) are allowed while the screens are on 127.0.0.1 only
+      # writes (silences / ACK, pcap uploads, snapshot exports): with a login for a verified operator / admin only, the
+      # identity believed only with the proxy's key (OBS_AUTH_PROXY_KEY); without a login (127.0.0.1) for everyone
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
-      # 1 = also allow them for X-Obs-Role operator / admin, set by an authentication layer in the proxy (caddy/Caddyfile)
-      OBS_OPS_TRUST_ROLE: ${OBS_OPS_TRUST_ROLE:-0}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}
       OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}  # its host is one of the origins allowed to write
       # /pcap/: packet analysis through the analyzer; uploads are the only other writes (same rules as silences)
       PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
@@ -721,33 +716,58 @@ services:
     environment:
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
       OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}  # sent to mask-api with the verified identity (caddy/Caddyfile)
       PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
       EVIDENCE_SNAPSHOT_MAX_MB: ${EVIDENCE_SNAPSHOT_MAX_MB:-8}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        case "$$OBS_BIND" in
-          127.*|localhost) ;;
-          *) echo "WARNING: OBS_BIND=$$OBS_BIND - command-center and Grafana are exposed on the LAN WITHOUT authentication (認証なしで LAN 公開中)" >&2 ;;
-        esac
-        # Host allowlist of the screens (DNS rebinding, caddy/Caddyfile): loopback names, OBS_PUBLIC_URL's host, the bind address
-        hosts="127.0.0.1 localhost [::1] $$(printf '%s' "$$OBS_PUBLIC_URL" | sed -E 's#^[a-zA-Z]+://##; s#^(\[[^]/]*\]).*#\1#; s#^([^[][^:/]*)[:/].*#\1#')"
-        case "$$OBS_BIND" in 0.0.0.0|127.*|localhost|'') ;; *) hosts="$$hosts $$OBS_BIND" ;; esac
-        export OBS_SITES="$$(for h in $$hosts; do echo "$$h"; done | awk 'NF && !seen[tolower($$0)]++ { printf "%shttp://%s:80", (n++ ? ", " : ""), $$0 }')"
+        # access mode (caddy/Caddyfile): auth on a LAN exposure or with OBS_AUTH=1, else open (127.0.0.1, no login).
+        # The same rule is in Authelia's / Grafana's entrypoints, mask-api (auth_required) and tools/auth.py (required).
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        pub="$$(printf '%s' "$$OBS_PUBLIC_URL" | sed -E 's#^[a-zA-Z]+://##; s#^(\[[^]/]*\]).*#\1#; s#^([^[][^:/]*)[:/].*#\1#')"
+        if [ "$$lan" = 1 ] || [ "$$OBS_AUTH" = 1 ]; then
+          export OBS_ACCESS=auth
+          scheme=https
+          bind="$$OBS_BIND"; [ "$$bind" = localhost ] && bind=127.0.0.1
+          # Host allowlist (DNS rebinding): OBS_PUBLIC_URL's host and the bind address (cookies are per host: no localhost)
+          hosts="$$pub"; case "$$bind" in 0.0.0.0|'') ;; *) hosts="$$hosts $$bind" ;; esac
+          case "$$bind" in 0.0.0.0|'') export OBS_TLS_DEFAULT_SNI="$$pub" ;; *) export OBS_TLS_DEFAULT_SNI="$$bind" ;; esac
+          if [ -z "$$(echo $$hosts)" ]; then
+            echo "ERROR: OBS_BIND=$$OBS_BIND needs OBS_PUBLIC_URL (https://<LAN name or IP>:<port>): no screen is served" >&2
+            sleep 30; exit 1
+          fi
+          [ "$${#OBS_AUTH_PROXY_KEY}" -ge 43 ] || echo "WARNING: OBS_AUTH_PROXY_KEY missing: mask-api trusts nobody (no writes). docker compose run --rm tools user secrets" >&2
+          echo "login required (Authelia), HTTPS from the proxy's own CA; plain HTTP is redirected (ログイン必須)" >&2
+        else
+          export OBS_ACCESS=open
+          scheme=http
+          # Host allowlist (DNS rebinding): loopback names and OBS_PUBLIC_URL's host
+          hosts="127.0.0.1 localhost [::1] $$pub"
+        fi
+        export OBS_CATCHALL="$$scheme://:8080"
+        export OBS_SITES="$$(for h in $$hosts; do echo "$$h"; done | awk -v s="$$scheme" 'NF && !seen[tolower($$0)]++ { printf "%s%s://%s:8080", (n++ ? ", " : ""), s, $$0 }')"
         echo "screens answer for: $$OBS_SITES" >&2
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy:/etc/caddy:ro  # Caddyfile + the access mode's parts
       - generated:/srv/obs-generated:ro
-      - caddy-data:/data
+      - caddy-data:/data  # also the local CA (root certificate for the LAN devices: README)
+    networks:
+      default: {}
+      grafana-front: {ipv4_address: "${OBS_GRAFANA_PROXY_IP:-172.31.253.2}"}  # Grafana's GF_AUTH_PROXY_WHITELIST
     ports:
-      - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:80"
+      - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:8080"
       - "127.0.0.1:${PROM_LOCAL_PORT:-9090}:9090"
       - "127.0.0.1:${GRAFANA_LOCAL_PORT:-3000}:3000"
     depends_on:
       command-center: {condition: service_started}
       mask-api: {condition: service_started}
       grafana: {condition: service_started, required: false}  # OBS_GRAFANA=0
+      authelia: {condition: service_started}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 60s
@@ -758,12 +778,89 @@ services:
     mem_limit: ${PROXY_MEM:-128m}
     cpus: ${PROXY_CPUS:-0.5}
 
+  # Login (P7): Authelia, asked by the proxy for every request (forward_auth) when a login is required (always on a LAN
+  # exposure, or OBS_AUTH=1); its login screen is served under /auth/. File users (argon2id, tools user), access only
+  # for the groups viewer / operator / admin, brute-force lockout, sessions in memory (a restart logs everyone out).
+  # Without a login (127.0.0.1) it only idles. Refuses to start without its generated config, secrets or a user:
+  # the proxy then answers 502 (nothing opens). Internal network only.
+  authelia:
+    <<: *ops
+    image: authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54
+    user: "10091:10091"
+    # (not read_only: Authelia rewrites its /app/.healthcheck.env at every start and refuses to start otherwise)
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=8m]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        if [ "$$lan" = 0 ] && [ "$$OBS_AUTH" != 1 ]; then
+          echo "no login required (OBS_BIND=$$OBS_BIND, OBS_AUTH=$${OBS_AUTH:-0}): idle"
+          touch /tmp/obs-auth-off
+          exec sleep 2147483647
+        fi
+        if [ ! -s /etc/obs-generated/authelia/configuration.yml ]; then
+          echo "ERROR: no generated Authelia configuration (setup step: docker compose logs demo-setup prod-setup)" >&2
+          sleep 30; exit 1
+        fi
+        if ! grep -q 'password:' /config/users_database.yml 2>/dev/null; then
+          echo "ERROR: no login user yet: docker compose run --rm tools user add <name> --role admin (nothing opens until then)" >&2
+          sleep 30; exit 1
+        fi
+        exec authelia --config /etc/obs-generated/authelia/configuration.yml
+    environment:
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      AUTHELIA_SESSION_SECRET: ${OBS_AUTH_SESSION_SECRET:-}
+      AUTHELIA_STORAGE_ENCRYPTION_KEY: ${OBS_AUTH_STORAGE_KEY:-}
+      TZ: ${TZ:-Asia/Tokyo}
+      GOMEMLIMIT: 160MiB  # Go runtime: give the argon2id buffers of finished logins back early (soft, below mem_limit)
+      # not read by Authelia: what the generated configuration is made from, so that `docker compose up -d` recreates
+      # (restarts) Authelia whenever it changes (Authelia does not reload its configuration by itself; the users file it does)
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+      OBS_PORT: ${OBS_PORT:-8080}
+      OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
+      OBS_AUTH_EXPIRATION: ${OBS_AUTH_EXPIRATION:-12h}
+      OBS_AUTH_REMEMBER_ME: ${OBS_AUTH_REMEMBER_ME:-0}
+      OBS_AUTH_MAX_RETRIES: ${OBS_AUTH_MAX_RETRIES:-5}
+      OBS_AUTH_FIND_TIME: ${OBS_AUTH_FIND_TIME:-10m}
+      OBS_AUTH_BAN_TIME: ${OBS_AUTH_BAN_TIME:-15m}
+      OBS_AUTH_TOTP: ${OBS_AUTH_TOTP:-0}
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - authelia-data:/config  # users_database.yml (tools user), db.sqlite3 (bans, TOTP keys), notification.txt
+    depends_on: *setup-done
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /tmp/obs-auth-off ] || wget -q --spider http://127.0.0.1:9091/auth/api/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 5s
+    mem_limit: ${AUTHELIA_MEM:-256m}  # a login hashes with argon2id at 32 MiB (tools/auth.py)
+    cpus: ${AUTHELIA_CPUS:-0.5}
+
+# grafana-front: only the proxy and Grafana (internal, fixed subnet: the proxy's address is Grafana's auth proxy whitelist).
+# Change OBS_GRAFANA_NET / OBS_GRAFANA_NET_DYNAMIC / OBS_GRAFANA_PROXY_IP together if the subnet is taken on this host.
+networks:
+  grafana-front:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OBS_GRAFANA_NET:-172.31.253.0/29}
+          # addresses handed out automatically (Grafana): not the proxy's fixed one, which must stay free for it
+          ip_range: ${OBS_GRAFANA_NET_DYNAMIC:-172.31.253.4/30}
+
 volumes:
   prometheus-data:
   loki-data:
   grafana-data:
   alertmanager-data:
   caddy-data:
+  authelia-data:  # login users, bans and TOTP keys (tools backup / restore)
   generated:
   # packet capture ring (+ status.json) and uploaded pcaps: bounded by their own retention, not in `tools backup`
   # unless --include-captures

@@ -55,6 +55,8 @@ PER_MIN = int(os.environ.get("EVIDENCE_PER_MIN", "6"))
 PAGE = 5000  # Loki lines per page (its max_entries_limit_per_query)
 SNAPSHOT_MAX = int(os.environ.get("EVIDENCE_SNAPSHOT_MAX_MB", "8")) * 2**20  # the PNG body (Caddyfile: request_body)
 SNAPSHOT_MAX_SIDE = 8192  # px
+UPLOAD_TIMEOUT_S = int(os.environ.get("EVIDENCE_UPLOAD_TIMEOUT", "30"))  # the whole PNG body, once the slot is taken
+UPLOAD_CHUNK = 256 * 1024
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 PNG_KEEP = {b"IHDR", b"PLTE", b"IDAT", b"IEND"}  # the image itself; tEXt / iTXt / zTXt / tIME / eXIf / iCCP ... dropped
 JST = timezone(timedelta(hours=9))
@@ -580,29 +582,44 @@ def clean_png(data):
     return {"data": b"".join(out), "width": size[0], "height": size[1]}
 
 
-def read_upload(headers, read_body):
-    """The POST body (read before any answer, so that a refusal reaches the client instead of a reset upload), or None
-    when its length is missing or over the cap (left unread: the connection is closed after the answer)."""
+def upload_length(headers):
+    """Content-Length of the snapshot POST when it is within the cap, else None (checked before anything is read)."""
     length = headers.get("Content-Length") or ""
-    if not length.isdigit() or not 0 < int(length) <= SNAPSHOT_MAX:
+    if headers.get("Transfer-Encoding") or not length.isdigit() or not 0 < int(length) <= SNAPSHOT_MAX:
         return None
-    data = read_body(int(length))
-    return data if len(data) == int(length) else None
+    return int(length)
+
+
+def read_upload(n, read_body, deadline):
+    """The PNG body in pieces, at most until deadline (monotonic): a slow or stalled upload cannot keep the export slot.
+    -> bytes, or None when it was cut short or too slow (the connection is then closed after the answer)."""
+    out, got = [], 0
+    while got < n:
+        if time.monotonic() > deadline:
+            return None
+        try:
+            chunk = read_body(min(n - got, UPLOAD_CHUNK), deadline)  # one socket read, bounded by the time left
+        except OSError:  # TimeoutError: no data for the idle time / the time left (mask_api.Handler)
+            return None
+        if not chunk:
+            return None
+        out.append(chunk)
+        got += len(chunk)
+    return b"".join(out) if time.monotonic() <= deadline else None
 
 
 def read_snapshot(headers, data):
-    if (headers.get("Content-Type") or "").split(";")[0].strip().lower() != "image/png":
-        raise Refused("snapshot: Content-Type image/png required")
     if data is None:
-        raise Refused(f"snapshot: 1 byte to {SNAPSHOT_MAX // 2**20} MB, complete")
+        raise Refused(f"snapshot: 1 byte to {SNAPSHOT_MAX // 2**20} MiB, complete, within {UPLOAD_TIMEOUT_S} s")
     return clean_png(data)
 
 
 def snapshot_refused(headers):
     """The write rules of the silences (mask_api.writable / same_origin) -> an error body, or None."""
-    if not M.writable(headers)[0]:
+    ok, reason = M.writable(headers)
+    if not ok:
         return {"status": "error", "errorType": "forbidden",
-                "error": "LAN 公開中はスナップショット付きの証跡出力はできません (認証がありません)。スナップショットなしで出力できます"}
+                "error": reason.replace("抑止・確認の操作", "スナップショット付きの証跡出力") + "。スナップショットなしで出力できます"}
     if headers.get(M.CSRF_HEADER) != "1" or not M.same_origin(headers):
         return {"status": "error", "errorType": "csrf", "error": "cross-site or scripted request refused (same origin + X-Obs-Csrf required)"}
     return None
@@ -634,8 +651,10 @@ def handle(method, raw_path, headers, gone=None, read_body=None):
     post = method == "POST" and parts.path == "/evidence/export" and read_body is not None
     if method not in ("GET", "HEAD") and not post:
         return js(405, {"status": "error", "error": "read-only (POST only to /evidence/export, with a snapshot)"})
+    # a POST is judged before a byte of its body is read: permission, CSRF, the query, type and size, then the export slot
+    # (one at a time) and the rate; only then is the PNG read, in bounded time (a refusal leaves it unread and the
+    # connection is closed after the answer)
     if post:
-        upload = read_upload(headers, read_body)
         refused = snapshot_refused(headers)
         if refused:
             return js(403, refused)
@@ -648,17 +667,22 @@ def handle(method, raw_path, headers, gone=None, read_body=None):
         req = parse(parts.query, now)
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "rejected", "error": str(e)})
-    snap = None
-    if post:
-        try:
-            snap = read_snapshot(headers, upload)
-        except Refused as e:
-            return js(400, {"status": "error", "errorType": "snapshot", "error": str(e)})
+    length = upload_length(headers) if post else None
+    if post and (headers.get("Content-Type") or "").split(";")[0].strip().lower() != "image/png":
+        return js(400, {"status": "error", "errorType": "snapshot", "error": "snapshot: Content-Type image/png required"})
+    if post and length is None:
+        return js(400, {"status": "error", "errorType": "snapshot", "error": f"snapshot: 1 byte to {SNAPSHOT_MAX // 2**20} MiB (Content-Length)"})
     if not LOCK.acquire(blocking=False):
         return js(429, {"status": "error", "errorType": "busy", "error": "別の証跡出力が実行中です。終わってからもう一度試してください"})
     try:
         if not allow(time.monotonic()):
             return js(429, {"status": "error", "errorType": "rate", "error": "証跡出力の回数が多すぎます。1 分待ってください"})
+        snap = None
+        if post:
+            try:
+                snap = read_snapshot(headers, read_upload(length, read_body, time.monotonic() + UPLOAD_TIMEOUT_S))
+            except Refused as e:
+                return js(400, {"status": "error", "errorType": "snapshot", "error": str(e)})
         try:
             body = build(req, headers, now, gone, snap)
         except Gone as e:
@@ -685,7 +709,7 @@ def png_fixture(w, h):
 
 
 def selftest():
-    global _get, _pcap_stats, MAX_BYTES, BUDGET_S
+    global _get, _pcap_stats, MAX_BYTES, BUDGET_S, UPLOAD_TIMEOUT_S
     tok = M.mask_value("203.0.113.50")
     assert scrub(f"a 192.0.2.7 b 203.0.113.x~{tok[-12:]} c 00:11:22:33:44:55 d 2001:db8:1:2:a:b:c:d e fe80::1%eth0 f 2001:db8::x.") \
         == "a 192.0.2.x b 203.0.113.x c 00:11:22:xx:xx:xx d x e x%eth0 f x::x.", scrub("2001:db8:1:2:a:b:c:d")
@@ -806,27 +830,82 @@ def selftest():
         assert big["snapshot"] == {"included": False, "reason": "size cap (all files)"} and big["truncated"], big["snapshot"]
         MAX_BYTES = keep[3]
         # the write rules: 127.0.0.1 only, same origin + X-Obs-Csrf; body checked; GET as before
-        env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_PUBLIC_URL", "OBS_OPS_TRUST_ROLE")}
-        os.environ.update(OBS_BIND="127.0.0.1", OBS_PUBLIC_URL="http://127.0.0.1:8080", OBS_OPS_TRUST_ROLE="0")
+        env_was = {k: os.environ.get(k) for k in ("OBS_BIND", "OBS_PUBLIC_URL", "OBS_AUTH", "OBS_AUTH_PROXY_KEY")}
+        os.environ.update(OBS_BIND="127.0.0.1", OBS_PUBLIC_URL="http://127.0.0.1:8080", OBS_AUTH="0", OBS_AUTH_PROXY_KEY="k" * 40)
         try:
             ok_h = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080", "Sec-Fetch-Site": "same-origin", M.CSRF_HEADER: "1",
                     "Content-Type": "image/png", "Content-Length": str(len(tagged))}
             q = f"/evidence/export?from={time.time() - 60}&to={time.time()}"
-            body = lambda n: tagged[:n]
+            reads = []
+
+            def body(n, deadline=None):
+                reads.append(n)
+                done = sum(reads[:-1])
+                return tagged[done:done + n]
+
             st, zbytes, ctype, extra = handle("POST", q, ok_h, None, body)
             assert st == 200 and ctype == "application/zip" and zipfile.ZipFile(io.BytesIO(zbytes)).read("snapshot.png") == png
             assert extra["X-Obs-Snapshot"] == "included"
             assert "192.0.2" not in extra["Content-Disposition"]
             _recent.clear()
-            assert handle("POST", q, {**ok_h, M.CSRF_HEADER: ""}, None, body)[0] == 403
-            assert handle("POST", q, {**ok_h, "Origin": "http://evil.example"}, None, body)[0] == 403
-            assert handle("POST", q, {**ok_h, "Content-Type": "image/jpeg"}, None, body)[0] == 400
-            assert handle("POST", q, {**ok_h, "Content-Length": str(SNAPSHOT_MAX + 1)}, None, body)[0] == 400
+
+            def refused_unread(h, path=q, want=None):  # judged before a byte of the body is read
+                reads.clear()
+                st = handle("POST", path, h, None, body)[0]
+                assert not reads and (want is None or st == want), (st, reads, h)
+                return st
+            refused_unread({**ok_h, M.CSRF_HEADER: ""}, want=403)
+            refused_unread({**ok_h, "Origin": "http://evil.example"}, want=403)
+            refused_unread({**ok_h, "Content-Type": "image/jpeg"}, want=400)
+            refused_unread({**ok_h, "Content-Length": str(SNAPSHOT_MAX + 1)}, want=400)
+            refused_unread({**ok_h, "Transfer-Encoding": "chunked"}, want=400)
+            refused_unread(ok_h, path="/evidence/export?from=x", want=400)
             assert handle("POST", "/evidence/info", ok_h, None, body)[0] == 405 and handle("PUT", q, ok_h, None, body)[0] == 405
-            os.environ["OBS_BIND"] = "192.168.100.10"  # LAN: no snapshot writes (no authentication)
-            st, msg, _ = handle("POST", q, ok_h, None, body)
-            assert st == 403 and "LAN" in json.loads(msg)["error"]
+            assert LOCK.acquire(blocking=False)  # the slot is taken: 429 before the body is read
+            try:
+                refused_unread(ok_h, want=429)
+            finally:
+                LOCK.release()
+            _recent[:] = [time.monotonic()] * PER_MIN
+            refused_unread(ok_h, want=429)
+            _recent.clear()
+
+            def stalled(n, deadline=None):  # the client stops sending: mask_api.Handler's idle timeout raises TimeoutError
+                raise TimeoutError("timed out")
+            st, msg, _ = handle("POST", q, ok_h, None, stalled)
+            assert st == 400 and "within" in json.loads(msg)["error"] and LOCK.acquire(blocking=False)
+            LOCK.release()
+            UPLOAD_TIMEOUT_S = -1  # the whole body has a deadline too (a trickle never keeps the slot)
+            assert handle("POST", q, ok_h, None, body)[0] == 400 and LOCK.acquire(blocking=False)
+            LOCK.release()
+            sent = []
+
+            def trickle(n, deadline=None):  # a byte at a time, each well within the idle time: the total deadline ends it
+                assert deadline is not None, "the upload is read with its deadline"
+                time.sleep(0.01)
+                sent.append(1)
+                return tagged[len(sent) - 1:len(sent)]
+            UPLOAD_TIMEOUT_S = 0.2
+            t0 = time.monotonic()
+            assert handle("POST", q, ok_h, None, trickle)[0] == 400 and time.monotonic() - t0 < 2 and len(sent) < len(tagged)
+            assert LOCK.acquire(blocking=False)
+            LOCK.release()
+            UPLOAD_TIMEOUT_S = 30
+            _recent.clear()
+            os.environ["OBS_BIND"] = "192.168.100.10"  # LAN: authentication required; no identity -> no snapshot writes
+            lan_h = {**ok_h, "Host": "192.168.100.10:8080", "Origin": "https://192.168.100.10:8080"}
+            os.environ["OBS_PUBLIC_URL"] = "https://192.168.100.10:8080"
+            st, msg, _ = handle("POST", q, {**lan_h, "X-Obs-Role": "admin", "X-Obs-User": "mallory"}, None, body)
+            assert st == 403 and "ログイン" in json.loads(msg)["error"], msg
+            viewer = {**lan_h, "X-Obs-Auth": "k" * 40, "X-Obs-User": "alice", "X-Obs-Role": "viewer"}
+            st, msg, _ = handle("POST", q, viewer, None, body)
+            assert st == 403 and "viewer" in json.loads(msg)["error"], msg
+            reads.clear()
+            st, zbytes, _, extra = handle("POST", q, {**viewer, "X-Obs-Role": "operator"}, None, body)
+            assert st == 200 and extra["X-Obs-Snapshot"] == "included", zbytes[:200]
+            assert json.loads(zipfile.ZipFile(io.BytesIO(zbytes)).read("manifest.json"))["generated_by"] == "alice"  # the real user
         finally:
+            UPLOAD_TIMEOUT_S = 30
             for k, v in env_was.items():
                 if v is None:
                     os.environ.pop(k, None)

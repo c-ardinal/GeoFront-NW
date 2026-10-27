@@ -42,6 +42,10 @@
     <button id="theme-toggle" type="button" title="Switch visual theme (layout and data unchanged)">THEME: STD</button>
     <button id="render-toggle" type="button">RENDER: GPU (AUTO)</button>
     <button id="pb-enter" type="button" lang="ja" title="Play back the screens at a past time (PLAYBACK)">履歴再生 (PLAYBACK)</button>
+    <!-- with the login (Authelia): who is logged in, the role, logout; hidden without a login (127.0.0.1) -->
+    <div id="menu-user" class="bar-menu-user" lang="ja" hidden><span class="mu-l">利用者</span> <b id="menu-user-name"></b> <span id="menu-role" class="mu-role"></span></div>
+    <a id="menu-logout" class="bar-menu-link" href="/auth/logout" lang="ja" hidden>ログアウト</a>
+    <p id="menu-admin" class="bar-menu-note" lang="ja" hidden>利用者の管理 (admin): <code>docker compose run --rm tools user list</code> / add / passwd / role / remove</p>
   </div>
   <!-- PLAYBACK controls: a fixed-height bar under the top bar (phone: a bottom sheet above the tabs); hidden in LIVE.
        The data time itself is shown once, in the banner slot ("履歴再生 HH:MM:SS"); here only the window and the slider. -->
@@ -62,6 +66,7 @@
     <label class="pb-fld pb-speed-l"><span class="sr-only">再生速度</span><select id="pb-speed" aria-label="再生速度"></select></label>
     <input id="pb-slider" class="pb-slider" type="range" aria-label="再生位置">
     <button id="pb-export" type="button" class="pb-btn" title="この期間の証跡 (伏せ字済みの zip) を出力">証跡を出力</button>
+    <label class="pb-fld pb-snap" title="画面のスナップショット (PNG) を証跡に含める: このブラウザで今の画面 (伏せ字済み) を画像にします"><input id="pb-snap" type="checkbox"> 画像</label>
     <button id="pb-corr" type="button" class="pb-btn" title="再生位置の前後に起きたこと (原因候補、相関の候補)">原因候補</button>
     <button id="pb-live" type="button" class="pb-btn pb-live" title="WALLBOARD・直近 15 分・自動更新に戻る">● LIVE に戻る</button>
     <p id="pb-status" class="pb-status" role="status"></p>

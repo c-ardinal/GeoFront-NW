@@ -243,7 +243,7 @@
 @keyframes film-scroll { from { transform: scaleY(1.35); } to { transform: translateX(-50%) scaleY(1.35); } }
 
 [data-theme="eva-film"] :is(#theme-toggle, #render-toggle) { border-color: var(--accent); color: var(--text); font-family: var(--display); }
-[data-theme="eva-film"] #pb-enter { border-color: var(--accent); color: var(--text); } /* kana: keeps the sans face (Oswald has none) */
+[data-theme="eva-film"] :is(#pb-enter, #menu-logout) { border-color: var(--accent); color: var(--text); } /* kana: keeps the sans face (Oswald has none) */
 
 /* ---- drawer / modal frames ---- */
 [data-theme="eva-film"] #drawer, [data-theme="eva-film"] #modal {

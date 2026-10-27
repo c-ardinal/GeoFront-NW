@@ -23,7 +23,8 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 
 | サービス | イメージ | 役割 | ホスト公開 |
 |---|---|---|---|
-| proxy | caddy:2.11.7-alpine | 前段のリバースプロキシ。command-center を `/`、Grafana を `/grafana/` で配信。認証の差し込み口 | `OBS_BIND:OBS_PORT` (既定 127.0.0.1:8080)、127.0.0.1:9090 (Prometheus 読み取り専用)、127.0.0.1:3000 (旧 Grafana URL の転送) |
+| proxy | caddy:2.11.7-alpine | 前段のリバースプロキシ。command-center を `/`、Grafana を `/grafana/` で配信。LAN 公開時はログイン (Authelia) 必須・HTTPS (自前の CA) | `OBS_BIND:OBS_PORT` (既定 127.0.0.1:8080。LAN 公開時は HTTPS)、127.0.0.1:9090 (Prometheus 読み取り専用)、127.0.0.1:3000 (旧 Grafana URL の転送) |
+| authelia | authelia/authelia:4.39.28 | ログイン (P7)。proxy が毎回問い合わせる (forward_auth)。利用者はファイル (argon2id)、役割 viewer / operator / admin、総当たりの締め出し、任意で TOTP。ログインなしの構成 (127.0.0.1) では待機だけ | なし (proxy 経由の `/auth/` だけ) |
 | command-center | nginx:1.29.2-alpine | 自作の司令室画面 (静的) と mask-api への中継 | なし (proxy 経由) |
 | mask-api | python:3.12-slim (自作, 標準ライブラリのみ) | 読み取り専用プロキシ。Prometheus/Loki/Alertmanager の応答中の IP/MAC をサーバ側で伏せる。パケット解析 API (`/pcap/`、伏せ字済み)。書き込みは抑止 (silence) の作成・延長・解除と pcap のアップロード・削除だけ (許可リスト) | なし |
 | analyzer | python:3.12-slim + tshark 4.4 (Debian, 自作) | パケット解析の隔離環境。ネットワークなし・読み取り専用・非 root・CPU/メモリ/時間の上限・1 リクエスト 1 プロセス・同時実行数の上限。mask-api と flowd から Unix ソケットでだけ使う | なし (ネットワーク自体がない) |
@@ -41,7 +42,7 @@ compose の profile で動かし方を選びます (`--profile <名前>`、ま�
 | testbed-rtx / testbed-wlx (`testbed`) | python:3.12-slim + snmpsim (自作) | 疑似実機。SNMPv3 応答と YAMAHA 形式 syslog の送信を同じアドレスから | なし |
 | notifymock (`testbed`) | testbed イメージ | 通知先のモック (SMTP + STARTTLS/TLS、Slack / Discord / LINE / Webhook の HTTP)。受けた内容を記録するだけ | なし |
 | demo-setup / prod-setup | tools (自作) | 起動時に 1 回だけ動き、profile に合った scrape 対象を生成して終了 | なし |
-| tools | python:3.12-slim + PyYAML (自作) | `docker compose run --rm tools <コマンド>` の初期設定・確認・バックアップ | なし |
+| tools | python:3.12-slim + PyYAML + argon2-cffi (自作) | `docker compose run --rm tools <コマンド>` の初期設定・確認・バックアップ・ログインの利用者の管理 | なし |
 
 既定ではすべて 127.0.0.1 にだけ bind します。host network を使うのは `capture` profile の capture サービスだけです (既定では動きません)。
 
@@ -101,14 +102,14 @@ docker compose --profile demo up -d --build
 - 行をクリックすると右側に詳細ドロワーが開き、関連データ (機器→インターフェース・1 時間グラフ・関連アラート・syslog、通信先→送信元ホスト・宛先 IP・推移、アラート→ルール式・関連機器・発報時刻前後の syslog、syslog 行→前後 20 行など) をたどれます。ドロワー内は戻る / パンくずで行き来できます。
 - 地球儀はホイール / ピンチで拡大縮小、ドラッグで回転、右上の + / − / ⟲ (初期表示に戻して自動回転を再開)。通信先の点・アークにカーソルを合わせると概要、クリックで通信先の詳細を開き、その通信先 (または選んだ送信元ホスト) のアークだけを強調します。
 - キーボード操作: Tab で移動、Enter で開く、Esc で閉じる。モーダル内ではフォーカスが外に出ず、閉じると元の位置に戻ります。
-- IP / MAC は詳細画面でも常に末尾を伏せています。伏せ字を外す表示は、仕様 SEC-03 の認証層 (未実装) ができるまで提供しません。
+- IP / MAC は詳細画面でも常に末尾を伏せています。ログイン (P7) の役割が何であっても伏せ字は外しません (伏せ字を外す表示は提供しません。将来の口は mask-api の `request_role` だけ)。
   - **サーバ側マスク**: ブラウザが叩く `/prom/` `/loki/` は nginx → `mask-api` → Prometheus/Loki の順に通ります。`mask-api` は GET かつ許可パス (Prometheus `query` / `query_range` / `alerts` / `rules`、Loki `query_range`) だけを中継し、応答 JSON を解析して**全ての文字列** (ラベル名・ラベル値・ログ本文・ルール式) の IPv4 を `a.b.c.x`、MAC を `aa:bb:cc:xx:xx:xx` (区切りが `-` ならそのまま `-`) に置き換えてから返します。値そのものが 1 つの IPv4 であるラベル値 (宛先 IP など) は `203.0.113.x~<トークン>` になります。トークンは IP の HMAC-SHA256 (鍵は mask-api 起動ごとにランダム) の先頭 12 桁で、元の値は分かりませんが宛先ごとに区別できるため、宛先 IP 別の行・集計・ドリルダウンは従来どおり 1 宛先 1 行です。画面では末尾を `x` と表示し、トークンは見せません。クエリ中のトークンは mask-api が元の IP に戻して問い合わせます (発行していない・期限切れのトークンは 400。mask-api の再起動後は画面の再読込が必要)。ブラウザ側の伏せ字は二重の保険として残しています。nginx も従来どおり許可パス・GET 限定・セキュリティヘッダを持ちます。
   - 伏せた値を手掛かりに元の値を確かめられないよう、受け付けるクエリの形を絞っています (どれにも当たらないものは HTTP 400、ログビューアでは「この条件は検索できません…」と表示):
     - **Loki**: コマンドセンターが送る形だけを受け付けます。ラベル `job` / `host` / `severity` / `facility` の `=` だけからなるストリームセレクタに、文字列の `|=` / `!=` 行フィルタを任意個つけた形と、`sum by (severity)` / `sum by (host, severity)` の `count_over_time({…} [期間])` (同じ行フィルタを付けてもよい) の 2 種類です。それ以外 (`|~` `|>` `!>`、パーサ、`line_format` などのステージ、正規表現マッチ、その他の集計) は拒否します。Loki に送るのは**セレクタだけ**で、行フィルタは mask-api が**伏せた後の本文**に適用します。このためフィルタが一致するのは画面に見えている文字列だけで、伏せた桁の推測には使えません (例: `|= "192.0.2.x" |= "10:443"` は伏せた本文に `10:443` が無いので常に 0 件)。フィルタがある場合は、要求された向き (direction) にセレクタの行を 5000 行ずつ読み進め、伏せた本文で一致した行が要求件数 (limit) に達するか、期間の端まで読み終えるまで続けます (ページの継ぎ目は 1 秒重ねて読み、重複は除きます)。読む行は 1 回あたり最大 100,000 行・約 9 秒までで、途中で打ち切った場合は返した行に加えて `data.warnings` と `data.scanned_until` (読み進めた位置の ns 時刻) を返します。続きは backward なら `end=scanned_until`、forward なら `start=scanned_until+1` で要求できます (現在の UI はこの 2 項目を使わず、件数が limit 未満なら終わりとみなします)。行フィルタ付きの件数集計 (ログビューアの件数グラフ) も同じ考え方で、Loki からはセレクタの行だけを新しい順に取得し、伏せた本文にフィルタをかけてから、mask-api が step ごとの件数 (区間は `(t - 期間, t]`) を数えて Loki と同じ matrix 形式で返します。数える行は 1 回あたり最大 100,000 行 (取得は約 9 秒で打ち切り) で、上限に達した場合は `data.warnings` に「新しい側の N 行だけ数えた。古いバケットは少なく出ることがある」旨を入れます (現在の UI はこの警告を表示しません)。アドレスに触れない語 (例 `Rejected`) なら、件数は Loki 自身の集計と一致します。フィルタの無い件数集計は従来どおり Loki がそのまま数えます。ログ一覧で返る件数が limit 未満になるのは、期間内の一致が尽きたときか、上の打ち切りで `data.scanned_until` が付いたときだけです。
     - **Prometheus**: 文字列は `=` / `!=` のラベル一致の値としてだけ使えます。正規表現マッチ (`=~` `!~`) と、ラベルの文字列を読む・写す・並べる関数 (`label_replace` `label_join` `sort_by_label` `count_values` `info` `limitk` `limit_ratio`) は拒否します。パラメータは `query` と時刻 (`time` / `start` / `end` / `step`) だけです。
     - 共通: 文字列の中に完全な IPv4 / MAC、部分 IP (伏せた形とトークンを除いた残りに **数字.数字**。例 `113.50`、`2.4GHz` も該当)、部分 MAC (**4 組以上の 16 進ペア**。例 `5e:20:00:01`)、発行していないトークン、`\x2e` のように文字を隠すエスケープがあれば拒否します。
   - 伏せた形 (`203.0.113.x`、`02:00:5e:xx:xx:xx`) での絞り込みは使えます。ログビューアでは伏せた本文にそのまま一致します。Prometheus のラベル一致では「同じ先頭を持つ任意のアドレス」に書き換えます (例: `dst_ip="203.0.113.x"` は同じ /24 の全宛先)。
-  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) 伏せ方は 2 通りです (P4)。**ラベル値** (値そのものが 1 つのアドレス) は形を保ちます: IPv4 `a.b.c.x~<トークン>`、IPv6 は先頭 64 ビット + `::x~<トークン>` (IPv4 と同じくトークンで絞り込めます)、MAC `aa:bb:cc:xx:xx:xx`。**本文** (ログ行・注記・クエリ文など) はアドレスを解析せず形だけで判定し、残す部分は次の 2 つだけです: 前後に英数字や `._:-` が付かない IPv4 (`192.0.2.x`、`:ポート` 付き `192.0.2.x:443`、YAMAHA の `.ポート` 付きはポートが 255 より大きくオクテットと取り違えようがないときだけ `192.0.2.x.50211`、それ以外は `x`) と、区切りがそろった 6 組の MAC (`02:00:5e:xx:xx:xx`)。それ以外のアドレスらしい並び (IPv6、7 組以上の MAC・client-id、英字に続く IPv4、`0011.2233.4455`、`c0000201` のような 16 進の 1 語など) は `x` になります。時刻・日付・`host:port`・`std::string`・数値だけの文字列はそのままです。見えない文字 (ゼロ幅など) は除き、全角や `。` `：` などの紛らわしい記号は ASCII として判定します。クエリ・行フィルタでは完全なアドレスと 16 進の断片を拒否します (`14:04:20` などの時刻・`10:443` は可)。(4) Grafana (`/grafana/`) と Prometheus (127.0.0.1:9090) は管理ツールとして生の値を表示します。マスク対象はコマンドセンター (`/prom/` `/loki/`) 経由の経路だけです。`OBS_BIND` で LAN 公開すると Grafana はログインが必要になります (`OBS_GRAFANA_ANON_ON_LAN=1` で匿名 Viewer に戻すと、LAN から生の値が見えます)。Prometheus の :9090 は常に 127.0.0.1 のみです。
+  - 残る制限: (1) 受け付ける形は現在の UI に合わせた許可リストです。UI に新しいクエリの形を足すときは mask-api も合わせて更新が必要です。(2) Prometheus は関数とラベル一致の値を制限する方式で、メトリクス名の許可リストは持っていません。(3) 伏せ方は 2 通りです (P4)。**ラベル値** (値そのものが 1 つのアドレス) は形を保ちます: IPv4 `a.b.c.x~<トークン>`、IPv6 は先頭 64 ビット + `::x~<トークン>` (IPv4 と同じくトークンで絞り込めます)、MAC `aa:bb:cc:xx:xx:xx`。**本文** (ログ行・注記・クエリ文など) はアドレスを解析せず形だけで判定し、残す部分は次の 2 つだけです: 前後に英数字や `._:-` が付かない IPv4 (`192.0.2.x`、`:ポート` 付き `192.0.2.x:443`、YAMAHA の `.ポート` 付きはポートが 255 より大きくオクテットと取り違えようがないときだけ `192.0.2.x.50211`、それ以外は `x`) と、区切りがそろった 6 組の MAC (`02:00:5e:xx:xx:xx`)。それ以外のアドレスらしい並び (IPv6、7 組以上の MAC・client-id、英字に続く IPv4、`0011.2233.4455`、`c0000201` のような 16 進の 1 語など) は `x` になります。時刻・日付・`host:port`・`std::string`・数値だけの文字列はそのままです。見えない文字 (ゼロ幅など) は除き、全角や `。` `：` などの紛らわしい記号は ASCII として判定します。クエリ・行フィルタでは完全なアドレスと 16 進の断片を拒否します (`14:04:20` などの時刻・`10:443` は可)。(4) Grafana (`/grafana/`) と Prometheus (127.0.0.1:9090) は管理ツールとして生の値を表示します。マスク対象はコマンドセンター (`/prom/` `/loki/`) 経由の経路だけです。`OBS_BIND` で LAN 公開すると Grafana は画面と同じログイン (Authelia) の役割 admin だけが開けます (Grafana では生の値が見えるため。viewer / operator は 403)。Prometheus の :9090 は常に 127.0.0.1 のみです。
 - 読み取り専用のプロキシ許可パスに `/prom/api/v1/rules` (GET のみ、アラートのルール式表示用) を追加しました。
 
 ## 異常注入
@@ -185,8 +186,9 @@ WLX: Web GUI の SNMP 設定で SNMPv3 の読み取り専用ユーザー (同じ
 既定値は Raspberry Pi 4 (4 GB) に合わせてあります。計測 (変更前後、Pi 相当の 4 コア制限下) は `docs/plans/v2/PERF-RESULTS.md`。
 
 - 収集: Prometheus の scrape と評価の間隔は 30 秒 (`prometheus/prometheus.yml`)。画面・アラート・記録ルール・Grafana の rate はどれも 4 間隔分 (2 分) の窓です (INTERFACES の見出しが `rate 2 min`)。Loki / Prometheus / Alloy 自身のメトリクスは画面が使うものだけを保存します。
-- 常駐サービス: healthcheck は 60 秒ごと (起動直後だけ 5 秒ごと)。Loki はキャッシュ・並列度・WAL の再生上限を小さく、Prometheus の同時評価は 4 件まで、Alloy の利用統計送信は無効、Grafana は自前のアラート評価と Live 配信を無効にしています。flowd は 5 秒ごと、grafana-guard は管理者のパスワードが変わったときだけ PBKDF2 を計算し直します。
-- Grafana は任意です。command-center は Grafana を使いません。Pi では `.env` に `OBS_GRAFANA=0` を勧めます (Grafana と grafana-guard を起動しません。約 100 MB と常時の処理が減ります。`/grafana/` は 502、証跡の版情報の grafana は `unknown`、`tools check` は Grafana を確かめません)。
+- 常駐サービス: healthcheck は 60 秒ごと (起動直後だけ 5 秒ごと)。Loki はキャッシュ・並列度・WAL の再生上限を小さく、Prometheus の同時評価は 4 件まで、Alloy の利用統計送信は無効、Grafana は自前のアラート評価と Live 配信を無効にしています。flowd は 5 秒ごとです。
+- Grafana は任意です。command-center は Grafana を使いません。Pi では `.env` に `OBS_GRAFANA=0` を勧めます (Grafana を起動しません。約 100 MB と常時の処理が減ります。`/grafana/` は 502、証跡の版情報の grafana は `unknown`、`tools check` は Grafana を確かめません)。
+- ログイン (Authelia、LAN 公開時): 起動直後の待機で約 60 MiB、ログインの後は 100〜170 MiB (Go の実行環境が次のログイン用に残す分。`GOMEMLIMIT` 160MiB で早めに返す)。ログイン 1 回ごとに argon2id (32 MiB・3 回・4 並列) で CPU を使い、上限 0.5 コアのこの PC での計測で 1 回約 1 秒、4 人同時で 1〜1.6 秒、8 人同時で 3〜4 秒 (メモリは上限 `AUTHELIA_MEM` 既定 256m に達しても止まらず全件成功。Pi 4 はこれより遅くなります)。待機中の CPU はほぼ 0。ログインなしの構成 (127.0.0.1) では待機するだけです (約 1 MiB)。画面の要求ごとの問い合わせ (forward_auth) は内部ネットワーク内で数 ms です。
 - メモリ / CPU の上限は `.env` の `*_MEM` / `*_CPUS` (`.env.example` の resources) で変えられます。既定値は計測した最大使用量のおよそ 2 倍以上の余裕を残しています。
 
 ### 表示端末 (ブラウザ) の GPU と描画モード
@@ -226,16 +228,49 @@ Alloy は syslog を raw で受け (PRI から重要度・facility だけを取�
 - fixtures はデモ生成ログ (demo-gen) の形と、公開仕様 (RFC 3164 / 5424) の例の形から作ったものです。**実機の syslog はまだ採取していません**。実機ログを採取したら fixtures に足して形式を確かめてください。
 - 受信時刻でタイムスタンプします (RFC3164 / YAMAHA 形式は時刻やタイムゾーンを持たない / 持たないことがあるため。RFC5424 の時刻も使いません)。
 
-## 公開範囲と認証の差し込み口
+## 公開範囲とログイン (認証、P7)
 
-- Grafana が作る絶対 URL (共有リンク・`/grafana/goto/...` など) は `.env` の `OBS_PUBLIC_URL` (既定 `http://127.0.0.1:8080`) を元にします。LAN 公開するときは LAN から開く URL にしてください (`tools init` は `--bind` と `--port` から作り、`0.0.0.0` のときは尋ねます。非対話は `--public-url`)。
+- 既定は 127.0.0.1 のみ・ログインなし (デモはこれまでどおりログインなしで試せます)。`.env` の `OBS_BIND` を LAN 側の IP (または `0.0.0.0`) にすると、proxy が command-center と Grafana を LAN に公開し、そのときは**必ずログイン (Authelia) と HTTPS** になります (ログインなしの LAN 公開はできません)。127.0.0.1 公開でもログインを必須にするには `.env` に `OBS_AUTH=1` (`tools init --auth`)。
+- 想定する脅威: 同じ LAN の他の端末からの不正アクセス (パスワードの総当たり・セッションの盗用・CSRF・DNS リバインディング・平文の盗聴)。インターネットへの公開、標的型の高度な攻撃、このホスト自体の侵害は想定しません。
+- 仕組み (OSS の組合せ): proxy (Caddy) が画面・API・Grafana へのすべての要求をまず Authelia に問い合わせ (forward_auth)、ログイン済みの利用者だけを通します。ログイン画面は同じ URL の `/auth/` (Authelia の画面)。Authelia が止まっている・応答しない・設定や秘密値や利用者が無いときは、proxy は何も通しません (502 / 504。fail closed)。
+- HTTPS: proxy の自前の認証局 (Caddy の `tls internal`) の証明書で、同じポートに来た HTTP は HTTPS に転送します (HTTP のままでは何も返しません)。端末にルート証明書を登録すると警告なしで開けます:
+  - 取り出し: `docker compose cp proxy:/data/caddy/pki/authorities/local/root.crt ./obs-root.crt` (`caddy-data` ボリュームにあり、消さない限り変わりません。`down -v` で消すと作り直され、端末への登録もやり直しです)
+  - 登録: Windows はファイルを開いて「証明書のインストール」→ ローカル コンピューター →「信頼されたルート証明機関」、macOS はキーチェーンアクセスの「システム」に追加して「常に信頼」、iPhone / iPad はファイルを送ってプロファイルをインストールし「設定 > 一般 > 情報 > 証明書信頼設定」で有効化、Android は「設定 > セキュリティ > 暗号化と認証情報 > 証明書のインストール > CA 証明書」、Linux (Debian 系) は `/usr/local/share/ca-certificates/obs-root.crt` に置いて `sudo update-ca-certificates` (Firefox は独自の証明書ストアに読み込み)
+- 開く URL: `OBS_PUBLIC_URL` (例 `https://192.168.100.10:8080`。`tools init` が `--bind` / `--port` から作ります)。画面が答えるのはこのホストと `OBS_BIND` のアドレスだけです (DNS リバインディング対策。それ以外の Host は 421、証明書に無い名前は TLS の時点で接続できません)。名前で開くならドットを含む名前 (例 `obs.home.arpa`) にしてください (ログインの cookie を置けないため `localhost` や `raspberrypi` のような 1 語の名前は使えません)。ログインありの構成では `127.0.0.1` / `localhost` では答えません (LAN 公開中はこのホストからも LAN の URL で開きます)。
+- 秘密値: セッション・保存データの暗号鍵・proxy → mask-api の鍵 (`OBS_AUTH_SESSION_SECRET` / `OBS_AUTH_STORAGE_KEY` / `OBS_AUTH_PROXY_KEY`) は `tools init` (既存の `.env` なら `docker compose run --rm tools user secrets`) が作って `.env` だけに書きます (権限 600、表示しません。既にある値は変えません)。`OBS_AUTH_STORAGE_KEY` を変えると Authelia は保存データ (TOTP の鍵) を読めず起動しないので、`.env` と一緒に保管してください。
+- 利用者 (ホストに道具は不要。パスワードは対話で 2 回入力するのを勧めます。TTY が無いときだけ `-e OBS_USER_PASSWORD=...` (シェルの履歴やプロセス一覧に残ることがあるので、使ったら履歴を消す)。保存されるのは argon2id のハッシュだけです):
+
+```sh
+docker compose run --rm tools user add yamada --role admin     # 役割: viewer / operator / admin (既定 viewer)。パスワードは対話で入力
+docker compose run --rm tools user add sato --role operator --display '佐藤'
+docker compose run --rm tools user passwd sato                # パスワードの変更
+docker compose run --rm tools user role sato --role viewer     # 役割の変更 (次の操作から効く)
+docker compose run --rm tools user remove sato                 # 削除 (次の操作からログアウト扱い)
+docker compose run --rm tools user list
+```
+
+  - 利用者が 1 人もいないあいだ Authelia は起動せず、画面は開きません (`docker compose logs authelia` に案内)。名前は英小文字・数字・`. _ -` の 32 文字まで (`admin` / `root` / `local` は予約語: Grafana の管理者や「ログインなし」の表示と重なるため)、パスワードは 12 文字以上で名前を含まないもの。
+- 役割 (Authelia のグループ。どれにも属さない利用者は入れません):
+
+| 役割 | できること |
+|---|---|
+| viewer | 読み取りだけ (画面・詳細・履歴再生・解析・原因候補・スナップショットなしの証跡出力)。操作のボタンは理由付きで無効。Grafana は不可 (403) |
+| operator | viewer + 抑止・確認 (ACK)・pcap のアップロード / 削除・スナップショット付きの証跡出力。Grafana は不可 (403) |
+| admin | operator + 利用者の管理の案内 (⋯ メニュー。管理自体は `tools user`) + Grafana (`/grafana/`、Grafana の Admin) |
+
+  - 伏せ字はどの役割でも外しません。伏せ字のない値を出す Grafana は admin だけに限ります (オーナーの方針)。command-center には Grafana への導線はありません。
+  - 操作者の名前: ACK の作成者 `command-center (<利用者>)` とコメント `ACK by <利用者>`、証跡の manifest の出力者 (`generated_by`)、ACK を自動で解除したときの通知記録 (Loki `{job="notify"}` の `receiver: "ack"`・`by: <利用者>`) に、ログインした利用者名が入ります (ログインなしの構成では `local`)。
+- 役割と利用者名の受け渡し: proxy はクライアントから来た `X-Obs-User` / `X-Obs-Role` / `X-Obs-Auth` / `Remote-User` / `Remote-Groups` などを必ず消してから Authelia に問い合わせ、確認できた利用者名と役割 (グループのうち最も強いもの) だけを `X-Obs-User` / `X-Obs-Role` として付けます。mask-api はこれを、proxy だけが付ける鍵 (`X-Obs-Auth` = `OBS_AUTH_PROXY_KEY`) と一緒のときだけ信用します (内部ネットワークの他のコンテナや画面からの偽のヘッダは、鍵が無い・違う・同じヘッダが 2 つある・知らない役割・不正な名前のどれでも「利用者なし」= viewer 扱いで書き込み不可)。proxy も書き込み (POST / DELETE) を operator / admin 以外には 403 で返し、mask-api が同一オリジン・`X-Obs-Csrf`・許可リストを今までどおり確かめます。
+- セッション: cookie (`obs_session`) は Secure・HttpOnly・SameSite=Strict で、開いたホストだけに付きます (cookie はポートを区別しないので、同じ IP の別のポートで動く他のサービスにもブラウザは送ります。このホストで信用できないサービスを同じ名前・IP で公開しないでください)。無操作 `OBS_AUTH_INACTIVITY` (既定 30 分) か最長 `OBS_AUTH_EXPIRATION` (既定 12 時間) で切れます (常時表示の壁面画面は 10 秒ごとの更新で無操作にはなりませんが、12 時間でログインし直しです。「ログインしたままにする」は既定では出しません: `OBS_AUTH_REMEMBER_ME=7d` などで有効)。セッションはメモリにだけあり、Authelia を再起動すると全員ログアウトします。切れた画面は自動で読み込み直してログイン画面になります。ログアウトは ⋯ メニュー。
+- 総当たり対策: `OBS_AUTH_FIND_TIME` (既定 10 分) の間に `OBS_AUTH_MAX_RETRIES` (既定 5) 回失敗すると、その利用者名と送信元アドレスの両方を `OBS_AUTH_BAN_TIME` (既定 15 分) 締め出します (締め出し中は正しいパスワードでも入れません)。解除: `docker compose exec authelia authelia storage bans user list --config /etc/obs-generated/authelia/configuration.yml` (ip も同様)、`... storage bans user revoke <名前> --config ...` / `... storage bans ip revoke <アドレス> --config ...`。Docker Desktop (Windows / macOS) では LAN の送信元がすべて同じアドレスに見えるため、アドレスの締め出しが全員に効きます (Linux の Pi では端末ごと)。
+- 二要素 (TOTP、任意・既定は無効): `.env` に `OBS_AUTH_TOTP=1` → `docker compose up -d`。全員がログイン後に TOTP の登録を求められます (Google Authenticator などのアプリ)。登録の確認コードはメールの代わりに Authelia のボリュームのファイルに書かれるので、管理者が `docker compose exec authelia cat /config/notification.txt` で読んで本人に伝えます (Authelia は利用者ごとにメールアドレスを必要とするため、`tools user add` は既定で送信先にならない `<名前>@users.obs.invalid` を記録します。`--email` で指定も可。何も送信しません)。設定 (`OBS_AUTH_*` や `OBS_PUBLIC_URL`) を変えたら `docker compose up -d` で Authelia も作り直されます。
+- ⋯ 設定メニュー: ログイン中は利用者名・役割・ログアウト (admin には利用者管理のコマンドの案内) を出します。上部バーの項目は増えません。
+- Grafana: ログインありの構成では、生の IP / MAC を表示するため**役割 admin だけ**が `/grafana/` を開けます (viewer / operator は 403)。Grafana の匿名閲覧・ログイン画面・Basic 認証は切り、proxy が付ける利用者名 (`X-Obs-User`) と Grafana の役割 Admin で同じ利用者として入ります (Grafana の auth proxy。初回に Grafana 側の利用者が自動で作られます)。Grafana はこのヘッダを proxy の固定アドレスからだけ受け付けます (`GF_AUTH_PROXY_WHITELIST`。proxy と Grafana だけの内部ネットワーク `grafana-front`、既定 `OBS_GRAFANA_NET=172.31.253.0/29`・自動割当 `OBS_GRAFANA_NET_DYNAMIC=172.31.253.4/30`・proxy `OBS_GRAFANA_PROXY_IP=172.31.253.2`。このホストで使われているサブネットなら 3 つとも変えてください。testbed は `testbed/testbed.env` で別のサブネット)。他のコンテナが grafana:3000 にヘッダを付けて送っても拒否されます。Grafana 自身のパスワードログイン・パスワード変更 (`/grafana/login`・`/grafana/api/login*`・`/grafana/api/user/password`) は proxy が 403 にします。それでも Grafana の管理者 `admin` のパスワードは既定値のままにしないでください (`tools init` / `check` / setup はログインありの構成で既定値を NG にします。変えるときは `docker compose exec grafana grafana cli admin reset-admin-password '<値>'`)。127.0.0.1:3000 (旧 URL) はログインありの構成では何も返しません (403)。
+- 以前の `grafana-guard` (LAN 公開時に Grafana の管理者が既定パスワードなら `/grafana/` を閉じる見張り) は、LAN 公開がログイン必須になり Grafana のログイン画面も無くなったので廃止しました (`tools check` の既定パスワードの確認は残ります)。`docker compose up -d --remove-orphans` で古いコンテナが消えます。
+- Grafana が作る絶対 URL (共有リンク・`/grafana/goto/...`)・通知のリンク・ログイン画面の戻り先は `OBS_PUBLIC_URL` を元にします。
 - 台帳の機器名 `unknown` は使えません (台帳に無い syslog 送信元の host に使う予約語)。`SYSLOG_DROP_UNKNOWN=1` で捨てるのは「台帳との対応付けが無かった行」で、ラベルの値では判断しません。
-- 既定は 127.0.0.1 のみ。`.env` の `OBS_BIND` を LAN 側の IP (または `0.0.0.0`) にすると、proxy が command-center と Grafana を LAN に公開します。このとき **認証はありません**。proxy の起動ログに `WARNING: ... WITHOUT authentication (認証なしで LAN 公開中)` を出し、command-center の上部バーに `認証なしで LAN 公開中` (幅が足りないときは `無認証 LAN`) を常に表示します。判定は proxy が返す `/obs/exposure.json` によります (127.x / localhost 以外なら表示)。答えが無いときは `/obs/config.json` に入っている OBS_BIND を使い、どちらも答えないときは前回の値でも 127.x なら信用せず `LAN 公開: 不明` と表示します (前回が LAN なら LAN と表示)。どちらも 60 秒ごとに取り直すので、後から答えが戻ったり OBS_BIND を変えたりしても表示が追従します。
-- 画面が答えるホスト名は決まっています (DNS リバインディング対策): `127.0.0.1` / `localhost` / `[::1]`、`OBS_PUBLIC_URL` のホスト、LAN 公開時の `OBS_BIND` のアドレスだけです (proxy の起動ログに一覧)。それ以外の Host で来た要求 (例: 攻撃者の名前を 127.0.0.1 に向けたページ) は、画面・伏せ字済みのデータ・操作のどれも返さず 421 になります。127.0.0.1:9090 (Prometheus) / :3000 も 127.0.0.1 / localhost / [::1] だけです。LAN からは `OBS_PUBLIC_URL` の URL で開いてください (`OBS_BIND=0.0.0.0` のときは特に)。
-- Grafana は生の値 (IP / MAC を伏せない) を表示するため、LAN 公開時 (`OBS_BIND` が 127.x 以外) は匿名 Viewer を切り、ログインを必須にします (起動ログに `Grafana anonymous access disabled`)。管理者パスワードは `.env` の `GF_ADMIN_PASSWORD` で、`tools init` は既定値 (空 / admin / change-me) を受け付けず、`tools check` も LAN 公開で既定値なら NG にします (Grafana がこの値を使うのは初回起動時だけ。以降は Grafana の画面で変更)。どうしても LAN でログインなしにしたい場合だけ `OBS_GRAFANA_ANON_ON_LAN=1` (起動ログと check に警告)。command-center (伏せ字あり) はログインなしのままです。
-- Grafana の管理者パスワードの確認: `GF_ADMIN_PASSWORD` は Grafana が最初にデータベースを作るときにしか使われないため、デモで作られた `grafana-data` ボリュームは admin/admin (または change-me) のままになります。そこで常駐の `grafana-guard` (tools イメージ) が `OBS_GRAFANA_GUARD_INTERVAL` 秒 (既定 60) ごとに `grafana.db` の一貫したコピー (SQLite の backup API、元は読み取り専用) を取り、すべてのサーバー管理者 (`is_admin`。名前が admin でなくてもよい) と admin という名前のユーザーについて、保存されたパスワードのハッシュ (Grafana 12.2 の方式: PBKDF2-HMAC-SHA256・10000 回・50 バイト・ユーザーごとの salt) を既定値 (admin / change-me / 空) と比べます。ログインは試さないので、ログイン失敗の記録も Grafana のアカウントロックも起きません。LAN 公開時の `/grafana/` は、proxy が毎回 grafana-guard (内部ネットワークのみ、ホストには出さない) に問い合わせ (Caddy の forward_auth)、「直近の確認が成功で、しかも 2 間隔以内」のときだけ通します。確認の成功 = 「データベースを読めて、サーバー管理者が 1 人以上いて、形式が想定どおりで、どの管理者も既定値ではない」です。それ以外 (既定値の管理者がいる、読めない、壊れている、形式が違う) は 403 で閉じ、開いた後でも次の確認 (最長 1 間隔) で閉じます。grafana-guard が止まった・固まった・応答しない場合も、proxy は 2 秒で諦めて通しません (502 / 504)。確認が 2 間隔より古くなった場合も 403 です。理由は `docker compose logs grafana-guard` と check に出し、LAN 公開を閉じている間は grafana-guard が unhealthy になります (127.0.0.1 公開のときは閉じず、check で注意)。ローカルのパスワードを持たない管理者 (OAuth / LDAP / 認証プロキシで作られ、password も salt も空) は、パスワードでログインできないので既定値には数えません。Grafana の画面で変えたパスワードは `.env` の値と違っても問題ありません (既定値でなければ開きます)。既定値のときは `docker compose run --rm tools grafana-reset-admin` (明示的に実行したときだけ、既定値と分かった管理者ごとに、その既定値で 1 回だけログインし、Grafana の API で `.env` の値に変えます。受け付けられなかった管理者には手での変更方法を表示します)。admin は `docker compose exec grafana grafana cli admin reset-admin-password '<値>'` でも変えられます。`tools init` は既定値の管理者がいれば名前を挙げて変更を提案し (非対話は `--reset-grafana-admin`)、`tools check` と `tools targets` も同じハッシュ確認を使います。
-- 内部ネットワークについて (SEC-03 で扱う): Prometheus の admin API・`/-/reload` は compose の内部ネットワーク上のどのコンテナからも認証なしで呼べます (ホストや LAN には出していません)。Grafana は command-center と同じオリジン (`/grafana/`) で配信されます (以前は別ポート)。command-center は静的な画面で CSP も厳しくしていますが、分離の度合いは下がっています。
-- 認証を後から入れる場所: `caddy/Caddyfile` の forward_auth の例 (コメント)。認証プロキシ (Authelia など) を compose に足して有効にし、役割を `X-Obs-Role` ヘッダで渡します。proxy はクライアントから来た `X-Obs-Role` を必ず消します。mask-api は `X-Obs-Role` を受け取る口 (`request_role`) を持ちますが、今は常に viewer 扱いで伏せ字とクエリ制限は外しません (仕様 SEC-03 の認証層ができるまで)。
+- 内部ネットワークについて: Prometheus の admin API・`/-/reload` は compose の内部ネットワーク上のどのコンテナからも認証なしで呼べます (ホストや LAN には出していません)。Grafana の auth proxy は proxy の固定アドレスだけを信用します (上記)。127.0.0.1:9090 の Prometheus (読み取り専用、生の値) はこのホストにログインできる人なら誰でも見られます (LAN からは届きません)。Grafana は command-center と同じオリジン (`/grafana/`) で配信されます。
+- ログインなしの構成 (127.0.0.1、`OBS_AUTH=0`) で `OBS_BIND` の判定が付かない場合などに備え、command-center の上部バーの `認証なしで LAN 公開中` / `LAN 公開: 不明` の表示は残しています (proxy の `/obs/exposure.json` の `access` が `auth` なら出しません)。
 
 ## バックアップ / 復元
 
@@ -245,10 +280,10 @@ docker compose run --rm tools backup --include-env   # .env (秘密値) も含�
 docker compose run --rm tools backup --include-captures  # キャプチャのリングとアップロードした pcap も (既定は含めない)
 ```
 
-1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
+1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、ログインの利用者と Authelia のデータ (利用者のファイル、締め出し・TOTP の鍵の SQLite は一貫したコピー。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` で暗号化されているので、別のホストに戻すときは `--include-env` で `.env` も)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
 
 ```sh
-docker compose stop prometheus loki grafana alertmanager
+docker compose stop prometheus loki grafana alertmanager authelia
 docker compose run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz        # 確認あり (--yes で省略)
 docker compose run --rm tools restore backups/... --with-config                         # 機器台帳・通知先 (と含まれていれば .env) も戻す
 docker compose up -d
@@ -297,11 +332,11 @@ docker compose run --rm tools check         # 通知先の設定の検証、Aler
 - メールは宛先ごとに結果を見ます。一部の宛先が拒否された場合は残りの宛先に送り、拒否された宛先を記録します (再送はしない: 届いた宛先に二重に届くため)。
 - 警報の詳細 (ドロワー) の「Notification & actions」: 通知状態・最後に送った時刻と通知先・次回の再通知・抑止 / 確認の期限と、操作 `確認 (ACK)` (その警報の再通知を解消まで止める) / `抑止する` (この警報・この機器のすべて・この警報名のすべて × 1h / 4h / 24h / 7d) / `抑止を解除`。
 - 警報一覧 (モーダル) に通知状態の列と「Silences & ACK」: 一覧・延長 (+1 h / +24 h)・解除、新しい抑止の作成 (機器か警報名のどちらかは必須)。
-- ACK は Alertmanager の silence です。作成者は `command-center (<操作者>)`、コメントは `ACK by <操作者>` で始まります (操作者は認証層の利用者名 `X-Obs-User`。`OBS_OPS_TRUST_ROLE=1` のときだけ信用し、それ以外は `local`)。期限は 24 時間 (上限 7 日。延長しても開始から 7 日まで)。警報が解消すると notify-relay が自動で解除するので「解消まで」になり、解除後に復旧通知が送られます。自動解除は、Alertmanager の起動から 150 秒 (Prometheus の再送 1 分 × 2 + 最長の `for:` 30 秒。`RELAY_REAP_MIN_UPTIME_S`) 経ってから、しかも 1 分ごとの確認で 3 回続けて一致する警報が無かったときだけです (Alertmanager の再起動直後に ACK が消えないように)。確認済は検出 (firing) とは別に表示し、警報自体は発報中のまま残ります。
+- ACK は Alertmanager の silence です。作成者は `command-center (<操作者>)`、コメントは `ACK by <操作者>` で始まります (操作者はログインした利用者名。proxy の鍵付きの `X-Obs-User` だけを信用し、ログインなしの構成では `local`)。期限は 24 時間 (上限 7 日。延長しても開始から 7 日まで)。警報が解消すると notify-relay が自動で解除するので「解消まで」になり、解除後に復旧通知が送られます (解除したことと ACK した利用者を通知記録にも残します: `receiver: "ack"`)。自動解除は、Alertmanager の起動から 150 秒 (Prometheus の再送 1 分 × 2 + 最長の `for:` 30 秒。`RELAY_REAP_MIN_UPTIME_S`) 経ってから、しかも 1 分ごとの確認で 3 回続けて一致する警報が無かったときだけです (Alertmanager の再起動直後に ACK が消えないように)。確認済は検出 (firing) とは別に表示し、警報自体は発報中のまま残ります。
 
 抑止・確認の書き込み (これだけが書き込み):
 
-- **127.0.0.1 公開のときだけ有効**です。LAN 公開 (`OBS_BIND` が 127.x 以外) では proxy と mask-api の両方が拒否し、画面のボタンは理由付きで無効になります (認証が無いため)。将来の認証層が `X-Obs-Role` に operator / admin を入れる構成では、`OBS_OPS_TRUST_ROLE=1` と Caddyfile の `@amLanWrite` の置き換えで開けられます。
+- ログインありの構成 (LAN 公開時は必ず) では **operator / admin だけ**、ログインなしの構成 (127.0.0.1) ではこのホストの誰でも行えます。viewer の画面のボタンは理由付きで無効になり、proxy と mask-api の両方が 403 を返します。
 - 許可リスト: silence の作成・延長・解除だけ (`POST /am/api/v2/silences`、`DELETE /am/api/v2/silence/<id>`)。一致条件は alertname / instance / ifName / severity の等号だけ (正規表現・否定は不可、alertname か instance は必須)、期間は 7 日まで、コメントは 200 文字まで、作成者は常に `command-center`。延長・解除は command-center が作ったものだけです。
 - CSRF 対策: 同一オリジン (Origin が上の許可ホストで、転送元ホストと一致。`Sec-Fetch-Site`) と独自ヘッダ `X-Obs-Csrf: 1`、`Content-Type: application/json` が必須。書き込みは 1 分 30 件まで。
 - 読み取り (`GET /am/api/v2/alerts`、`/am/api/v2/silences`、`/am/ops`) は他と同じく伏せ字付きです。Alertmanager 自体はホストにも LAN にも公開しません。
@@ -317,7 +352,7 @@ Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (�
 ### 何ができるか
 
 - **解析画面**: コマンドセンターの GLOBAL TRAFFIC 見出しの「解析」、または通信先 / 送信元の詳細 (ドロワー) の「この通信のパケット」で開きます (後者は表示中のフローのアドレスを表示フィルタにし、capture 中は直近 15 分のリングファイルを選びます)。
-  - ファイル: キャプチャのリングファイル (記録中のものは閉じてから)、アップロードした pcap / pcapng (127.0.0.1 公開のときだけ。サイズ上限・拡張子・先頭のマジックバイトを確認し、tshark で読めないものは捨てます)、デモの合成 pcap
+  - ファイル: キャプチャのリングファイル (記録中のものは閉じてから)、アップロードした pcap / pcapng (ログインありでは operator 以上。サイズ上限・拡張子・先頭のマジックバイトを確認し、tshark で読めないものは捨てます)、デモの合成 pcap
   - パケット一覧 (仮想スクロール・500 件ずつ取得。矢印キー / PageUp / PageDown / Home / End)、Wireshark の表示フィルタ (サーバ側の tshark に渡す。エラーは tshark の文言で表示)、パケット詳細 (プロトコル階層ツリー) と 16 進 + ASCII (選んだフィールドとバイトが相互にハイライト)
   - 統計: プロトコル階層、会話 (IP / TCP / UDP)、端点 (IP / Ethernet)、I/O グラフ (パケット数・バイト数)、DNS 問い合わせ名 / TLS SNI / HTTP Host。行を選ぶとその条件で絞り込み。一覧と統計は CSV (伏せ字のまま) で保存できます
 - **実フロー**: `capture` profile では、dumpcap のリングファイルが閉じるたびに flowd が 5-tuple のフロー集計を作り、`obs_flow_bytes_total{src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction}` (デモの合成フローと同じ形) として Prometheus に出します。地球儀・通信先パネルはこれで動き、`/obs/config.json` の `flows_configured` が true になります。バイトはキャプチャ時刻 + `FLOWD_DELAY_S` (既定 90 秒) に計上するので、ファイル単位でまとめて届いても速度の表示はなめらかです。
@@ -337,7 +372,7 @@ Grafana の wallboard の WAN パネルは、機器台帳の `wan_interface` (�
 - 16 進表示は**既定ですべて伏せ**、表示してよいヘッダのフィールド (ポート・フラグ・長さ・種別コード・TTL など。名前は数字や `:` を含まない場合だけ) のバイトだけを見せます。しかもそのフィールドのバイトがフレームのその位置のバイトと一致する場合に限ります (再構成・展開されたデータのフィールドは位置が別のバッファを指すので、フレームのバイトを見せる根拠にしない)。ペイロード・バイト列・アドレス・チェックサム・不明なフィールドは `xx` のままです
 - 表示フィルタは「隠れた部分を試す」ことに使えるので**許可リスト方式** (既定で拒否) です: 使えるのはプロトコル名 (有無)、決めておいた数値のフィールド (ポート・フラグ・長さ・種別・TTL・時刻など。`== != < > <= >=` と `in {…}`・範囲)、名前のフィールド (`dns.qry.name`・`tls.handshake.extensions_server_name`・`http.host` など。`== != contains`、値はホスト名の形で、`.` `-` `_` で区切った各部分に g〜z の英字を含むものだけ = 16 進や数字だけの部分は不可。さらに上の規則で画面に伏せ字で出る値 (`hostc0a86417` など) は大文字・小文字を変えても不可)、アドレスのフィールド (`ip.addr`・`ipv6.addr`・`eth.addr` など) はトークン付きの値 (同じアドレスの種類) との `== / != / in {…}` だけ。`&&` `||` `!` と括弧で組み合わせます。それ以外 (チェックサム・バイト列・内容・先頭が `.` のフィールド参照・スライス・関数・演算・フィールドどうしの比較・正規表現・未知の記号) は書けません。受け付けたフィルタは解析して書き直したものだけを tshark に渡します。フィールドは 32 種類・512 文字まで、tshark の実行時間は `PCAP_ANALYZE_TIMEOUT` (既定 60 秒) まで、解析の要求はクライアントごとに `PCAP_READS_PER_MIN` (既定 120 / 分) まで
 - tshark は analyzer コンテナの中でだけ動きます: `network_mode: none`、読み取り専用のルート、非 root (uid 10001)、全 capability を落とす、`no-new-privileges`、メモリ・CPU・プロセス数の上限、tshark 1 回ごとに時間・メモリ・CPU 時間の上限とファイル書き込み禁止、同時実行は `PCAP_ANALYZE_CONCURRENCY` (既定 1、超えたら 429) + フロー集計専用の 1 本。メモリは analyzer の上限 `ANALYZER_MEM` (既定 896m) が (同時実行数 + 1) × `PCAP_ANALYZE_PROC_MB` (既定 384) + 約 60 MB を収めるように設定してください。キャプチャファイルは読み取り専用で渡し、フィルタは `-Y` の値としてだけ (引数の配列、シェルを通さない) 渡します。名前解決はしません (`-n`)
-- 書き込み (アップロード・削除) は抑止 (silence) と同じ規則です: 127.0.0.1 公開のときだけ (LAN 公開中は proxy と mask-api の両方が 403)、同じオリジン + `X-Obs-Csrf`、回数制限
+- 書き込み (アップロード・削除) は抑止 (silence) と同じ規則です: ログインありでは operator / admin だけ (viewer には proxy と mask-api の両方が 403)、ログインなしでは 127.0.0.1 のこのホストから。同じオリジン + `X-Obs-Csrf`、回数制限。大きさの上限 `PCAP_UPLOAD_MAX_MB` は proxy と mask-api のどちらも MiB (1 MiB = 1,048,576 バイト) です
 
 ### 有効にする (Linux ホストのみ)
 
@@ -363,7 +398,7 @@ docker compose run --rm tools check             # 「パケット取込とフロ
 ### 捕捉データの扱い・保存期間
 
 - 取り込むのはパケットそのもの (既定 `CAPTURE_SNAPLEN=1514` バイト) です。HTTPS などの暗号化された中身は見えず、復号もしません (鍵を扱う機能はありません)。平文のプロトコル (HTTP・DNS など) は中身が残るので、家族・同居人など LAN の利用者に取り込みを知らせてから有効にしてください。必要以上に取らないよう `CAPTURE_BPF` で絞り、`CAPTURE_SNAPLEN` を小さくできます (小さくすると TLS SNI や HTTP Host が欠けることがあります)
-- **伏せ字でも分かること**: DNS 問い合わせ名・TLS SNI・HTTP Host の一覧と会話の表は、アドレスを伏せても「どの端末 (トークン / 送信元名) がどのサイトを見たか」を表します。認証がない今は、LAN に公開すると LAN の誰でもこれを見られます。認証の導入までは `OBS_BIND=127.0.0.1` (このホストだけ) で使うことを強く勧めます
+- **伏せ字でも分かること**: DNS 問い合わせ名・TLS SNI・HTTP Host の一覧と会話の表は、アドレスを伏せても「どの端末 (トークン / 送信元名) がどのサイトを見たか」を表します。LAN に公開すると、ログインできる利用者 (viewer を含む) はこれを見られます。利用者は必要な人だけにしてください
 - 完全なパケットは長期保存しません: リングは `CAPTURE_FILES` (既定 20) × `CAPTURE_FILE_MB` (既定 20 MB) で古いものから上書き、少なくとも `CAPTURE_FILE_SECONDS` (既定 60 秒) ごとに次のファイルへ切り替え、`CAPTURE_KEEP_HOURS` (既定 24 時間) より古いファイルは削除。アップロードは 1 件 `PCAP_UPLOAD_MAX_MB` (既定 50 MB)、合計 `PCAP_UPLOADS_TOTAL_MB` (既定 200 MB。超えると古いものから削除)、`PCAP_KEEP_HOURS` (既定 24 時間) で削除。Prometheus に残るのはフローごとのバイト数だけです
 - 手で消す: `docker compose run --rm tools capture prune` (保存期間・合計上限を超えたもの。`--keep-hours N` で期間を指定、`--dry-run` で確認だけ)、`tools capture list` で一覧
 - バックアップ: 既定では含めません。`tools backup --include-captures` で含めます (通信内容そのものなので取り扱い注意)。キャプチャ中でも取れます: 閉じたリングファイルとアップロードだけを先に出力先の一時ディレクトリへ写してから固めます (書き込み中のファイル・途中のアップロード・写す間に消えたファイルは含めません。一時的に同じ大きさの空きが要ります)
@@ -398,12 +433,12 @@ demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分�
 - 詳細ドロワー (警報・機器・接続口・通信先・送信元) の「証跡を出力」、または再生バーの「証跡を出力」(再生中の期間全体) で zip をダウンロードします。期間は、再生中はその期間、ライブでは直近 1 時間 (警報は発報 10 分前から、最長 7 日)。ドロワーでは任意で保存済み pcap (リング・アップロード・デモ) の統計を含められます。
 - zip は mask-api (`GET /evidence/export`、読み取りのみ。スナップショット付きは下記の POST) がサーバ側で、画面と同じ読み取り経路 (許可リストと伏せ字) から組み立て、最後にもう一度、本文の規則で伏せ字を掛けます (上記 (3)。画面用のアドレストークンは除去、manifest のファイルの sha256 は伏せずにそのまま)。生の pcap は含めません (P3 の統計 JSON のみ)。ファイル名は `obs-evidence-<対象の種類>-<開始 JST>-<長さ>.zip` で、アドレスや機器名は入れません。
 - 中身: `manifest.json` (期間・対象・フィルタ・データソースと版 (Prometheus / Loki / Grafana / 本ツールのコミット)・出力日時・出力者 (今は `local`)・各ファイルの行数 / バイト数 / sha256 / 切り詰めの有無と理由)、`metrics/*.csv` (対象の範囲クエリ。クエリ文も manifest に記録)、`alerts/ALERTS.csv`・`alerts/ALERTS_FOR_STATE.csv` (警報の履歴)・`alerts/notifications.txt` (notify-relay の通知記録)・`alerts/rule.json` (警報のとき)、`logs/syslog.txt` (伏せ字済み)、`pcap/stats.json` (選んだとき)。
-- 上限 (超えた分は切り詰め、manifest の `truncated` / `truncated_by` に記録): 期間 7 日、1 系列あたり約 2000 点 (期間に応じて step を広げる)、CSV 1 本 50000 行 (`EVIDENCE_MAX_ROWS`)、ログ 1 本 20000 行 (`EVIDENCE_MAX_LINES`)、合計 24 MB (`EVIDENCE_MAX_MB`)、60 秒 (`EVIDENCE_TIME_BUDGET`)。同時に 1 件だけ (実行中は 429)、1 分に 6 件まで (`EVIDENCE_PER_MIN`、超えると 429)。proxy (Caddy) は `/evidence/*` を GET / HEAD と、スナップショット付きの `POST /evidence/export` (127.0.0.1 公開のときだけ) だけ通します。
+- 上限 (超えた分は切り詰め、manifest の `truncated` / `truncated_by` に記録): 期間 7 日、1 系列あたり約 2000 点 (期間に応じて step を広げる)、CSV 1 本 50000 行 (`EVIDENCE_MAX_ROWS`)、ログ 1 本 20000 行 (`EVIDENCE_MAX_LINES`)、合計 24 MB (`EVIDENCE_MAX_MB`)、60 秒 (`EVIDENCE_TIME_BUDGET`)。同時に 1 件だけ (実行中は 429)、1 分に 6 件まで (`EVIDENCE_PER_MIN`、超えると 429)。proxy (Caddy) は `/evidence/*` を GET / HEAD と、スナップショット付きの `POST /evidence/export` (ログインありでは operator 以上) だけ通します。
 - 本ツールのコミットはビルド時に渡します (実行時に `.git` は読みません): `OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build`。渡さないと manifest の版は `unknown` です。
-- 画面のスナップショット (P6、任意・既定はオフ): 詳細ドロワーの証跡出力にある「画面の画像」にチェックを入れると、押した時点の画面 (表示中のまま = 伏せ字済み) をブラウザ内で PNG にして zip に `snapshot.png` として入れます。新しいライブラリは使いません (画面を複製して SVG の foreignObject で描き、地球儀 (WebGL) などの canvas はその場で描いた画像として差し込みます)。複製の中の文字はもう一度 IPv4 / MAC を伏せ、画面用のアドレストークンを除き、入力欄に打った文字は空にします。manifest の `snapshot` に `generated_by: "browser"`・sha256・大きさ (px) を記録し、`files` にも `source: "browser"` で載せます。サーバ (mask-api) は PNG であること (署名・各 chunk の CRC・8192 px 以下・8 MB 以下 `EVIDENCE_SNAPSHOT_MAX_MB`) を確かめ、画像の chunk (IHDR / PLTE / IDAT / IEND) だけを残します (文字・時刻・EXIF などのメタデータは入りません。ファイル名にもアドレスは入りません)。画像はブラウザが作ったものなので、zip の他のファイルのようにサーバのデータから作ったものではありません。
-  - 書き込みの規則: スナップショット付きの出力は PNG を送る `POST /evidence/export` (他は今までどおり GET) で、抑止・ACK と同じ制限です: **127.0.0.1 公開のときだけ**、同じオリジン + `X-Obs-Csrf`、証跡出力の同時 1 件・1 分 6 件。
-  - **LAN 公開時** (`OBS_BIND` が 127.x 以外): proxy と mask-api の両方が POST を 403 で拒否します (認証が無いため)。画面は理由 (`スナップショットなし: LAN 公開中は…`) を表示し、スナップショットなしの zip をそのまま出力します。作れないブラウザ (foreignObject の画像を canvas に描くと読めなくなるブラウザ、読めない canvas) や大きすぎる画像でも同じく理由を表示して PNG なしで出力します。
-  - 制限: 写るのは表示中の画面 (ウィンドウの大きさ、最大 4096 px、devicePixelRatio は 2 まで) です。各パネルのスクロール位置は保たず、それぞれの先頭を描きます。Web フォント (Google Fonts) は埋め込めないため文字はシステムのフォントになります。履歴再生バーと原因候補の「証跡」には付けていません (ドロワーの証跡出力だけ)。
+- 画面のスナップショット (P6、任意・既定はオフ): 詳細ドロワー・履歴再生バー (`画像`)・原因候補 (窓の証跡と各項目の「証跡」に共通) の「画面の画像」にチェックを入れると、押した時点の画面 (表示中のまま = 伏せ字済み) をブラウザ内で PNG にして zip に `snapshot.png` として入れます。新しいライブラリは使いません (画面を複製して SVG の foreignObject で描き、地球儀 (WebGL) などの canvas はその場で描いた画像として差し込みます)。複製の中の文字はもう一度 IPv4 / MAC を伏せ、画面用のアドレストークンを除き、入力欄に打った文字は空にします。manifest の `snapshot` に `generated_by: "browser"`・sha256・大きさ (px) を記録し、`files` にも `source: "browser"` で載せます。サーバ (mask-api) は PNG であること (署名・各 chunk の CRC・8192 px 以下・8 MiB 以下 `EVIDENCE_SNAPSHOT_MAX_MB`、proxy の上限も MiB) を確かめ、画像の chunk (IHDR / PLTE / IDAT / IEND) だけを残します (文字・時刻・EXIF などのメタデータは入りません。ファイル名にもアドレスは入りません)。画像はブラウザが作ったものなので、zip の他のファイルのようにサーバのデータから作ったものではありません。
+  - 書き込みの規則: スナップショット付きの出力は PNG を送る `POST /evidence/export` (他は今までどおり GET) で、抑止・ACK と同じ制限です: ログインありでは **operator / admin だけ** (ログインなしでは 127.0.0.1 のこのホストから)、同じオリジン + `X-Obs-Csrf`、証跡出力の同時 1 件・1 分 6 件。mask-api は本文を読む前に、権限・CSRF・期間・形式と大きさ・実行枠 (同時 1 件・回数) を確かめ、そのあと PNG を時間を区切って読みます (全体 `EVIDENCE_UPLOAD_TIMEOUT` 既定 30 秒、途切れは 15 秒。超えたら 400 で枠を空けます)。
+  - **権限が無いとき** (viewer、ログインを確認できない): proxy と mask-api の両方が POST を 403 で拒否します。「画面の画像」は理由付きで無効になり、押せた場合も理由 (`スナップショットなし: …`) を表示してスナップショットなしの zip をそのまま出力します。作れないブラウザ (foreignObject の画像を canvas に描くと読めなくなるブラウザ、読めない canvas) や大きすぎる画像でも同じく理由を表示して PNG なしで出力します。
+  - 制限: 写るのは表示中の画面 (ウィンドウの大きさ、最大 4096 px、devicePixelRatio は 2 まで) です。各パネルのスクロール位置は保たず、それぞれの先頭を描きます。Web フォント (Google Fonts) は埋め込めないため文字はシステムのフォントになります。
 
 ## ネットワーク図と相関 (P5)
 
@@ -436,3 +471,4 @@ demo profile では flowd-demo が合成 pcap (`demo/demo-home.pcap`: 60 秒分�
 - 実機 (RTX/WLX) では未検証です。SNMPv3 の方式・syslog の形式・機器側コマンドは実機で確かめる必要があります。
 - command-center は proxy の `/obs/config.json` (setup が生成: profile・フロー収集の有無・台帳の機器名と種別。アドレスや資格情報は含まない) で動作を切り替えます。60 秒ごとに取り直し、内容が変わっていれば (初回の取得に失敗していた、`tools targets` で台帳を変えた など) 画面を読み込み直します。調査中 (INVESTIGATE) は読み込み直さず、WALLBOARD に戻ったとき (Esc / BACK TO LIVE / 無操作) に読み込み直します。prod では `DEMO DATA / SYNTHETIC` 表示を出さず、機器一覧は台帳の機器、通信先 (地球儀・TOP DESTINATIONS / SOURCES・UNKNOWN GEO と詳細画面) は「no flow source configured (capture off)」の表示になり (capture profile を有効にすると実フロー)、フロー未設定は鮮度バッジの DEGRADED / STALE の理由に数えません (設定済みのソースが止まった場合の STALE はこれまでどおり)。WIRELESS CLIENTS は prod では見出しが `MIB unconfirmed` になり、WLX ごとの値は不明 (—) で、0 は表示しません (鮮度バッジには影響しません)。
 - (P5) RTX / WLX の実機が LLDP-MIB に答えるかは未確認です (図は台帳だけでも成り立ちます)。LLDP のポート ID が ifName でない機器では、台帳と同じ接続でも別の `LLDP` の線として描きます。原因候補の時刻は評価間隔 (30 秒) 単位です。
+- (P7) ログイン: セッションは Authelia のメモリにだけある (再起動で全員ログアウト)。Docker Desktop では送信元アドレスが 1 つに見えるため、総当たりの締め出しがアドレス単位では全員に効く。Grafana は admin だけ (生の値のため)。ログインの画面は Authelia のもの (テーマは Authelia の auto)。HTTPS は自前の CA なので、端末ごとにルート証明書の登録が必要。
