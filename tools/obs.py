@@ -10,6 +10,7 @@
   capture      パケット取込の状態 (status) / リングとアップロードの一覧 (list) / 保存期間を過ぎたものの削除 (prune)
   geoip        DB-IP Lite (City + ASN) のダウンロード・更新 (update) / 版と鮮度 (status)
   user         ログインの利用者 (Authelia): add / passwd / role / remove / list、秘密値の生成 (secrets)
+  doctor       導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。scripts/doctor.sh から)
 
 Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
 Paths: the repository is mounted at /work, the generated volume at /generated, data volumes under /vol.
@@ -48,6 +49,7 @@ from notify import (DEMO_PLAN, NOTIFY_ENV, RECEIVER_TYPES, RELAY, RELAY_UID, SMT
 import notify  # the notification model (tools/notify.py, next to this file)
 import capture as cap  # packet capture / GeoIP housekeeping (tools/capture.py)
 import auth as au  # authentication: Authelia's config, users and secrets (tools/auth.py)
+import doctor as dr  # preflight assessments (tools/doctor.py)
 
 WORK = Path(os.environ.get("OBS_WORK", "/work"))
 GEN = Path(os.environ.get("OBS_GENERATED", "/generated"))
@@ -68,7 +70,8 @@ LITERAL_SECRETS = ("SNMP_COMMUNITY",)
 # data volume -> owner the service runs as (a fresh volume first mounted here would otherwise be root-owned)
 VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0), "alertmanager": (65534, 65534),
            "capture": (0, 0), "uploads": (65534, 65534),  # these two only with backup --include-captures
-           "authelia": (au.AUTHELIA_UID, au.AUTHELIA_UID)}
+           "authelia": (au.AUTHELIA_UID, au.AUTHELIA_UID),
+           "caddy": (0, 0)}  # the proxy's own CA (its key) and certificates: the LAN devices trust that root
 DEMO_HOSTS = {"192.168.100.1": "rtx1300"}  # the demo pcap's router (its other hosts are named by DHCP)
 IFNAME_RE = re.compile(r"[A-Za-z0-9_/:-]{1,64}")  # no dots: mask-api rejects digit.digit in query literals
 RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in the inventory (alloy/config.alloy)
@@ -1368,6 +1371,145 @@ def cmd_init(args):
     return 0
 
 
+# ---- doctor (H1): preflight before `up` / `check`, no device traffic ---------------------------------
+
+CADDY_VOL = VOL / "caddy"
+
+
+def env_file_value(v):
+    """One .env value as compose reads it: 'single' literal, "double" with \\n \\" \\\\ escapes (text after the closing
+    quote ignored), unquoted up to an inline ` #` comment."""
+    v = v.strip()
+    if v[:1] in ("'", '"'):
+        end = v.find(v[0], 1) if v[0] == "'" else next((i for i in range(1, len(v)) if v[i] == '"' and v[i - 1] != "\\"), -1)
+        if end > 0:
+            inner = v[1:end]
+            return inner if v[0] == "'" else re.sub(r"\\(.)", lambda m: "\n" if m.group(1) == "n" else m.group(1), inner)
+    return re.split(r"\s+#", v, maxsplit=1)[0].rstrip()
+
+
+def read_env_file(path=None):
+    """KEY=VALUE lines of .env ({} without one), also `export KEY=...`, values as compose reads them."""
+    path = path or ENV_FILE
+    out = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            k, sep, v = line.partition("=")
+            if sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", k.strip()):
+                out[k.strip()] = env_file_value(v)
+    return out
+
+
+def published_ports(values, demo):
+    v = lambda k, d: values.get(k) or d
+    want = [("tcp", v("OBS_BIND", "127.0.0.1"), v("OBS_PORT", "8080")), ("tcp", "127.0.0.1", v("PROM_LOCAL_PORT", "9090")),
+            ("tcp", "127.0.0.1", v("GRAFANA_LOCAL_PORT", "3000")),
+            ("tcp", v("SYSLOG_BIND", "127.0.0.1"), v("SYSLOG_PORT", "514")), ("udp", v("SYSLOG_BIND", "127.0.0.1"), v("SYSLOG_PORT", "514"))]
+    if demo:
+        want.append(("tcp", "127.0.0.1", "9116"))
+    return [(p, a, int(n)) for p, a, n in want if str(n).isdigit()]
+
+
+def profiles_of(file_env):
+    return {p.strip() for p in (env("COMPOSE_PROFILES") or file_env.get("COMPOSE_PROFILES", "")).split(",") if p.strip()}
+
+
+def doctor_host_rows(values, file_env):
+    rows = []
+    add = lambda item, res: rows.append((item, *res))
+    add("Docker Engine", dr.engine(env("OBS_DOCTOR_ENGINE")))
+    add("docker compose", dr.compose(env("OBS_DOCTOR_COMPOSE")))
+    add("CPU", dr.arch(env("OBS_DOCTOR_ARCH") or os.uname().machine))
+    try:
+        mem = int(re.search(r"^MemTotal:\s+(\d+) kB", Path("/proc/meminfo").read_text(), re.M).group(1)) * 1024
+        add("メモリ", dr.memory(mem))
+    except (OSError, AttributeError):
+        add("メモリ", (dr.WARN, "不明 (/proc/meminfo)", ""))
+    need, seen = dr.disk_need(values), set()
+    for label, p in (("ディスク (リポジトリ)", WORK), ("ディスク (Docker のボリューム)", VOL / "prometheus")):
+        if p.exists() and p.stat().st_dev not in seen:
+            seen.add(p.stat().st_dev)
+            add(label, dr.disk(str(p), shutil.disk_usage(p).free, need))
+    ref = max((q.stat().st_mtime for q in (WORK / "compose.yaml", WORK / "README.md") if q.exists()), default=None)
+    add("時刻", dr.clock(time.time(), ref, env("OBS_DOCTOR_NTP")))
+    add("ポート", dr.ports(published_ports(values, "demo" in profiles_of(file_env)), dr.listeners(env("OBS_DOCTOR_LISTEN")),
+                          "OBS_DOCTOR_LISTEN" in os.environ, dr.listeners(env("OBS_DOCTOR_OWN"))))
+    return rows
+
+
+def doctor_env_rows(values, file_env):
+    if not ENV_FILE.exists():
+        return [(".env", dr.NG, "ありません", "docker compose run --rm tools init (デモだけなら不要: --profile demo)")]
+    rows = []
+    bits = ENV_FILE.stat().st_mode & 0o777
+    rows.append((".env の権限", dr.WARN if bits & 0o077 else dr.OK, oct(bits), "chmod 600 .env (秘密値が入っています)" if bits & 0o077 else ""))
+    profiles = profiles_of(file_env)
+    if not profiles & {"prod", "demo"}:
+        rows.append(("COMPOSE_PROFILES", dr.NG, f"{','.join(sorted(profiles)) or '空'} (prod か demo が必要)", ".env に COMPOSE_PROFILES=prod (tools init が書きます)"))
+        return rows
+    rows.append(("COMPOSE_PROFILES", dr.OK, ",".join(sorted(profiles)), ""))
+    if "prod" in profiles:
+        try:
+            errs, warns, _ = validate(values, load_inventory())
+        except Fail as e:
+            errs, warns = [str(e)], []
+    else:
+        errs, warns = check_env(values)
+    rows += [(".env / 台帳", dr.NG, e, "") for e in errs] + [(".env / 台帳", dr.WARN, w, "") for w in warns]
+    if not errs and not warns:
+        rows.append((".env / 台帳", dr.OK, "必須値と形式に問題はありません", ""))
+    return rows
+
+
+def doctor_access_rows(values):
+    if not au.required(values):
+        return [("ログイン / 証明書", dr.OK, "ログインなし (127.0.0.1 のみ、http)", "")]
+    rows = []
+    try:
+        users = au.load_users(AUTHELIA_USERS)
+        usable = [n for n, u in users.items() if not u.get("disabled") and au.role_of(u) != "-"]
+        if usable:
+            admins = sum(au.role_of(users[n]) == "admin" for n in usable)
+            rows.append(("ログインの利用者", dr.OK, f"{len(usable)} 人 (admin {admins} 人)", ""))
+        else:
+            rows.append(("ログインの利用者", dr.NG, "0 人 (ログイン必須なので画面は開きません)", "docker compose run --rm tools user add <名前> --role admin"))
+    except (au.AuthError, OSError, yaml.YAMLError) as e:
+        rows.append(("ログインの利用者", dr.NG, f"利用者のファイルを読めません: {e}", ""))
+    pki = CADDY_VOL / "caddy"
+    root = dr.decode_cert(pki / "pki/authorities/local/root.crt")
+    leaves = [c for c in map(dr.decode_cert, sorted((pki / "certificates").glob("*/*/*.crt"))) if c]
+    rows.append(("証明書 (HTTPS)", *dr.certificate(root, leaves, [h.strip("[]") for h, _ in au.hosts(values)], time.time())))
+    return rows
+
+
+def doctor_grafana_rows(values):
+    if values.get("OBS_GRAFANA", "1") == "0" or not GRAFANA_DB.exists():
+        return []
+    try:
+        found = grafana_defaults()
+    except GrafanaDbUnreadable as e:
+        return [("Grafana の管理者 (保存値)", dr.WARN, str(e), "")]
+    if found:
+        return [("Grafana の管理者 (保存値)", dr.WARN, "既定のパスワードのまま: " + ", ".join(a.login for a, _ in found),
+                 "docker compose run --rm tools grafana-reset-admin")]
+    return [("Grafana の管理者 (保存値)", dr.OK, "既定のパスワードではありません", "")]
+
+
+def cmd_doctor(args):
+    file_env = read_env_file()
+    values = {**file_env, **env_map()}
+    rows = doctor_host_rows(values, file_env) + doctor_env_rows(values, file_env) + doctor_access_rows(values) + doctor_grafana_rows(values)
+    print("■ 導入前の自己診断 (機器には接続しません)\n")
+    table(("項目", "状態", "詳細", "直し方"), rows)
+    ng = sum(r[1] == dr.NG for r in rows)
+    print(f"\n結果: NG {ng} / WARN {sum(r[1] == dr.WARN for r in rows)} / OK {sum(r[1] == dr.OK for r in rows)}"
+          + ("  — NG を直してから docker compose up -d" if ng else "  — 起動できます (起動後: docker compose run --rm tools check)"))
+    return 1 if ng else 0
+
+
 # ---- backup / restore ---------------------------------------------------------------------------
 
 def snapshot_prometheus():
@@ -1459,6 +1601,7 @@ def cmd_backup(args):
                 sources.append(("authelia", "authelia", VOL / "authelia", skip_adb))
                 if adb:
                     sources.append(("authelia", "authelia/db.sqlite3", adb, None))
+            sources.append(("caddy", "caddy", VOL / "caddy", None))  # same CA after a restore: no new root on the devices
             if args.include_captures:  # never by default: full packets, bounded by their own retention instead
                 # closed files only, staged first: the ring rotates and prunes under a running capture
                 stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=out))
@@ -1487,7 +1630,8 @@ def cmd_backup(args):
 
 
 def running_services():
-    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000), ("alertmanager", 9093), ("authelia", 9091))
+    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000), ("alertmanager", 9093), ("authelia", 9091),
+                              ("proxy", 80))
             if probe(f"tcp://{n}:{port}")[0]]
 
 
@@ -1586,7 +1730,7 @@ def cmd_restore(args):
         raise Fail(f"アーカイブがありません: {args.archive}")
     busy = running_services()
     if busy:
-        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana alertmanager authelia")
+        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana alertmanager authelia proxy")
     with tarfile.open(path, "r:gz") as tar:
         members = tar.getmembers()
         try:
@@ -2076,6 +2220,18 @@ def selftest():
     example = readme[readme.index("tools init --yes") - 200:readme.index("tools init --yes") + 300]
     for var in ("GF_ADMIN_PASSWORD", "SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
         assert f"-e {var}=" in example, var
+    # doctor (H1): assessments, .env parsing, the ports this stack publishes
+    dr.selftest()
+    with tempfile.TemporaryDirectory() as tmp:
+        ef = Path(tmp) / ".env"
+        ef.write_text("# c\nOBS_PORT=8443 # https\nGF_ADMIN_PASSWORD='a b#c' # pw\nlower=x\nSYSLOG_PORT=\n"
+                      "export PROM_LOCAL_PORT=19090\n  export   GRAFANA_LOCAL_PORT = 13000\nOBS_PUBLIC_URL=https://h#x\n"
+                      'SMTP_FROM="a \\"b\\" # c" # d\n', encoding="utf-8")
+        want = {"OBS_PORT": "8443", "GF_ADMIN_PASSWORD": "a b#c", "SYSLOG_PORT": "", "PROM_LOCAL_PORT": "19090",
+                "GRAFANA_LOCAL_PORT": "13000", "OBS_PUBLIC_URL": "https://h#x", "SMTP_FROM": 'a "b" # c'}
+        assert read_env_file(ef) == want, read_env_file(ef)
+    pp = published_ports({"OBS_BIND": "192.0.2.10", "OBS_PORT": "443", "SYSLOG_BIND": "0.0.0.0"}, demo=False)
+    assert ("tcp", "192.0.2.10", 443) in pp and ("udp", "0.0.0.0", 514) in pp and ("tcp", "127.0.0.1", 9116) not in pp, pp
     print("selftest ok")
 
 
@@ -2137,6 +2293,7 @@ def parser():
     u.add_argument("--display", default="", help="add: 表示名 (既定は利用者名)")
     u.add_argument("--email", default="", help="add: メールアドレス (TOTP の登録に必要。送信はしない。既定は <名前>@users.obs.invalid)")
     u.epilog = "パスワードは対話で 2 回入力 (TTY なしなら -e OBS_USER_PASSWORD=...)。保存は argon2id のハッシュだけです"
+    sub.add_parser("doctor", help="導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。ホストの項目は scripts/doctor.sh から)")
     sub.add_parser("help", help="この説明")
     return p
 
@@ -2150,7 +2307,7 @@ def main(argv):
     cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
             "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
             "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test,
-            "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup, "user": cmd_user}
+            "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup, "user": cmd_user, "doctor": cmd_doctor}
     if args.cmd not in cmds:
         p.print_help()
         return 0

@@ -4,7 +4,7 @@ FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e
 # users file (tools user); the stdlib has no argon2.
 RUN pip install --no-cache-dir --only-binary=:all: PyYAML==6.0.3 argon2-cffi==25.1.0 argon2-cffi-bindings==26.1.0 cffi==2.1.1 pycparser==3.12
 WORKDIR /app
-COPY obs.py notify.py capture.py auth.py ./
+COPY obs.py notify.py capture.py auth.py doctor.py ./
 # the selftest reads a few repository files (compose: additional context "repo"); bound for this step only, not kept
 RUN --mount=type=bind,from=repo,source=README.md,target=/selftest/README.md     --mount=type=bind,from=repo,source=.env.example,target=/selftest/.env.example     --mount=type=bind,from=repo,source=snmp,target=/selftest/snmp     --mount=type=bind,from=repo,source=dashboards,target=/selftest/dashboards     OBS_WORK=/selftest OBS_GENERATED=/tmp/gen OBS_VOLUMES=/tmp/vol python obs.py --selftest
 ENV PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8

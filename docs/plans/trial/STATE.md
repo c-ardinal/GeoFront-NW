@@ -8,6 +8,50 @@
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
 
+## H1 (docs/plans/v2/H1-SPEC.md) - implemented, uncommitted on main (HEAD 5e0e6ef), awaiting PM acceptance
+- tools doctor (tools/doctor.py pure assessments + obs.cmd_doctor; host facts from scripts/doctor.sh: engine >= 25,
+  compose >= 2.20, arch, NTP (timedatectl), busy ports (ss / netstat), skipped while this stack runs): memory, disk vs
+  bounded stores, clock vs repo mtime, .env presence / 0600 / profiles / check_env|validate, users = 0 with login, CA +
+  leaf certs (caddy-data now mounted in tools at /vol/caddy), Grafana stored default. OK/WARN/NG + fix, NG -> rc 1.
+- Bug fixed: backup/restore did not include caddy-data (the proxy's CA key): a restore on a new host made a new root, so
+  every LAN device had to re-register it. Now part `caddy` (owner 0:0); restore also refuses while proxy runs (proxy:80).
+  Regression: scripts/backup-restore.sh (ca_key_sha / ca_root_sha equal, archive lists caddy, TLS with the old root).
+- compose: testbed container_name from TESTBED_RTX_NAME / TESTBED_WLX_NAME (defaults unchanged) so a second testbed
+  (e2e) can run next to the stopped yamaha-observatory-testbed containers.
+- scripts/ (bash + stdlib python): lib.sh, doctor.sh, e2e-fresh.sh open|auth (E2E_LAN_IP, E2E_CAPTURE, KEEP),
+  resilience.sh (REBOOT_CMD), backup-restore.sh, upgrade.sh [ref], arm64.sh, state.py (data state JSON in tools),
+  probe.py (screens / roles / Grafana admin, subset of the P7 lancheck + openprobe), verify.sh quick|full|names.
+- README: doctor step, update with --remove-orphans + backup first, caddy-data in backup, proxy in the stop list,
+  section 検証 (scripts/verify.sh) + Pi first steps, capture "Pi で最初に確かめること". No real host values in the repo
+  (owner: repo will be published; the old P7 line with this PC's LAN IP redacted to <LAN_IP>; it is still in commit 5e0e6ef).
+- Results (this PC, Docker Desktop 4.55 / Engine 29.1.3 amd64, auth runs on a real LAN bind <LAN_IP>):
+  development runs: e2e open OK (+ E2E_CAPTURE=1 with CAPTURE_ALLOW_VM: ring -> flowd -> Prometheus, flows_configured),
+  e2e auth OK (17 probes), resilience 12/12 + Docker Desktop restart (16 containers back, check OK), backup-restore all
+  10 state items equal + same root / key + TLS with the old root + login (its comparator then failed to parse JSON
+  mixed with build output: fixed in lib.sh state()), upgrade bb2f21d OK (5 items kept, grafana-guard removed, Authelia
+  up), arm64: 10/10 pinned images amd64+arm64, arm64 builds + selftests tools 214 s / flowd 168 s / analyzer 537 s.
+  Codex r1 (3 P2: e2e.env 0600, doctor per-port ownership, cleanup trap) + r2 (2 P2: PROM/GRAFANA_LOCAL_PORT from the
+  shell, upgrade test demo-gen port) fixed, not re-reviewed (2 rounds max).
+  Final verify.sh full after the last code change: selftests (8/8 rc=0), compose, e2e-open, e2e-auth OK; resilience
+  12/12 service checks OK, then REBOOT_CMD "docker desktop restart" left Docker Desktop crashed (backend: stale AF_UNIX
+  socket %LOCALAPPDATA%\Docker\run\dockerInference "cannot be accessed"; same after killing all Docker processes and
+  restarting). backup-restore / upgrade / arm64 were not re-run after the r1/r2 script edits. Logs: scratchpad
+  h1/verify-final/, earlier runs h1/*.log, codex h1/codex-r1.md, r2.md.
+  Review NO-GO fixes (Docker down, static checks only): B1 scripts/*.sh 100755 in the index (add -N + update-index
+  --chmod=+x: their content is staged, re-add after edits); O1 pre-clean by name (lib.sh down_project, obs-e2e-* only,
+  no compose file needed); O2 resilience.sh [project [tree]] (no COMPOSE_PROJECT_NAME inheritance, needs e2e.env);
+  O3 doctor.sh netstat only on MINGW/MSYS/CYGWIN, unread ports -> WARN; O4 read_env_file: export, inline ` #`
+  comments, quoted values with trailing comments / escapes (selftest cases); README: REBOOT_CMD systemctl only.
+  bash -n, py_compile, doctor selftest, read_env_file cases OK. After Docker came back: the exit traps also use
+  down_project (compose-file `down -v` had left obs-e2e-*_geoip volumes of an inactive profile behind).
+- FINAL (after the last code change, scripts re-staged 100755): `E2E_LAN_IP=<LAN_IP> scripts/verify.sh full`, no
+  REBOOT_CMD: selftests OK 181 s (8/8 + tools build selftest), compose OK, e2e-open OK, e2e-auth OK (27 OK), resilience
+  OK (12/12), backup-restore OK (36 OK), upgrade OK, arm64 OK (13 OK, build cache). Logs scratchpad h1/verify-final2/.
+  Codex r3 (review fixes): no findings. All obs-e2e-* projects removed (containers, volumes, networks); main projects
+  stopped, their 22 volumes untouched.
+- Not verifiable here: real LAN capture (Docker Desktop host network = VM), native arm64 run, a real reboot of a Pi
+  (Docker Desktop restart used), disk-full behaviour (bounded by config only; doctor estimates), real devices.
+
 ## P7 (docs/plans/v2/P7-SPEC.md) - implemented, uncommitted on main (HEAD bb2f21d), awaiting PM acceptance
 - Access mode = auth on any LAN bind (no unauthenticated LAN exposure any more) or OBS_AUTH=1; else open (127.0.0.1, no
   login: demo default unchanged). One rule in proxy / authelia / grafana entrypoints, mask-api auth_required, tools/auth.py.
@@ -36,7 +80,7 @@
   record each command's own rc (selftests.sh, no tail pipe; P6's flowd rc=0 was such a case).
 - Done (after the last code change): final build + selftests.sh all rc=0 (mask-api incl. identity/spoof/role gating, relay,
   analyzer, flowd clean, demo-gen, capture, tools incl. auth hashing vector), open mode probes + P4 export_check scopes +
-  limits (0 raw hits) + browser open (29 OK); real LAN bind 192.0.2.10: lancheck 79/79 (unauth / viewer / operator / admin
+  limits (0 raw hits) + browser open (29 OK); real LAN bind <LAN_IP>: lancheck 79/79 (unauth / viewer / operator / admin
   x reads / writes, spoofed + duplicated headers, internal container without key, Authelia down -> 502, HTTP -> HTTPS, 421,
   cookie flags, Grafana roles, logout) + bruteforce 2/2 (bans revoked after), browser lan 81 OK (both themes, 390-2560).
   Codex r1 2 P2 fixed, r2 1 P1 + 1 P2 fixed, r3 clean; argon2 32 MiB + GOMEMLIMIT changed after r3 (measured), re-verified.

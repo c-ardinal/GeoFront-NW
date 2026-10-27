@@ -133,7 +133,7 @@ mask-api の自己テスト (`python mask-api/mask_api.py --selftest`、イメ�
 
 前提: 64 bit の Linux (Raspberry Pi OS 64-bit / Ubuntu など、arm64 または amd64)、Docker Engine 25 以上 (healthcheck の `start_interval` を使うため) と compose plugin。
 ホストに Python などは要りません (設定作業は `tools` コンテナで行います)。Pi 4 (4 GB) で動く既定値にしてあります。
-P1 時点で実機での動作確認はまだです (下記「既知の制限」)。
+実機 (RTX / WLX) での動作確認はまだです (下記「既知の制限」)。Pi で最初に確かめる手順は下記「検証」の「Pi で最初に」。
 
 ```sh
 # 1. 取得 (git clone など) して、そのディレクトリで:
@@ -143,11 +143,18 @@ docker compose run --rm tools init          # 対話で .env と inventory/devic
 #              --device rtx1300,rtx,192.168.100.1 --device wlx413,wlx,192.168.100.2 --wan rtx1300:lan2
 #    (この例は tools --selftest が README と突き合わせて確認しています)
 # 2. 機器側に SNMPv3 ユーザーと syslog 送信先を設定する (下記「機器側の設定例」。手作業)
-# 3. 起動 (init が .env に COMPOSE_PROFILES=prod を書くので profile 指定は不要)
+#    LAN に公開する (--bind が LAN 側の IP) ならログインの利用者も: docker compose run --rm tools user add <名前> --role admin
+# 3. 導入前の自己診断: Docker 25 以上・compose・CPU (arm64 / amd64)・メモリ・ディスク・時刻 (NTP)・ポートの衝突・
+#    .env と台帳・利用者 0 人の LAN 公開・証明書。OK / WARN / NG と直し方を表で出し、NG があれば終了コード 1 (機器には接続しない)
+scripts/doctor.sh             # (ホストの項目を省いた版: docker compose run --rm tools doctor)
+# 4. 起動 (init が .env に COMPOSE_PROFILES=prod を書くので profile 指定は不要)
 docker compose up -d --build
-# 4. 確認: 設定の検証、各機器への SNMP (sysUpTime・ifHC カウンタ)、syslog の受信待ち (既定 60 秒)、各サービスの health
+# 5. 確認: 設定の検証、各機器への SNMP (sysUpTime・ifHC カウンタ)、syslog の受信待ち (既定 60 秒)、各サービスの health
 docker compose run --rm tools check
 ```
+
+この手順 (init → doctor → up → check → 画面と Grafana) は、実機の代わりに testbed を使って `scripts/e2e-fresh.sh open|auth` が
+まっさらな別プロジェクトで通しで確かめます (下記「検証」)。
 
 - 秘密値 (SNMP のパスワード・コミュニティ、Grafana 管理者パスワード) は `.env` にだけ入ります (git 管理外、権限 600)。機器台帳 `inventory/devices.yaml` (git 管理外。例は `inventory/devices.example.yaml`) には auth の名前だけを書きます。
 - 機器台帳を変えたら `docker compose run --rm tools targets` (Prometheus の scrape 対象と、syslog の送信元 → 機器名の対応表を作り直します。再起動は不要)。`docker compose up` のたびにも `prod-setup` が作り直します。
@@ -280,16 +287,16 @@ docker compose run --rm tools backup --include-env   # .env (秘密値) も含�
 docker compose run --rm tools backup --include-captures  # キャプチャのリングとアップロードした pcap も (既定は含めない)
 ```
 
-1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、ログインの利用者と Authelia のデータ (利用者のファイル、締め出し・TOTP の鍵の SQLite は一貫したコピー。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` で暗号化されているので、別のホストに戻すときは `--include-env` で `.env` も)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
+1 つのアーカイブに Prometheus のスナップショット (admin API。admin API は内部ネットワークからだけ使え、proxy・nginx・mask-api は中継しません)、Loki のデータ、Grafana のデータ (grafana.db は SQLite の backup API で一貫したコピー)、Alertmanager のデータ (抑止・ACK と通知の記録。Alertmanager は約 15 分ごとにファイルへ書くため、直前の変更は入らないことがあります)、proxy の自前の認証局 (`caddy-data`: ルート証明書と鍵・発行済みの証明書。戻せば端末へのルート証明書の登録はそのまま使えます。鍵を含むのでアーカイブの扱いに注意)、ログインの利用者と Authelia のデータ (利用者のファイル、締め出し・TOTP の鍵の SQLite は一貫したコピー。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` で暗号化されているので、別のホストに戻すときは `--include-env` で `.env` も)、機器台帳と通知先 (receivers.yaml)、`--include-env` なら `.env` を入れます。動かしたままで取れます (Loki は稼働中のコピーなので、厳密に揃えたいときは `docker compose stop loki` してから)。
 
 ```sh
-docker compose stop prometheus loki grafana alertmanager authelia
+docker compose stop prometheus loki grafana alertmanager authelia proxy
 docker compose run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz        # 確認あり (--yes で省略)
 docker compose run --rm tools restore backups/... --with-config                         # 機器台帳・通知先 (と含まれていれば .env) も戻す
 docker compose up -d
 ```
 
-キャプチャ / アップロードを含むアーカイブ (`backup --include-captures`) を戻すときは、`docker compose stop capture flowd flowd-demo mask-api` も先に止めます (動いていれば restore は何も消さずに止まります)。restore は対象のサービスが動いていると止めるよう案内して何もしません。ボリュームの中身を消してアーカイブの内容に置き換え、各サービスの実行ユーザーに所有者を合わせます (空の新しいボリュームにも戻せます)。往復テスト (testbed で backup → ボリューム削除 → restore → 同じ時刻の値と Grafana の印のフォルダが一致) は確認済みです。
+キャプチャ / アップロードを含むアーカイブ (`backup --include-captures`) を戻すときは、`docker compose stop capture flowd flowd-demo mask-api` も先に止めます (動いていれば restore は何も消さずに止まります)。restore は対象のサービスが動いていると止めるよう案内して何もしません。ボリュームの中身を消してアーカイブの内容に置き換え、各サービスの実行ユーザーに所有者を合わせます (空の新しいボリュームにも戻せます)。往復テスト: `scripts/backup-restore.sh` (ログインありの構成から `--include-env` で取り、空のボリュームの別プロジェクト = 別ホストへ `--with-config` で戻し、同じ時刻の Prometheus / Loki の値・抑止・Grafana の利用者・Authelia の利用者と記録・ルート証明書と鍵が一致し、元のルート証明書で HTTPS が通り同じ利用者でログインできること)。
 
 ## profile を付けずに起動した場合
 
@@ -298,15 +305,47 @@ docker compose up -d
 ## 更新
 
 ```sh
+docker compose run --rm tools backup --include-env  # 念のため (更新前の版で取る)
 git pull                              # compose.yaml のイメージ (タグ + digest) や設定が更新される
-docker compose run --rm tools backup  # 念のため
 docker compose pull                   # 固定された新しいイメージを取得
-OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build  # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す。OBS_COMMIT は証跡出力の版情報)
+scripts/doctor.sh                     # 新しい版の自己診断 (動いたままで可)
+OBS_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build --remove-orphans  # 自作イメージも作り直して入れ替え (prod-setup が scrape 対象を作り直す。OBS_COMMIT は証跡出力の版情報)
 docker compose run --rm tools check
 ```
 
+- `--remove-orphans`: 廃止したサービスのコンテナを消します (P7 で廃止した `grafana-guard` など。付けないと古いコンテナが動いたまま残ります)。
+- P6 (bb2f21d) で作ったデータボリュームからの更新は `scripts/upgrade.sh` で確認しています: 同じ `.env` のまま上の手順で、メトリクス・syslog・抑止・Grafana の利用者が同じ時刻の値のまま残り、記録ルールの `rate2m` への改名・Authelia (127.0.0.1 では待機) と `grafana-front` ネットワークの追加・`grafana-guard` の削除が起きること。`.env` に足す項目はありません (LAN に公開している場合はログインが必須になったので、`docker compose run --rm tools user secrets` と `tools user add <名前> --role admin` を先に)。
+
 イメージを上げるときは、`compose.yaml` のタグと digest を一緒に変え、linux/amd64 と linux/arm64 の両方があることを確かめます:
 `docker buildx imagetools inspect <image>:<tag>` (Digest と、Manifests の Platform に linux/amd64・linux/arm64 があること)。
+
+## 検証 (scripts/verify.sh)
+
+リポジトリの検証を 1 つにまとめています (bash。Pi の Raspberry Pi OS と Windows の Git Bash + Docker Desktop で動きます。ホストには docker と python3 (標準ライブラリだけ) が要ります)。各検査は自分の終了コードと記録 (ログ) を持ち、最後に表を出します。試験用の別プロジェクト (`obs-e2e-*`、別のポート・ボリューム・サブネット) を作って終わったら `down -v` で消し、運用中のプロジェクトには触れません (イメージを作り直すだけ)。
+
+```sh
+scripts/verify.sh            # quick: selftests compose doctor (数分)
+scripts/verify.sh full       # + e2e-open e2e-auth resilience backup-restore upgrade arm64 (この PC で約 1 時間)
+scripts/verify.sh e2e-auth backup-restore   # 名前を並べて一部だけ
+```
+
+| 検査 | 内容 |
+|---|---|
+| selftests | 自作イメージを全部ビルド (ビルド時の selftest) し、各 selftest をきれいなコンテナでもう一度 (mask-api / notify-relay / analyzer / flowd / demo-gen / capture / testbed / tools) |
+| compose | compose の設定が解決できる: デモ (.env なし)・`testbed/testbed.env`・LAN 公開 + ログイン (ダミー値) |
+| doctor | `scripts/doctor.sh` (このツリーの .env。init 前なら足りないものを NG で出します) |
+| e2e-open / e2e-auth | `scripts/e2e-fresh.sh open|auth`: `git clone` 相当のコピーで init (非対話) → (利用者追加) → doctor → up (prod + testbed) → `tools check` すべて OK → doctor → 画面・API・Grafana admin・(ログインあり: 新しい CA での HTTPS、HTTP → HTTPS、ログインなしで開かない、cookie の属性、admin / viewer の役割、Grafana は admin だけ)。`E2E_LAN_IP=<この PC の LAN の IP>` で本当の LAN 公開、無ければ 127.0.0.1 + `OBS_AUTH=1`。`E2E_CAPTURE=1` で capture profile も (testbed のブリッジを取り込み → flowd → Prometheus) |
+| resilience | `scripts/resilience.sh`: loki / prometheus / authelia / mask-api / notify-relay を 1 つずつ止めて、画面の API がエラーを返す (画面は DEGRADED / STALE。空の 200 で正常に見せない)・Authelia なしでは何も開かない (fail closed) → 起動すると自動で戻る。`REBOOT_CMD="sudo systemctl restart docker"` でホスト再起動相当 (全コンテナが restart: unless-stopped で戻り、`tools check` が OK) も (Linux のみ。または手で本当に再起動。Docker Desktop の `docker desktop restart` は使わない: この PC ではエンジンが起動しなくなった)。対象は `scripts/resilience.sh [プロジェクト [ツリー]]` で明示したものだけ (既定 obs-e2e-auth。環境変数の COMPOSE_PROJECT_NAME は使わない) |
+| backup-restore | `scripts/backup-restore.sh`: 上記「バックアップ / 復元」の往復 (ログインあり、別プロジェクトへ) |
+| upgrade | `scripts/upgrade.sh [版]`: 1 つ前の版 (既定 bb2f21d = P6) のデータボリュームを今の版で起動 (上記「更新」) |
+| arm64 | `scripts/arm64.sh`: 取得するイメージの digest がすべて linux/arm64 と linux/amd64 を含むこと、自作イメージの linux/arm64 ビルド (selftest 込み。amd64 上では QEMU なので既定は依存の多い tools / flowd / analyzer。`ARM64_IMAGES="..."` で全部) |
+
+### Pi で最初に (この PC で確かめられなかったこと)
+
+1. `scripts/verify.sh quick` (arm64 でのビルドと selftest)、`git clone` 直後に `scripts/doctor.sh` (.env がない NG と、Docker・メモリ・ディスク・時刻 (NTP)・ポートの結果を確認)
+2. `E2E_LAN_IP=<Pi の LAN の IP> scripts/verify.sh e2e-open e2e-auth resilience backup-restore` (Pi の CPU で Grafana の初回の移行は数分かかります。`REBOOT_CMD="sudo systemctl restart docker"` を付けるとホスト再起動相当も)。終わったら本当の再起動 (`sudo reboot`) の後に `docker compose ps` で全部 healthy、`tools check` が OK
+3. 本番の手順 (上記「本番に入れる」) で init → doctor → up → check。LAN 公開なら端末に root.crt を登録して開けること
+4. キャプチャを使うなら上記「パケット取込」の「Pi で最初に確かめること」
 
 ## アラート通知 (P2)
 
@@ -389,6 +428,7 @@ docker compose run --rm tools capture status    # 動作中・インターフェ
 docker compose run --rm tools check             # 「パケット取込とフロー / GeoIP」の節も
 ```
 
+- **Pi で最初に確かめること** (この PC (Windows / Docker Desktop) では host network が VM のため LAN のキャプチャを確かめられていません): (1) `ip -br link` で `CAPTURE_IFACE` の名前と UP を確認、(2) 上の `up -d` の後 `docker compose ps capture` が running (healthy)・`docker compose logs capture` に dumpcap の開始、(3) `tools capture status` で受信数が増え、リングのファイルが `CAPTURE_FILE_SECONDS` ごとに増える、(4) 2〜3 分後に `tools check` の「パケット取込とフロー」が OK・Prometheus の `count(obs_flow_bytes_total)` が 1 以上・画面の地球儀に通信先、(5) `CAPTURE_BPF` を付けた場合はその条件だけになっていること。LAN の代わりに testbed で経路だけを試すなら `E2E_CAPTURE=1 scripts/e2e-fresh.sh open` (Linux ホストでは本物の host network・NET_RAW で動きます)
 - **ミラーポートの設定は手作業です**: スイッチ / ルーターのポートミラーリング (または LAN 側の通信が通る位置へのつなぎ替え) は仕様 G4 の承認を得てから、機器の管理画面・コンソールで人が行います。このツールは機器の設定を一切変更しません
 - **Windows / Docker Desktop では使えません**: Docker Desktop (Windows / macOS) と WSL ではコンテナの host network が VM のものなので LAN のパケットは見えません。capture サービスはそれを検出して理由を表示して終了します (`restart: on-failure:3`、`tools capture status` にも表示)。`CAPTURE_ALLOW_VM=1` は VM の中で経路だけを試すためのもので、LAN の監視にはなりません
 - profile と `.env` は揃えてください: `capture` profile なのに `OBS_CAPTURE=1` や `CAPTURE_IFACE` がない、または `prod` なしの場合は、起動時の確認 (capture-setup) が理由を出して止めます

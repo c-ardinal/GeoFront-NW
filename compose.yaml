@@ -198,6 +198,7 @@ services:
       - pcap-uploads:/vol/uploads
       - geoip:/vol/geoip
       - authelia-data:/vol/authelia
+      - caddy-data:/vol/caddy  # the proxy's own CA + certificates (backup / restore, doctor)
     restart: "no"
 
   # ---- demo ---------------------------------------------------------------------------------------
@@ -339,7 +340,9 @@ services:
     profiles: [testbed]
     build:
       context: ./testbed
-    container_name: testbed-rtx  # its reverse-DNS name is how Alloy maps its syslog lines to the inventory name
+    # its reverse-DNS name is how Alloy maps its syslog lines to the inventory name (another name only for a second
+    # testbed next to this one, e.g. scripts/e2e-fresh.sh: its inventory then uses that name as the address)
+    container_name: ${TESTBED_RTX_NAME:-testbed-rtx}
     hostname: testbed-rtx
     environment: &testbed-env
       TB_DEVICE: rtx1300
@@ -367,7 +370,7 @@ services:
     profiles: [testbed]
     build:
       context: ./testbed
-    container_name: testbed-wlx
+    container_name: ${TESTBED_WLX_NAME:-testbed-wlx}
     hostname: testbed-wlx
     environment:
       <<: *testbed-env
