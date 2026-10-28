@@ -1,7 +1,7 @@
 # Tag v*: build the self-built images for linux/amd64 and linux/arm64 (each Dockerfile runs its selftest during the build,
 # per platform), and only after every build and the selftests passed, push them to
 # ghcr.io/c-ardinal/geofront-nw-<svc>:<tag> (tools, mask-api, analyzer, flowd, notify-relay, demo-gen, capture).
-# Installations use them with GEOFRONT_VERSION=<tag> in their .env (README 「配布イメージ」).
+# Installations use them with GEOFRONT_VERSION=<tag> in their .env (docs/operations.md).
 name: release
 
 on:

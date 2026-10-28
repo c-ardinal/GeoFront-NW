@@ -1,6 +1,6 @@
 # GeoFront-NW. The default project name stays the pre-R1 one so that an existing installation keeps its volumes
 # (a new name would start with empty ones); `tools init` pins the project name into the config's .env and ./geofront
-# gives a new installation geofront-nw (README 「設定の置き場所」).
+# gives a new installation geofront-nw (docs/configuration.md).
 name: yamaha-observatory-trial
 
 # Site configuration (.env, inventory, receivers, backups) lives in OBS_CONFIG_DIR (outside the repository; unset = the
@@ -15,7 +15,7 @@ name: yamaha-observatory-trial
 #   testbed  with prod: simulated devices (snmpsim SNMPv3 + syslog sender) to try the prod path without hardware
 #            (docker compose --env-file testbed/testbed.env up -d)
 #   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
-#            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; README "パケット取込")
+#            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; docs/capture.md)
 # Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
 # run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
@@ -786,7 +786,7 @@ services:
     volumes:
       - ./caddy:/etc/caddy:ro  # Caddyfile + the access mode's parts
       - generated:/srv/obs-generated:ro
-      - caddy-data:/data  # also the local CA (root certificate for the LAN devices: README)
+      - caddy-data:/data  # also the local CA (root certificate for the LAN devices: docs/security.md)
     networks:
       default: {}
       grafana-front: {ipv4_address: "${OBS_GRAFANA_PROXY_IP:-172.31.253.2}"}  # Grafana's GF_AUTH_PROXY_WHITELIST

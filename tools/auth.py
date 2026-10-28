@@ -155,7 +155,7 @@ def authelia_config(values):
         "regulation": {"modes": ["user", "ip"], "max_retries": int(setting(values, "OBS_AUTH_MAX_RETRIES")),
                        "find_time": setting(values, "OBS_AUTH_FIND_TIME"), "ban_time": setting(values, "OBS_AUTH_BAN_TIME")},
         "storage": {"local": {"path": "/config/db.sqlite3"}},
-        # TOTP registration codes: written to this file in the volume (README: how to read it)
+        # TOTP registration codes: written to this file in the volume (docs/security.md: how to read it)
         "notifier": {"filesystem": {"filename": "/config/notification.txt"}},
         "totp": {"disable": not two, "issuer": "NETWORK OBSERVATORY"},
         "webauthn": {"disable": True},

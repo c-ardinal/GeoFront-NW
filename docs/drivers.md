@@ -1,4 +1,4 @@
-# 機種ドライバ (drivers/)
+# 機種ドライバ
 
 機種に固有のもの (SNMP の取得モジュール、LLDP を読むか、syslog の形式の回帰用 fixture、デモの機器) は
 `drivers/<vendor-model>/` にまとめ、本体 (tools・Prometheus・Alloy・mask-api・画面) は機種に依存しません。
@@ -7,7 +7,7 @@
 | ドライバ | kind | 内容 |
 |---|---|---|
 | `drivers/yamaha-rtx` | `rtx` | YAMAHA RTX ルーター。WAN の IF を `tools init` が尋ねる。デモの rtx1300 |
-| `drivers/yamaha-wlx` | `wlx` | YAMAHA WLX アクセスポイント。画面に無線クライアント数の欄 (prod では不明 —)。デモの wlx413 / wlx222 |
+| `drivers/yamaha-wlx` | `wlx` | YAMAHA WLX アクセスポイント。画面に無線クライアント数の欄 (prod では値が不明)。デモの wlx413 / wlx222 |
 | `drivers/generic` | `other` | 標準 MIB (MIB-II / IF-MIB) だけの機器。RFC 3164 / 5424 の syslog fixture |
 
 ## ドライバのファイル
@@ -19,7 +19,7 @@
 | `demo.json` | 任意 | demo-gen (イメージに同梱)、tools (demo profile の対象・台帳の代わり) | demo profile の機器 (インターフェース表、ルーターは `wan_if`、AP は `ap` の配分、`ssids`、`lldp` の隣接、`link` = ネットワーク図の親、`logs` / `error_logs` = syslog の文面)。疑似データ |
 
 SNMP の資格情報 (`snmp/auths.yml`) と LLDP のモジュール (`snmp/lldp.yml`) は標準 MIB なので全機種共通です
-(auth の名前 `yamaha_v3` / `yamaha_v2c` は R1 より前の台帳と互換のための名前で、中身は SNMPv3 authPriv / v2c の汎用設定です)。
+(auth の名前 `yamaha_v3` / `yamaha_v2c` は古い台帳と互換にするための名前で、中身は SNMPv3 authPriv / v2c の汎用設定です)。
 syslog の解析 (`alloy/config.alloy`) は形式で判定し (RFC 5424 / RFC 3164 のヘッダがあれば外し、PRI だけの行はそのまま)、
 機種名では分けていません。
 

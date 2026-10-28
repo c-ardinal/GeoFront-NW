@@ -10,7 +10,7 @@ import time
 OK, WARN, NG = "OK", "WARN", "NG"
 ENGINE_MIN = (25, 0)  # healthcheck start_interval
 COMPOSE_MIN = (2, 20)  # depends_on required: false (optional setup steps, OBS_GRAFANA=0)
-MEM_OK, MEM_MIN = 3.5 * 2**30, 1.8 * 2**30  # Raspberry Pi 4 4 GB defaults (README); below MEM_MIN the limits cannot fit
+MEM_OK, MEM_MIN = 3.5 * 2**30, 1.8 * 2**30  # Raspberry Pi 4 4 GB defaults (docs/operations.md); below MEM_MIN the limits cannot fit
 DISK_MIN = 2 * 2**30
 CLOCK_SLACK_S = 3600
 CERT_SOON_S = 30 * 86400
