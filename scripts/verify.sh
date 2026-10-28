@@ -16,7 +16,8 @@
 #   upgrade         scripts/upgrade.sh (data volumes of bb2f21d = P6 -> this tree)
 #   arm64           scripts/arm64.sh (pulled images' arm64 digests, arm64 builds of tools / flowd / analyzer)
 # Throwaway projects are obs-e2e-*, removed with `down -v` at the end; the main project is never touched (only built).
-# Env: VERIFY_LOGS (default ${TMPDIR:-/tmp}/obs-verify-<time>), E2E_DIR, E2E_LAN_IP, REBOOT_CMD, ARM64_IMAGES.
+# Env: VERIFY_LOGS (default ${TMPDIR:-/tmp}/obs-verify-<time>), E2E_DIR, E2E_LAN_IP, E2E_GRAFANA, E2E_TAG / E2E_SLOT
+# (scripts/e2e-fresh.sh), REBOOT_CMD, ARM64_IMAGES.
 set -u
 . "$(dirname "$0")/lib.sh"
 S="$ROOT/scripts"
@@ -99,7 +100,7 @@ for c in "$@"; do
   grep -E '^\[(NG)\]|NG:' "$LOGS/$c.log" | head -5 >&2
 done
 if [ "$needs_auth_kept" = 1 ]; then
-  down_project obs-e2e-auth
+  down_project "obs-e2e-${E2E_TAG:+$E2E_TAG-}auth"
 fi
 printf '\n%-15s | %-3s | %6s | %s\n' check rc time log
 printf '%s\n' "----------------+-----+--------+------------------------------"
