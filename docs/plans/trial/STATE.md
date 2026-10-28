@@ -7,6 +7,7 @@
 - Open: command-center/app.js dead stub (owner to decide deletion); masking is client-side only (needs auth layer, SEC-03); real-GPU kiosk perf unchecked.
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
+- Workflow (owner, 2026-10-28): 作業ブランチは develop から切り、develop へ merge する。main への PR はリリースのときだけ
 
 ## F1 (docs/plans/v2/F1-SPEC.md) - implemented on branch feat/f1-standalone-ui (worktree geofront-wt-f1), awaiting PM acceptance
 - mask-api trend_api.py (/trend/families, /trend/series: 12 template families, scope values checked + check_literal,
