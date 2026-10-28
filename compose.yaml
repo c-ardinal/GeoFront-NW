@@ -439,7 +439,7 @@ services:
   # ---- shared -------------------------------------------------------------------------------------
   prometheus:
     <<: *ops
-    image: prom/prometheus:v3.6.0@sha256:76947e7ef22f8a698fc638f706685909be425dbe09bd7a2cd7aca849f79b5f64
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -726,7 +726,7 @@ services:
 
   command-center:
     <<: *ops
-    image: nginx:1.29.2-alpine@sha256:61e01287e546aac28a3f56839c136b31f590273f3b41187a36f46f6a03bbfe22
+    image: nginx:1.31.0-alpine@sha256:2f07d83bf561b506400dc183b1b2003803e39efbd22451f848adaba14d28c7c7
     volumes:
       - ./command-center:/usr/share/nginx/html:ro
       - ./command-center/nginx.conf:/etc/nginx/conf.d/default.conf:ro
