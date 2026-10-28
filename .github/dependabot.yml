@@ -1,5 +1,5 @@
 # Update proposals (pull requests) for the pinned images and the workflow actions. Images stay pinned by tag + digest:
-# check linux/amd64 + linux/arm64 before merging (README 「更新」, scripts/arm64.sh).
+# check linux/amd64 + linux/arm64 before merging (docs/operations.md, scripts/arm64.sh).
 version: 2
 updates:
   - package-ecosystem: docker-compose

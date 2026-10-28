@@ -4,7 +4,7 @@
 # Alertmanager's silences must be the same afterwards. Source: the project `KEEP=1 scripts/e2e-fresh.sh auth` leaves.
 #   scripts/backup-restore.sh        Env: E2E_DIR; KEEP=1 leaves the restored project running; E2E_CONFIG=outside for
 #                                    the R1 layout (config in OBS_CONFIG_DIR = <tree>-config on both sides)
-# README 「バックアップ / 復元」 procedure: backup --include-env, stop, restore --with-config --yes, up -d.
+# docs/operations.md backup and restore procedure: backup --include-env, stop, restore --with-config --yes, up -d.
 set -u
 . "$(dirname "$0")/lib.sh"
 BASE="${E2E_DIR:-${TMPDIR:-/tmp}/obs-e2e}"
@@ -19,7 +19,7 @@ set -a; . "$SRC/e2e.env"; set +a
 rc=0
 AT=$(( $(date +%s) - 60 ))
 state --make-silence "h1 backup check" >/dev/null || die "silence"
-dc stop loki alertmanager >/dev/null 2>&1  # flush: Loki's WAL, Alertmanager's silences (README: stop for an exact copy)
+dc stop loki alertmanager >/dev/null 2>&1  # flush: Loki's WAL, Alertmanager's silences (stop for an exact copy)
 dc start loki alertmanager >/dev/null 2>&1
 wait_healthy 300 || die "source not healthy"
 before="$(state --at "$AT")" || die "state (source)"

@@ -1086,7 +1086,7 @@ def check_capture(m):
     rc = 0
     src = flow_source(m == "demo")
     if src is None:
-        print("キャプチャは無効です (OBS_CAPTURE=0。有効にするには README「パケット取込」)")
+        print("キャプチャは無効です (OBS_CAPTURE=0。有効にするには docs/capture.md)")
     elif src == "capture":
         st = cap.capture_status(CAPTURE_VOL)
         if st["state"] == "running":
@@ -1434,7 +1434,7 @@ def cmd_init(args):
     fix_owner(ENV_FILE, inv, inv.parent)
     print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)"
           + (f" — 設定ディレクトリ {env('OBS_CONFIG_DIR')}" if env("OBS_CONFIG_DIR") else
-             " — リポジトリ内 (従来の配置、git 管理外)。外に置くなら OBS_CONFIG_DIR (README「設定の置き場所」)")
+             " — リポジトリ内 (従来の配置、git 管理外)。外に置くなら OBS_CONFIG_DIR (docs/configuration.md)")
           + (f"。{', '.join(sorted(SECRETS_FROM_FILES))} は *_FILE から (.env には書きません)" if SECRETS_FROM_FILES else ""))
     if receivers is not None:
         write_atomic(receivers_path(), render_receivers(receivers))
@@ -1534,7 +1534,7 @@ def doctor_config_rows():
             rows.append(("旧配置の .env", dr.WARN, "リポジトリ内にも .env があります (使われません)", "移行を確かめてからリポジトリの .env を消す"))
     else:
         rows.append(("設定の場所", dr.WARN, "リポジトリ内 (従来の配置。git 管理外)",
-                     "外へ: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config (README「設定の置き場所」)"))
+                     "外へ: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config (docs/configuration.md)"))
     leak = env("OBS_DOCTOR_LEAK")  # scripts/doctor.sh runs scripts/leak-scan.sh on the host (git is not in this image)
     if leak:
         rows.append(("コミットしてはいけないデータ", dr.OK if leak == "OK" else dr.WARN, leak,

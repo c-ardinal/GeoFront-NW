@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update from an older version's data volumes (README 「更新」): the old version (default bb2f21d = P6) runs on the demo
+# Update from an older version's data volumes (docs/operations.md): the old version (default bb2f21d = P6) runs on the demo
 # profile in a throwaway project until it has data and a silence; then this tree takes over the same volumes with
 # `up -d --build --remove-orphans` and the old .env. Checks: tools check all OK, the old metrics / syslog / silence /
 # Grafana users unchanged at the same time, the retired grafana-guard container gone, new services (Authelia) up.

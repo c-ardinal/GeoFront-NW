@@ -1,5 +1,5 @@
 # OBS_ACCESS=auth: HTTPS from Caddy's own local CA (tls internal). Its root certificate is in the caddy-data volume
-# (/data/caddy/pki/authorities/local/root.crt; README: how to install it on the LAN devices). It is never installed into
+# (/data/caddy/pki/authorities/local/root.crt; docs/security.md: how to install it on the LAN devices). It is never installed into
 # this container's trust store. Plain HTTP arriving on the screens' port is answered with a redirect to HTTPS
 # (http_redirect); nothing is served over plain HTTP there.
 auto_https disable_redirects

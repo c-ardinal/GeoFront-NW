@@ -5,7 +5,7 @@ kinds: [rtx]
 # snmp_exporter modules for the `snmp` job (built into the snmp_exporter image: IF-MIB ifTable/ifXTable, SNMPv2-MIB
 # system). No YAMAHA private MIB is used.
 snmp_modules: [if_mib, system]
-# LLDP-MIB neighbours through the `lldp` job (snmp/lldp.yml). Unconfirmed on real RTX firmware (README).
+# LLDP-MIB neighbours through the `lldp` job (snmp/lldp.yml). Unconfirmed on real RTX firmware (docs/devices.md).
 lldp: true
 # a router: `tools init` asks for its WAN interface (wan_interface)
 wan: true
