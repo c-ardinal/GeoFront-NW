@@ -111,6 +111,9 @@ TOTP は任意で、既定では無効です。有効にするには `.env` に 
 
 ## Grafana
 
+Grafana は既定では動きません (`COMPOSE_PROFILES` に `grafana` を加えたときだけ動きます。[operations.md](operations.md))。
+動いていないとき、`/grafana/` は「有効になっていません」というページを返します。以下は Grafana を動かすときの扱いです。
+
 Grafana は IP / MAC を伏せずに表示するので、ログインありの構成で `/grafana/` を開けるのは admin だけです。
 Grafana の管理者 `admin` のパスワードを既定の値のままにしないでください。変えるには次を実行します。
 
@@ -128,6 +131,6 @@ Grafana は proxy の固定アドレスから来た利用者の情報だけを�
 
 次の画面は管理用で、元の値をそのまま表示します。
 
-- Grafana (`/grafana/`)。ログインありの構成では admin だけが開けます
+- Grafana (`/grafana/`、動かしたときだけ)。ログインありの構成では admin だけが開けます
 - Prometheus (http://127.0.0.1:9090、読み取り専用)。このホストからだけ開けます
 - `tools capture status` と `tools check` の出力
