@@ -52,14 +52,16 @@ copy_tree() {
   git -C "$ROOT" ls-files -z -co --exclude-standard | (cd "$ROOT" && tar --null -T - -cf -) | tar -C "$1" -xf -
 }
 
-# wait until every running service with a healthcheck is healthy and none is restarting / exited with an error
+# wait until every running service with a healthcheck is healthy (and loki ready) and none is restarting / exited with an error
 wait_healthy() {
   local timeout="${1:-600}" t0 bad states
   t0=$(date +%s)
   while :; do
     states="$(dc ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null)"
     bad="$(printf '%s\n' "$states" | awk -F'|' 'NF && !(($2 == "running" && ($3 == "healthy" || $3 == "")) || ($2 == "exited" && $4 == "0"))')"
-    [ -n "$states" ] && [ -z "$bad" ] && return 0
+    # loki has no healthcheck (distroless image): its /ready, asked from prometheus (busybox wget)
+    [ -n "$states" ] && [ -z "$bad" ] && { ! printf '%s\n' "$states" | grep -q '^loki|running|' ||
+      dc exec -T prometheus wget -qO /dev/null http://loki:3100/ready >/dev/null 2>&1; } && return 0
     if [ $(( $(date +%s) - t0 )) -ge "$timeout" ]; then
       log "not healthy after ${timeout}s:"; printf '%s\n' "$bad" >&2; return 1
     fi
