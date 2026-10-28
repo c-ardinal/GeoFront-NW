@@ -129,6 +129,9 @@ def trend_and_search(c):
     st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"q": word, **win}))
     h = (js(b) or {}).get("data") or {}
     check("ログ検索: 件数の棒グラフ", st == 200 and len(h.get("counts", [])) == 60 and sum(h["counts"]) > 0, f"{st} {sum(h.get('counts', []))} 件")
+    st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"from": f"{now - 930.5:.1f}", "to": f"{now:.0f}"}))
+    h = (js(b) or {}).get("data") or {}
+    check("ログ検索: 棒グラフ (端数の最後の棒も数える)", st == 200 and len(h.get("counts", [])) == 16 and sum(h["counts"]) > 0, f"{st} {h.get('counts', [])[-3:]}")
     for bad in ({"q": "(a+)+$", "regex": "1"}, {"q": "192.0.2.10"}, {"host": 'rtx1300"} |= "x'}, {"q": "a", "regex": "1", "query": "x"}):
         st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({**bad, **win}))
         check(f"ログ検索: 拒否 {str(bad)[:50]}", st == 400, st)

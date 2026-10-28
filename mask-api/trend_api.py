@@ -14,6 +14,7 @@ GET /trend/families -> the allow-list (names, units, scopes) for the screen.
 import json
 import math
 import re
+import threading
 import time
 import urllib.parse
 
@@ -26,6 +27,7 @@ SCRAPE_S = 30
 TOP_N = 8
 VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@~+\-]{0,127}")  # inventory names, ifName, tokens (192.0.2.x~...), AS64500
 CC_RE = re.compile(r"[A-Z]{2}|Unknown")
+SLOTS = threading.BoundedSemaphore(4)  # windows answered at once (each at most two range queries); more -> 429
 SNMP_UP = 'and on (instance) (up{job="snmp"} == 1)'
 FLOWS_UP = 'and on () (up{job="flows"} == 1)'
 
@@ -218,10 +220,14 @@ def handle(method, raw_path):
         req = parse(parts.query, time.time())
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "masked_query", "error": str(e)})
+    if not SLOTS.acquire(blocking=False):
+        return js(429, {"status": "error", "errorType": "busy", "error": "推移の問い合わせが混んでいます。少し待ってからもう一度"})
     try:
         return js(200, {"status": "success", "data": answer(*req)})
     except RuntimeError as e:
         return js(502, {"status": "error", "error": str(e)})
+    finally:
+        SLOTS.release()
 
 
 # ---- self-test (no services: reads are faked) -------------------------------------------------------------------

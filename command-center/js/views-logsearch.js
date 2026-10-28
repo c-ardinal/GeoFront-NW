@@ -83,15 +83,18 @@ export function logSearchView(init = {}) {
   const st = { preset: init.preset || 3600, from: 0, to: 0, zoom: [], entries: [], next: null, seq: 0, sel: null, ran: false, at: null };
   let s = {}, ctxRef = null, retention = 30 * 86400, range;
 
+  // the window and the filter of the running search (st.at, st.f): its next pages ask exactly the same, whatever the form
+  // says by then
   const query = (extra = {}) => {
-    const w = st.at;
+    const w = st.at, q = st.f;
     const p = { from: (w.from / 1000).toFixed(3), to: (w.to / 1000).toFixed(3), ...extra };
-    for (const k of ['host', 'severity', 'facility', 'q']) if (f[k]) p[k] = f[k];
-    if (f.q && f.regex) p.regex = '1';
+    for (const k of ['host', 'severity', 'facility', 'q']) if (q[k]) p[k] = q[k];
+    if (q.q && q.regex) p.regex = '1';
     return new URLSearchParams(p).toString();
   };
   async function search() {
     st.at = windowOf(st); // fixed for this search and its next pages (PLAYBACK: ends at the cursor now)
+    st.f = { ...f };
     st.entries = [];
     st.next = null;
     st.sel = null;

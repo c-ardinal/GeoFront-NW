@@ -194,16 +194,16 @@ def lines(req, get_page=None, page_size=None, budget_s=BUDGET_S):
     page_size = page_size or M.LOKI_MAX_LINES
     deadline = time.monotonic() + budget_s
     scan = M.Scan(req["selector"], req["start_ns"], req["end_ns"], "backward", get_page, page_size, deadline, M.PAGE_OVERLAP_NS)
-    hits, stopped = [], False
+    hits, stopped = [], None  # stopped: ts of the first line left unprocessed when the budget ran out mid-page
     for new in scan:
-        for st, ts, line in new:
+        for st, ts, line in sorted(new, key=lambda e: -e[1]):  # a page is grouped by stream: newest first across them
             if time.monotonic() > deadline:
-                stopped = True
+                stopped = ts
                 break
             masked = M.mask_line(st, line)
             if passes(req["rx"], masked):
                 hits.append((ts, M.mask_json(st), masked))
-        if stopped:
+        if stopped is not None:
             scan.partial.append("time budget used up")
             break
         if len(hits) >= req["limit"] and M.settled(hits, _Spec(req["limit"]), scan, M.PAGE_OVERLAP_NS):
@@ -217,7 +217,9 @@ def lines(req, get_page=None, page_size=None, budget_s=BUDGET_S):
         nxt = page[-1][0] + 1  # end exclusive: lines sharing the last instant come again (the screen drops repeats)
         if nxt >= req["end_ns"]:
             nxt = page[-1][0]  # one instant holds the whole page: step past it (ponytail: more lines of it are skipped)
-    elif scan.done and not stopped:
+    elif stopped is not None:
+        nxt = stopped + 1  # the rest of that page, from the first unprocessed line on, comes in the next page
+    elif scan.done:
         nxt = None
     else:
         nxt = scan.edge if scan.edge is not None and scan.edge < req["end_ns"] else None
@@ -234,23 +236,41 @@ def bucket_step(span):
     return max(60, math.ceil(span / BUCKETS / 60) * 60)
 
 
-def hist_loki(req, step):
-    """lines per bucket from Loki itself (no keyword): bucket i = (t0 + i*step, t0 + (i+1)*step]."""
-    t0 = req["from"]
-    n = math.ceil((req["to"] - t0) / step)
-    q = f"sum(count_over_time({req['selector']}[{step}s]))"
-    url = M.LOKI + "/loki/api/v1/query_range?" + urllib.parse.urlencode(
-        {"query": q, "start": str(int((t0 + step) * 1e9)), "end": str(int((t0 + n * step) * 1e9)), "step": f"{step}s"})
-    status, body, _ = M.fetch(url, timeout=BUDGET_S)
+def loki_read(path, params, timeout=BUDGET_S):
+    status, body, _ = M.fetch(M.LOKI + path + "?" + urllib.parse.urlencode(params), timeout=timeout)
     obj = json.loads(body)
     if status != 200 or obj.get("status") != "success":
         raise RuntimeError(f"HTTP {status}: {obj.get('error', '')}"[:200])
+    return obj["data"]["result"]
+
+
+def hist_loki(req, step, read=loki_read):
+    """lines per bucket from Loki itself (no keyword): bucket i = (t0 + i*step, min(t0 + (i+1)*step, to)]; the last
+    bucket is shorter when the window is not a whole number of steps (it never counts past `to`)."""
+    t0, t1 = req["from"], req["to"]
+    n = math.ceil((t1 - t0) / step)
+    full = math.floor((t1 - t0) / step)
     counts = [0] * n
-    for r in obj["data"]["result"]:
-        for t, v in r["values"]:
-            i = round((float(t) - t0) / step) - 1
-            if 0 <= i < n:
-                counts[i] += int(float(v))
+    deadline = time.monotonic() + BUDGET_S  # both queries together within the budget
+
+    def left():
+        s = deadline - time.monotonic()
+        if s < 0.5:
+            raise TimeoutError("time budget used up")
+        return s
+    if full:
+        q = f"sum(count_over_time({req['selector']}[{step}s]))"
+        for r in read("/loki/api/v1/query_range", {"query": q, "start": str(int((t0 + step) * 1e9)), "end": str(int((t0 + full * step) * 1e9)),
+                                                   "step": f"{step}s"}, left()):
+            for t, v in r["values"]:
+                i = round((float(t) - t0) / step) - 1
+                if 0 <= i < full:
+                    counts[i] += int(float(v))
+    rest_ms = round((t1 - (t0 + full * step)) * 1000)
+    if n > full and rest_ms >= 1:
+        q = f"sum(count_over_time({req['selector']}[{rest_ms}ms]))"
+        for r in read("/loki/api/v1/query", {"query": q, "time": str(int(t1 * 1e9))}, left()):
+            counts[n - 1] += int(float(r["value"][1]))
     return counts, []
 
 
@@ -264,8 +284,9 @@ def hist_scan(req, step, get_page=None, page_size=None, budget_s=BUDGET_S):
     deadline = time.monotonic() + budget_s
     scan = M.Scan(req["selector"], req["start_ns"], int(req["to"] * 1e9), "backward", get_page, page_size, deadline, M.PAGE_OVERLAP_NS)
     for new in scan:
-        for st, ts, line in new:
+        for st, ts, line in sorted(new, key=lambda e: -e[1]):
             if time.monotonic() > deadline:
+                scan.edge = ts  # counted down to here
                 break
             if passes(req["rx"], M.mask_line(st, line)):
                 i = min(n - 1, max(0, math.ceil((ts / 1e9 - t0) / step) - 1))
@@ -382,6 +403,38 @@ def selftest():
     # histogram with a keyword: 60 buckets of one minute, every 30 s line counted once
     h = hist(parse(f"q=lan2&{base}", now), get_page=page, page_size=40)
     assert h["step"] == 60 and len(h["counts"]) == 60 and sum(h["counts"]) == 100 and not h["partial"], h
+    # without a keyword (Loki counts): a window of 15.5 min -> 15 full buckets + one of 30 s that ends at `to`
+    calls = []
+
+    def read(path, params, timeout):
+        assert 0 < timeout <= BUDGET_S
+        calls.append((path, params))
+        if path.endswith("query_range"):
+            return [{"metric": {}, "values": [[str(int(params["start"]) / 1e9 + 60 * k), "2"] for k in range(15)]}]
+        return [{"metric": {}, "value": [params["time"], "5"]}]
+    r15 = parse(f"from={now - 930}&to={now}", now)
+    counts, _ = hist_loki(r15, bucket_step(930), read)
+    assert len(counts) == 16 and counts[:15] == [2] * 15 and counts[15] == 5, counts
+    assert int(calls[0][1]["end"]) <= int((now - 30) * 1e9) and calls[1][1]["time"] == str(int(now * 1e9)) and "[30000ms]" in calls[1][1]["query"], calls
+    calls.clear()
+    assert hist_loki(parse(f"from={now - 60.5}&to={now}", now), 60, read)[0][1] == 5 and "[500ms]" in calls[1][1]["query"]  # a fraction counts
+    # a page is grouped by stream: processed newest first across streams; a budget cut mid-page continues from the
+    # first unprocessed line (nothing older in that page is skipped)
+    two = [({"job": "syslog", "host": h}, t0n + i * 10**9, f"x {h} {i}") for h in ("a", "b") for i in range(10)]
+    t = {"n": 0}
+
+    def clock():
+        t["n"] += 1
+        return 0.0 if t["n"] < 8 else 99.0
+    real, time.monotonic = time.monotonic, clock
+    try:
+        cut = lines(parse(f"q=x&{base}", now), get_page=lambda s, a, b, lim, to, d="backward": [e for e in two if a <= e[1] < b], page_size=100, budget_s=50)
+    finally:
+        time.monotonic = real
+    done = {(int(e["ts"]), e["host"]) for e in cut["entries"]}
+    nb = int(cut["next_before"])
+    assert cut["partial"] == ["time budget used up"] and done and nb - 1 <= min(t for t, _ in done), (nb, done)
+    assert all(e[1] < nb for e in two if (e[1], e[0]["host"]) not in done), "an unprocessed line would be skipped"
     # a slow regex can not hold the request: the budget is checked between lines
     slow = parse(f"q={q('a.*b')}&regex=1&{base}", now)
     long_lines = [({"job": "syslog", "host": "x"}, t0n + i, "a" * 5000) for i in range(2000)]
