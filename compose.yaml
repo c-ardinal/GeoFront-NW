@@ -527,7 +527,7 @@ services:
   grafana:
     <<: *ops
     scale: ${OBS_GRAFANA:-1}
-    image: grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     # Without the screens' login (127.0.0.1): anonymous Viewer. With it (always on a LAN exposure, or OBS_AUTH=1): only the
     # role admin reaches Grafana (it shows raw, unmasked IP / MAC values), as the same user through the proxy's auth proxy
     # headers (X-Obs-User, X-Obs-Grafana-Role Admin); no anonymous access, no own login form, no basic auth. The headers
