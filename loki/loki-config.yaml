@@ -1,0 +1,77 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# SYSLOG retention: LOKI_RETENTION in .env (default 720h = 30 days, spec); Loki runs with -config.expand-env=true.
+# The compactor applies limits_config.retention_period.
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+limits_config:
+  retention_period: ${LOKI_RETENTION:-720h}
+
+# ---- small-host tuning (Raspberry Pi 4): a few syslog lines per second from a handful of devices ----
+# queries: the screens ask a few small ranges per poll; fewer parallel workers, smaller caches
+querier:
+  max_concurrent: 2
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 32
+chunk_store_config:
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 32
+ingester:
+  wal:
+    # replay is bounded by what this host can hold; the WAL itself stays on (no log loss on a restart)
+    replay_memory_ceiling: 128MB
+    checkpoint_duration: 15m
+  # low volume: fewer, fuller chunks (less flushing, fewer index entries)
+  chunk_idle_period: 1h
+  max_chunk_age: 2h
+  chunk_target_size: 1048576
+  lifecycler:
+    heartbeat_period: 30s
+frontend:
+  max_outstanding_per_tenant: 256
+query_scheduler:
+  max_outstanding_requests_per_tenant: 256
+ruler:
+  # no Loki alert rules are used (alerts come from Prometheus)
+  evaluation_interval: 10m
+  poll_interval: 10m
+
+analytics:
+  reporting_enabled: false

@@ -1,0 +1,313 @@
+/* Modal / drawer content: summary tiles, charts and table / card lists.
+   Every rule is scoped to #modal / #drawer (nothing here may reach the wallboard), and own classes carry a vw- prefix
+   where a plain name already exists in style.css (.col = wallboard column, .seg = segmented control).
+   Reuses the style.css tokens (spacing --s1..--s4, --row, --st, colours) so every theme supplies its own palette.
+   Order inside a view: tiles -> charts -> list. Colour is never the only carrier: tiles print icon + text,
+   charts have text alternatives (aria-label / titles) and legends. */
+
+/* ---- status text colours (tiles, kv values) ---- */
+:is(#modal, #drawer) .st-text-ok { color: var(--ok); }
+:is(#modal, #drawer) .st-text-warn { color: var(--warn); }
+:is(#modal, #drawer) .st-text-crit { color: var(--crit); }
+:is(#modal, #drawer) .st-text-unknown { color: var(--unknown); }
+:is(#modal, #drawer) .st-text-info { color: var(--accent); }
+:is(#modal, #drawer) .st-text-none { color: var(--text-2); }
+
+/* ---- stat tiles ---- */
+:is(#modal, #drawer) .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s2); margin: var(--s2) 0 var(--s3); }
+#drawer .tiles { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+:is(#modal, #drawer) .chart-wrap[hidden] { display: none; }
+:is(#modal, #drawer) .tile { position: relative; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  padding: var(--s2) var(--s3); border: 1px solid var(--frame); border-left: 3px solid var(--frame); }
+:is(#modal, #drawer) .tile-ok { border-left-color: var(--ok); }
+:is(#modal, #drawer) .tile-warn { border-left-color: var(--warn); background: var(--warn-tint); }
+:is(#modal, #drawer) .tile-crit { border-left-color: var(--crit); background: var(--crit-tint); }
+:is(#modal, #drawer) .tile-unknown { border-left-color: var(--unknown); border-left-style: dashed; }
+:is(#modal, #drawer) .tile-info { border-left-color: var(--accent); }
+:is(#modal, #drawer) .tile-l { font-size: var(--fs-s); color: var(--text-2); letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tile-v { font: 600 22px/1.2 var(--sans); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tile-st { font: 600 var(--fs-s) var(--sans); letter-spacing: 0.02em; overflow-wrap: anywhere; }
+:is(#modal, #drawer) .tile-s { font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .tile .spark { height: 28px; margin-top: var(--s1); }
+[data-theme="film"] :is(#modal, #drawer) .tile-v { font-family: var(--display); font-weight: 700; font-size: 24px; letter-spacing: 0.02em; }
+[data-theme="film"] :is(#modal, #drawer) .tile { border-left-width: 4px; }
+
+/* ---- SVG sparklines / small multiples ---- */
+:is(#modal, #drawer) .spark { display: block; width: 100%; height: 36px; overflow: visible; }
+:is(#modal, #drawer) .spark path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+:is(#modal, #drawer) .sp-1 { stroke: var(--spark-1); }
+:is(#modal, #drawer) .sp-2 { stroke: var(--spark-2); }
+:is(#modal, #drawer) .multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--s2); }
+#drawer .multiples { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+:is(#modal, #drawer) .mult { position: relative; min-width: 0; padding: var(--s2); border: 1px solid var(--frame); display: flex; flex-direction: column; gap: var(--s1); }
+:is(#modal, #drawer) .mult .spark { height: 44px; border-bottom: 1px solid var(--track); }
+:is(#modal, #drawer) .mult-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+:is(#modal, #drawer) .mult-h .st { flex: 0 0 auto; }
+:is(#modal, #drawer) .mult-t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .mult-vals { display: flex; flex-wrap: wrap; gap: 0 var(--s3); font-size: var(--fs-s); color: var(--text); }
+:is(#modal, #drawer) .mult-nd { position: absolute; left: var(--s2); bottom: var(--s3); font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) :is(.mult-sel, .card-sel) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* ---- two charts side by side when there is room ---- */
+:is(#modal, #drawer) .v-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); column-gap: var(--s4); }
+
+/* ---- horizontal bar ranking (label | bar | value | share) ---- */
+:is(#modal, #drawer) .rank { --rank-l: minmax(96px, 32%); }
+#drawer .rank { --rank-l: minmax(96px, 40%); }
+:is(#modal, #drawer) .rank-row { display: grid; grid-template-columns: var(--rank-l) 1fr 64px 72px; column-gap: var(--s2); align-items: center; min-height: var(--row); padding: 0 var(--s1); }
+:is(#modal, #drawer) .rank-head { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .rank-head :is(.rank-v, .rank-x) { font-size: var(--fs-s); font-weight: 400; color: var(--text-2); }
+:is(#modal, #drawer) .rank-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) :is(.rank-v, .rank-x) { text-align: right; white-space: nowrap; }
+:is(#modal, #drawer) .rank-v { font-weight: 600; }
+:is(#modal, #drawer) .rank-x { color: var(--text-2); font-size: var(--fs-s); }
+:is(#modal, #drawer) :is(.rank-bar, .stack) { display: flex; height: 10px; background: var(--track); overflow: hidden; }
+:is(#modal, #drawer) :is(.rank-bar, .stack) .vw-seg { height: 100%; flex: 0 0 auto; }
+:is(#modal, #drawer) :is(.rank-bar, .stack) .vw-seg + .vw-seg { box-shadow: inset 1px 0 0 var(--panel); } /* 1px separator between stacked parts */
+:is(#modal, #drawer) :is(.seg-1, .sw-1) { background: var(--spark-1); }
+:is(#modal, #drawer) :is(.seg-2, .sw-2) { background: var(--spark-2); }
+:is(#modal, #drawer) .rank-sub .rank-l { color: var(--text-2); }
+:is(#modal, #drawer) .rank-sub .vw-seg { background: var(--text-2); }
+:is(#modal, #drawer) .rank-unknown .rank-l { color: var(--unknown); }
+:is(#modal, #drawer) :is(.rank-unknown .vw-seg, .sw-unknown) { background: repeating-linear-gradient(135deg, var(--unknown) 0 4px, #6c7680 4px 8px); }
+:is(#modal, #drawer) :is(.rank-ok .vw-seg, .sw-ok) { background: var(--ok); }
+:is(#modal, #drawer) :is(.rank-crit .vw-seg, .sw-crit) { background: var(--crit); }
+:is(#modal, #drawer) .rank-crit .rank-l { color: var(--crit); }
+
+/* severity palette (segments, columns and legend swatches) */
+:is(#modal, #drawer) .sv-emergency { background: repeating-linear-gradient(90deg, var(--crit) 0 2px, var(--crit-tint) 2px 4px); }
+:is(#modal, #drawer) .sv-alert { background: repeating-linear-gradient(45deg, var(--crit) 0 3px, var(--crit-tint) 3px 6px); }
+:is(#modal, #drawer) .sv-critical { background: var(--crit); }
+:is(#modal, #drawer) .sv-error { background: repeating-linear-gradient(135deg, var(--crit) 0 3px, var(--crit-tint) 3px 6px); }
+:is(#modal, #drawer) .sv-warning { background: var(--warn); }
+:is(#modal, #drawer) .sv-notice { background: var(--ok); }
+:is(#modal, #drawer) .sv-informational { background: var(--text-2); }
+:is(#modal, #drawer) .sv-debug { background: repeating-linear-gradient(135deg, var(--text-2) 0 2px, transparent 2px 5px); outline: 1px solid var(--text-2); outline-offset: -1px; }
+:is(#modal, #drawer) .sv-other { background: repeating-linear-gradient(90deg, var(--unknown) 0 2px, transparent 2px 4px); }
+
+/* legend swatches for HTML charts */
+:is(#modal, #drawer) .legend-row .lg i.sw { width: 12px; height: 12px; vertical-align: -1px; }
+
+/* ---- timeline (alerts) and shared time axis ---- */
+:is(#modal, #drawer) .tl-row { display: grid; grid-template-columns: minmax(140px, 32%) 1fr; column-gap: var(--s2); align-items: center; min-height: var(--row); padding: 0 var(--s1); }
+:is(#modal, #drawer) .tl-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .tl-track { position: relative; height: 14px; background: var(--track); }
+:is(#modal, #drawer) .tl-span { position: absolute; top: 0; bottom: 0; }
+:is(#modal, #drawer) .tl-crit { background: var(--crit); }
+:is(#modal, #drawer) .tl-warn { background: var(--warn); }
+:is(#modal, #drawer) .tl-info { background: var(--accent); }
+:is(#modal, #drawer) .tl-pending { background: repeating-linear-gradient(135deg, var(--text-2) 0 3px, transparent 3px 6px); outline: 1px solid var(--text-2); outline-offset: -1px; }
+:is(#modal, #drawer) .tl-axis { position: relative; height: 18px; font-size: var(--fs-s); color: var(--text-2); border-top: 1px solid var(--frame); }
+:is(#modal, #drawer) .tl-axis span { position: absolute; top: 2px; transform: translateX(-50%); white-space: nowrap; }
+:is(#modal, #drawer) .tl-axis span:first-child { transform: none; }
+:is(#modal, #drawer) .tl-axis span:last-child { transform: translateX(-100%); }
+
+/* ---- stacked columns over time (syslog volume) ---- */
+:is(#modal, #drawer) .cols-chart { margin: var(--s1) 0 var(--s2); }
+:is(#modal, #drawer) .cols-y { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .cols { position: relative; display: flex; align-items: stretch; gap: 1px; height: 120px; border-bottom: 1px solid var(--frame);
+  background: linear-gradient(var(--track), var(--track)) 0 50% / 100% 1px no-repeat; }
+#drawer .cols { height: 96px; }
+:is(#modal, #drawer) .vw-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column-reverse; }
+:is(#modal, #drawer) .vw-col .vw-seg { flex: 0 0 auto; width: 100%; }
+:is(#modal, #drawer) .vw-col:hover { background: var(--hover); }
+:is(#modal, #drawer) .cols-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); z-index: 1; pointer-events: none; }
+:is(#modal, #drawer) .cols-chart .legend-row { margin-top: var(--s1); }
+
+/* ---- table / card list ---- */
+:is(#modal, #drawer) :is(.dv > [hidden], .dv-sort[hidden]) { display: none !important; }
+:is(#modal, #drawer) .v-h .dv-toggle { margin-left: auto; }
+:is(#modal, #drawer) .v-h .seg + .seg { margin-left: var(--s2); }
+:is(#modal, #drawer) .dv-sort { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+:is(#modal, #drawer) .fld-inline { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .fld-inline select { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 2px var(--s2); margin-left: var(--s1); }
+:is(#modal, #drawer) .fld-inline select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+:is(#modal, #drawer) .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: var(--s2); }
+:is(#modal, #drawer) .card { min-width: 0; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid var(--frame); background: var(--panel); }
+:is(#modal, #drawer) .card-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+:is(#modal, #drawer) .card-h .st { flex: 0 0 auto; }
+:is(#modal, #drawer) .card-t { flex: 1 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .card-sub { flex: 0 10 auto; max-width: 55%; min-width: 0; font-size: var(--fs-s); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#modal, #drawer) .card-f { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); }
+:is(#modal, #drawer) .card-f dt { font-size: var(--fs-s); color: var(--text-2); }
+:is(#modal, #drawer) .card-f dd { font-weight: 600; color: var(--text); }
+:is(#modal, #drawer) .card-bar { height: 6px; }
+:is(#modal, #drawer) .card-note { font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .card-unknown { border-style: dashed; }
+:is(#modal, #drawer) .card-pending { border-style: dashed; border-color: var(--warn); }
+
+/* hover for every new clickable item (focus outline comes from style.css .clickable:focus-visible) */
+:is(#modal, #drawer) :is(.rank-row, .tl-row, .card, .mult).clickable:hover { background: var(--hover); }
+:is(#modal, #drawer) :is(.card, .mult).clickable:hover { border-color: var(--accent); }
+
+/* ---- STALE: figures fade to secondary text, chart marks lose their colour ---- */
+:is(#modal, #drawer).stale :is(.tile-v, .tile-st, .rank-v, .card dd, .mult-vals, .tl-l, .rank-l) { color: var(--text-2) !important; }
+:is(#modal, #drawer).stale :is(.rank-bar, .stack, .spark, .cols, .tl-track, .card-bar, .chart) { filter: grayscale(1); opacity: 0.6; }
+:is(#modal, #drawer).stale .tile { background: transparent; border-left-color: var(--text-2); }
+/* one block of a view STALE on its own (e.g. syslog volume after a failed refresh of the same filter) */
+:is(#modal, #drawer) .vw-stale :is(.tile-v, .tile-st) { color: var(--text-2) !important; }
+:is(#modal, #drawer) .vw-stale :is(.cols, .stack) { filter: grayscale(1); opacity: 0.6; }
+:is(#modal, #drawer) .vw-stale .tile { background: transparent; border-left-color: var(--text-2); border-style: dashed; }
+:is(#modal, #drawer) .v-h .view-stale[hidden] { display: none; }
+
+/* ---- alert notification: ACK / silence controls (drawer) and the silence list (alerts modal) ---- */
+:is(#modal, #drawer) .ops { margin: var(--s2) 0; }
+:is(#modal, #drawer) .ops-btn { min-height: 32px; padding: 2px var(--s3); font-size: var(--fs); }
+:is(#modal, #drawer) .ops-btn:disabled { border-style: dashed; }
+:is(#modal, #drawer) .ops input[type="text"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); min-width: 180px; }
+:is(#modal, #drawer) .ops :is(select, input):disabled { color: var(--text-2); border-style: dashed; }
+:is(#modal, #drawer) .ops-note { color: var(--text-2); font-size: var(--fs-s); margin: var(--s1) 0; overflow-wrap: anywhere; }
+:is(#modal, #drawer) .ops-note[hidden], :is(#modal, #drawer) .ops-status:empty { display: none; }
+:is(#modal, #drawer) .sil-list { display: flex; flex-direction: column; margin-top: var(--s2); }
+:is(#modal, #drawer) .sil-row { display: grid; grid-template-columns: var(--st) minmax(0, 1fr) auto; column-gap: var(--s2); row-gap: var(--s1); align-items: center;
+  padding: var(--s1) 0; border-bottom: 1px solid var(--track); }
+:is(#modal, #drawer) .sil-m { font-family: var(--mono); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .sil-sub { color: var(--text-2); font-size: var(--fs-s); overflow-wrap: anywhere; }
+:is(#modal, #drawer) .sil-btns { display: flex; flex-wrap: wrap; gap: var(--s1); justify-content: end; }
+:is(#modal, #drawer) .nt-msg-wrap[hidden] { display: none; }
+:is(#modal, #drawer) .nt-msg { font: var(--fs-s)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+  background: var(--bg); border: 1px solid var(--frame); padding: var(--s2) var(--s3); margin: 0 0 var(--s2); }
+
+/* ---- touch widths (tablet / phone, below the wallboard tier): every control in a view is a >= 44 x 44 px target ---- */
+@media (max-width: 1279px) {
+  :is(#modal, #drawer) :is(.ops-btn, .ops select, .ops input[type="text"]) { min-height: 44px; min-width: 44px; }
+  :is(#modal, #drawer) :is(.seg-btn, .link-btn, .th-btn, .cell-btn, .fld-inline select, .filters select, .filters input[type="search"]) {
+    min-height: 44px; min-width: 44px;
+  }
+  :is(#modal, #drawer) .cell-btn { display: inline-flex; align-items: center; }
+  :is(#modal, #drawer) .fld.chk { min-height: 44px; }
+  :is(#modal, #drawer) .fld.chk input { width: 20px; height: 20px; }
+  :is(#modal, #drawer) :is(.rank-row, .tl-row, .link-list li, .log).clickable { min-height: 44px; }
+  :is(#modal, #drawer) .link-list li.clickable { line-height: 44px; }
+  :is(#modal, #drawer) .v-logs .log.clickable { align-items: center; }
+}
+
+/* ---- narrow widths (drawer as bottom sheet / full-screen modal) ---- */
+@media (max-width: 767px) {
+  :is(#modal, #drawer) .sil-row { grid-template-columns: var(--st) minmax(0, 1fr); }
+  :is(#modal, #drawer) .sil-btns { grid-column: 1 / -1; justify-content: start; }
+  :is(#modal, #drawer) .ops input[type="text"] { min-width: 0; width: 100%; }
+  :is(#modal, #drawer) .tiles, #drawer .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :is(#modal, #drawer) .tile-v { font-size: 18px; }
+  :is(#modal, #drawer) .rank, #drawer .rank { --rank-l: minmax(80px, 38%); }
+  :is(#modal, #drawer) .rank-row { grid-template-columns: var(--rank-l) 1fr 56px 56px; column-gap: var(--s1); }
+  :is(#modal, #drawer) .tl-row { grid-template-columns: minmax(96px, 36%) 1fr; }
+  :is(#modal, #drawer) .cards { grid-template-columns: 1fr; }
+  :is(#modal, #drawer) .multiples, #drawer .multiples { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+
+/* ---- packet analysis modal (views-pcap.js) ----
+   toolbar (file / upload / display filter / status in a fixed-width slot) -> message line (height reserved, so an
+   error never moves the layout) -> tabs -> packets: virtual list | detail tree over hex, or a statistics table.
+   Masked bytes ("xx" / "·") are dimmed on the track colour; the selected field and its bytes share the accent. */
+#modal .pa { display: flex; flex-direction: column; gap: var(--s2); }
+#modal .pa-bar { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s2) var(--s3); }
+#modal .pa-bar :is(select, input[type="text"]) { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); height: 30px; }
+#modal .pa-bar input[type="text"] { font-family: var(--mono); width: 100%; }
+#modal .pa-bar input[aria-invalid="true"] { border-color: var(--crit); }
+#modal .pa-bar :is(select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pa-file select { width: 320px; max-width: 100%; }
+#modal .pa-filter { display: flex; align-items: end; gap: var(--s1); flex: 1 1 420px; min-width: 0; }
+#modal .pa-filter .fld { flex: 1; min-width: 0; }
+#modal .pa-bar .ops-btn { height: 30px; }
+#modal .pa-status { flex: 0 0 auto; width: 24ch; align-self: center; text-align: right; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#modal .pa-msg { min-height: 1.4em; font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+#modal .pa-msg:is(.err, .err-filter) { color: var(--crit); }
+#modal .pa-msg.warn, #modal .pa-warn { color: var(--warn); }
+#modal .pa-ctx { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); min-height: 1.3em; font-size: var(--fs-s); color: var(--text-2); }
+#modal .pa-ctx span:empty { display: none; }
+#modal .pa-tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--frame); }
+#modal .pa-tabs .seg-btn { padding: 3px var(--s3); }
+#modal .pa-tabs .seg-btn[aria-selected="true"] { color: var(--text); border-color: var(--accent); background: var(--hover); }
+#modal .pa-pk[hidden], #modal .pa-stats[hidden] { display: none; }
+#modal .pa-pk { display: grid; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); gap: var(--s3); height: min(600px, calc(100dvh - 330px)); min-height: 320px; }
+#modal .pa-lw { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--frame); }
+#modal .pa-list { --pa-row: 24px; position: relative; flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--frame) transparent; }
+#modal .pa-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pa-spacer { position: relative; }
+#modal .pa-row { display: grid; grid-template-columns: 56px 76px minmax(0, 150px) minmax(0, 150px) 64px 48px minmax(0, 1fr); column-gap: var(--s2); align-items: center;
+  height: 24px; padding: 0 var(--s2); font: var(--fs-s)/1 var(--mono); white-space: nowrap; }
+#modal .pa-row span { overflow: hidden; text-overflow: ellipsis; }
+#modal .pa-row .n { text-align: right; }
+#modal .pa-head { flex: 0 0 auto; font-family: var(--sans); color: var(--text-2); border-bottom: 1px solid var(--frame); }
+#modal .pa-spacer .pa-row { position: absolute; left: 0; right: 0; cursor: pointer; color: var(--text); }
+#modal .pa-spacer .pa-row:hover { background: var(--hover); }
+#modal .pa-spacer .pa-row.sel { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
+#modal .pa-p { color: var(--accent); }
+#modal .pa-det { display: grid; grid-template-rows: minmax(0, 3fr) minmax(0, 2fr); gap: var(--s2); min-height: 0; }
+#modal :is(.pa-tree, .pa-hex) { min-height: 0; overflow: auto; border: 1px solid var(--frame); padding: var(--s1) var(--s2); scrollbar-width: thin; scrollbar-color: var(--frame) transparent; }
+#modal .pt { font: var(--fs-s)/1.6 var(--mono); }
+#modal .pt-node .pt-node { margin-left: 14px; }
+#modal :is(.pt-s, .pt-leaf) { cursor: pointer; white-space: nowrap; }
+#modal .pt-s::marker { color: var(--accent); }
+#modal :is(.pt-s, .pt-leaf):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .pt-sel { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+#modal .pt-f { margin-left: var(--s2); padding: 0 var(--s1); font-size: 12px; }
+#modal .hx { font: var(--fs-s)/1.6 var(--mono); cursor: pointer; }
+#modal .hx-line { display: flex; gap: var(--s3); white-space: pre; }
+#modal .hx-o { color: var(--text-2); }
+#modal .hx-b { display: inline-block; width: 2ch; margin-right: 0.6ch; }
+#modal .hx-m { color: var(--text-2); background: var(--track); }
+#modal .hx-sel { color: var(--bg); background: var(--accent); }
+#modal .pa-stats { min-height: 360px; }
+#modal .pa-tbl { max-height: min(560px, calc(100dvh - 330px)); overflow: auto; }
+#modal .pa-phs td:first-child { white-space: pre; font-family: var(--mono); }
+#modal .pa-names { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: var(--s3); }
+#modal :is(.pa-foot, .pa-note) { font-size: var(--fs-s); color: var(--text-2); }
+#modal .v-h .link-btn + .pa-sub { margin-left: var(--s2); }
+#modal.stale .pa-spacer .pa-row { color: var(--text-2); }
+
+@media (max-width: 1279px) {
+  #modal .pa-bar :is(select, input[type="text"]), #modal .pa-bar .ops-btn, #modal .pa-tabs .seg-btn, #modal .pt-f { min-height: 44px; min-width: 44px; }
+  #modal .pa-list { --pa-row: 44px; }
+  #modal .pa-spacer .pa-row { height: 44px; }
+  #modal .pt-leaf { min-height: 44px; display: flex; align-items: center; gap: var(--s1); }
+  #modal .pt-s { line-height: 44px; }
+}
+@media (max-width: 767px) {
+  #modal .pa-pk { grid-template-columns: 1fr; height: auto; }
+  #modal .pa-lw { height: 55dvh; }
+  #modal .pa-det { grid-template-rows: auto auto; }
+  #modal .pa-tree { max-height: 60dvh; }
+  #modal .pa-hex { max-height: 45dvh; }
+  #modal .pa-row { grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) 52px minmax(0, 1fr); }
+  #modal .pa-row > :nth-child(2), #modal .pa-row > :nth-child(6) { display: none; }
+  #modal .pa-file select, #modal .pa-filter { width: 100%; flex-basis: 100%; }
+  #modal .pa-status { width: auto; flex: 1; text-align: left; }
+}
+
+/* ---- 原因候補 (correlate.js): the notice is always shown; every item = time, delta, kind and relatedness in fixed-width
+   slots, then the text (wraps), the reasons and the three ways on (detail / analysis / evidence) ---- */
+#drawer .cr-notice { margin: var(--s2) 0; padding: var(--s2) var(--s3); color: var(--text); background: var(--warn-tint); border-left: 3px solid var(--warn); }
+#drawer .cr-ctl { margin-bottom: var(--s2); }
+#drawer .cr-ctl input[type="datetime-local"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); color-scheme: dark; }
+#drawer .cr-ctl input:focus-visible, #drawer .cr-rules summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#drawer .cr-status { align-self: center; min-width: 8em; font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-rules { margin: var(--s1) 0 var(--s2); font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-rules summary { cursor: pointer; color: var(--accent); }
+#drawer .cr-rules ul { margin: var(--s1) 0 0 var(--s4); list-style: disc; }
+#drawer .cr-partial:empty { display: none; }
+#drawer .cr-partial { color: var(--warn); }
+#drawer .cr-item { padding: var(--s2) 0; border-bottom: 1px solid var(--track); display: flex; flex-direction: column; gap: 2px; }
+#drawer .cr-item.rel-3 { box-shadow: inset 3px 0 0 var(--warn); padding-left: var(--s2); }
+#drawer .cr-item.rel-2 { box-shadow: inset 3px 0 0 var(--accent); padding-left: var(--s2); }
+#drawer .cr-h { display: flex; align-items: center; gap: var(--s2); }
+#drawer .cr-t { width: 8ch; font-variant-numeric: tabular-nums; }
+#drawer .cr-dt { width: 8ch; text-align: right; color: var(--text-2); font-size: var(--fs-s); font-variant-numeric: tabular-nums; }
+#drawer .cr-h .st { flex: none; }
+#drawer .cr-rel { flex: none; width: 5.6em; text-align: center; font: 600 var(--fs-s)/18px var(--sans); border: 1px solid var(--frame); color: var(--text-2); }
+#drawer .cr-rel.rel-hi { color: var(--warn); border-color: var(--warn); }
+#drawer .cr-rel.rel-mid { color: var(--accent); border-color: var(--accent); }
+#drawer .cr-title { overflow-wrap: anywhere; }
+#drawer .cr-title.mono { font: var(--fs-s)/1.4 var(--mono); }
+#drawer .cr-why { font-size: var(--fs-s); color: var(--text-2); }
+#drawer .cr-acts { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: 2px; }
+#drawer.stale .cr-item :is(.cr-title, .cr-t) { color: var(--text-2); }
+[data-theme="film"] #drawer :is(.cr-rel, .cr-t) { font-family: var(--display); }
+@media (max-width: 1279px) {
+  #drawer .cr-ctl input[type="datetime-local"], #drawer .cr-rules summary { min-height: 44px; }
+  #drawer .cr-rules summary { display: flex; align-items: center; }
+}
+@media (max-width: 767px) {
+  #drawer .cr-h { flex-wrap: wrap; }
+}

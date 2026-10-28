@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# GeoFront-NW: `docker compose` with the site configuration kept outside the repository. Use it in place of
+# `docker compose` (same arguments):  ./geofront up -d --build | ./geofront run --rm tools init | ./geofront ps
+#
+#   OBS_CONFIG_DIR   the configuration directory (.env, inventory/devices.yaml, alerting/receivers.yaml, backups/).
+#                    Unset: this repository when it has a .env (the legacy layout), else ~/.config/geofront
+#                    ($XDG_CONFIG_HOME/geofront). Created (mode 700) when missing. Use an absolute path.
+#   --env-file F     given explicitly (e.g. testbed/testbed.env): that file decides, project name included; no config
+#                    directory is chosen for it unless OBS_CONFIG_DIR is set
+#   <NAME>_FILE      a secret read from a file instead of .env (in the environment or in .env), for GF_ADMIN_PASSWORD,
+#                    SNMP_V3_AUTH_PASS, SNMP_V3_PRIV_PASS, SNMP_COMMUNITY, SMTP_PASSWORD, SLACK_WEBHOOK_URL,
+#                    DISCORD_WEBHOOK_URL, LINE_CHANNEL_ACCESS_TOKEN, WEBHOOK_URL, WEBHOOK_BEARER_TOKEN,
+#                    OBS_AUTH_SESSION_SECRET, OBS_AUTH_STORAGE_KEY, OBS_AUTH_PROXY_KEY (tools init keeps them out of .env)
+#   COMPOSE_PROJECT_NAME  from the environment or .env; else the pre-R1 name when its volumes exist on this host
+#                    (an existing installation keeps its data), else geofront-nw
+# Any setting in .env can be overridden from the environment (compose prefers the shell's value).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })"
+legacy_project=yamaha-observatory-trial
+secrets="GF_ADMIN_PASSWORD SNMP_V3_AUTH_PASS SNMP_V3_PRIV_PASS SNMP_COMMUNITY SMTP_PASSWORD SLACK_WEBHOOK_URL DISCORD_WEBHOOK_URL
+LINE_CHANNEL_ACCESS_TOKEN WEBHOOK_URL WEBHOOK_BEARER_TOKEN OBS_AUTH_SESSION_SECRET OBS_AUTH_STORAGE_KEY OBS_AUTH_PROXY_KEY"
+
+explicit_env=0 given_env=/nonexistent/.env prev=
+for a in "$@"; do
+  case "$a" in --env-file=*) explicit_env=1; given_env="${a#--env-file=}" ;; --env-file) explicit_env=1 ;; esac
+  [ "$prev" = --env-file ] && given_env="$a"
+  prev="$a"
+done
+
+envf="$given_env"  # an explicit env file (the last one) is also where <NAME>_FILE settings are read from
+if [ "$explicit_env" = 1 ] && [ -z "${OBS_CONFIG_DIR:-}" ]; then
+  :  # the explicit env file only; compose's default mount (the repository) for /config
+else
+  if [ -z "${OBS_CONFIG_DIR:-}" ]; then
+    if [ -f "$here/.env" ]; then OBS_CONFIG_DIR="$here"; else OBS_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/geofront"; fi
+  fi
+  [ -d "$OBS_CONFIG_DIR" ] || (umask 077 && mkdir -p "$OBS_CONFIG_DIR")
+  OBS_CONFIG_DIR="$(cd "$OBS_CONFIG_DIR" && { pwd -W 2>/dev/null || pwd; })"
+  [ "$explicit_env" = 1 ] || envf="$OBS_CONFIG_DIR/.env"
+  if [ "$OBS_CONFIG_DIR" = "$here" ]; then
+    unset OBS_CONFIG_DIR  # legacy layout: compose's default (the repository) and no OBS_CONFIG_DIR in .env
+  else
+    export OBS_CONFIG_DIR
+  fi
+fi
+
+# value of KEY in .env as compose reads it: the last line wins, optional `export`; a quoted value is the text inside
+# the quotes (anything after them ignored), an unquoted one ends at a ` #` comment
+env_value() {
+  [ -f "$envf" ] || return 0
+  sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=[[:space:]]*//p" "$envf" | tail -n 1 | tr -d '\r' |
+    sed -E "s/^'([^']*)'.*\$/\\1/; t; s/^\"([^\"]*)\".*\$/\\1/; t; s/[[:space:]]+#.*\$//; s/[[:space:]]+\$//"
+}
+
+from_files=()
+for k in $secrets; do
+  f="$(printenv "${k}_FILE" || true)"
+  [ -n "$f" ] || f="$(env_value "${k}_FILE")"
+  [ -n "$f" ] || continue
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "geofront: ${k}_FILE=$f を読めません (ファイルがない / 読めない)" >&2; exit 2; fi
+  v="$(cat "$f")"  # (trailing newlines dropped)
+  export "$k=${v%$'\r'}"
+  from_files+=("$k")
+done
+export OBS_SECRET_FILES="${from_files[*]:-}"
+
+if [ "$explicit_env" = 0 ] && [ -z "${COMPOSE_PROJECT_NAME:-}" ] && [ -z "$(env_value COMPOSE_PROJECT_NAME)" ]; then
+  if docker volume inspect "${legacy_project}_generated" >/dev/null 2>&1; then
+    export COMPOSE_PROJECT_NAME="$legacy_project"
+    echo "geofront: 既存のボリュームのプロジェクト名 $legacy_project で動かします (固定: ./geofront run --rm tools migrate-config)" >&2
+  else
+    export COMPOSE_PROJECT_NAME=geofront-nw
+  fi
+fi
+
+args=(--project-directory "$here" -f "$here/compose.yaml")
+if [ "$explicit_env" = 1 ]; then
+  :
+elif [ -f "$envf" ]; then
+  args+=(--env-file "$envf")
+else
+  export COMPOSE_DISABLE_ENV_FILE=1  # no config yet: never fall back to a .env in the repository
+fi
+MSYS_NO_PATHCONV=1 exec docker compose "${args[@]}" "$@"

@@ -1,0 +1,9 @@
+# Device driver: any device with the standard MIBs (kind `other`). docs/drivers.md: copy this to add a vendor.
+name: generic
+label: other (standard MIB-II / IF-MIB)
+kinds: [other]
+snmp_modules: [if_mib, system]
+lldp: true
+wan: false
+wireless_clients: false
+# syslog: RFC 3164 / RFC 5424 (alloy/config.alloy strips their headers); fixtures in syslog.jsonl.

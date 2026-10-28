@@ -1,0 +1,907 @@
+# GeoFront-NW. The default project name stays the pre-R1 one so that an existing installation keeps its volumes
+# (a new name would start with empty ones); `tools init` pins the project name into the config's .env and ./geofront
+# gives a new installation geofront-nw (README 「設定の置き場所」).
+name: yamaha-observatory-trial
+
+# Site configuration (.env, inventory, receivers, backups) lives in OBS_CONFIG_DIR (outside the repository; unset = the
+# repository itself, the legacy layout): ./geofront passes its .env (--env-file), compose mounts it at /config in the
+# tools services. Every setting can also come from the environment; secrets also as <NAME>_FILE (./geofront).
+# Self-built images: ghcr.io/c-ardinal/geofront-nw-<svc>:${GEOFRONT_VERSION} (published by CI for tags v*); the default
+# GEOFRONT_VERSION=local is never published, so `up --build` builds them here as before.
+#
+# Profiles (pick one; COMPOSE_PROFILES in .env does the same as --profile):
+#   demo     demo-gen: synthetic SNMP / flows / syslog (docker compose --profile demo up -d)
+#   prod     real devices: snmp-exporter (SNMPv3) + syslog from the LAN, targets from the inventory (OBS_CONFIG_DIR)
+#   testbed  with prod: simulated devices (snmpsim SNMPv3 + syslog sender) to try the prod path without hardware
+#            (docker compose --env-file testbed/testbed.env up -d)
+#   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
+#            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; README "パケット取込")
+# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
+# run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
+# One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
+# Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|user|help>
+# Login (P7): a LAN exposure (OBS_BIND not 127.x) always requires a login (Authelia, HTTPS); 127.0.0.1 only with OBS_AUTH=1.
+# Notifications: alerting/receivers.yaml in OBS_CONFIG_DIR (destinations, routes per severity) + secrets in .env -> the setup step writes the
+# Alertmanager config and the notify-relay config (0600) into the `generated` volume. Demo: only the local demo sink.
+#
+# Images are pinned by tag + digest (multi-arch index: linux/amd64 and linux/arm64 both present).
+# Resource limits default to a Raspberry Pi 4 (4 GB); override in .env.
+
+x-ops: &ops
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: ${LOG_MAX_SIZE:-10m}
+      max-file: "${LOG_MAX_FILE:-3}"
+
+# python:3.12-slim for the self-built images (their Dockerfiles say FROM python:3.12-slim; the named
+# build context pins it to this digest)
+x-python-base: &python-base
+  "python:3.12-slim": docker-image://python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+
+x-tools-env: &tools-env
+  # the config directory as the host sees it (tools init / migrate-config pin it into .env) and the project name
+  OBS_CONFIG_DIR: ${OBS_CONFIG_DIR:-}
+  COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-yamaha-observatory-trial}
+  OBS_SECRET_FILES: ${OBS_SECRET_FILES:-}  # secrets ./geofront read from <NAME>_FILE: tools init keeps them out of .env
+  OBS_BIND: ${OBS_BIND:-127.0.0.1}
+  OBS_PORT: ${OBS_PORT:-8080}
+  OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+  SYSLOG_BIND: ${SYSLOG_BIND:-127.0.0.1}
+  SYSLOG_PORT: ${SYSLOG_PORT:-514}
+  OBS_INVENTORY: ${OBS_INVENTORY:-inventory/devices.yaml}
+  GF_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+  SNMP_V3_USER: ${SNMP_V3_USER:-}
+  SNMP_V3_AUTH_PROTO: ${SNMP_V3_AUTH_PROTO:-SHA}
+  SNMP_V3_AUTH_PASS: ${SNMP_V3_AUTH_PASS:-}
+  SNMP_V3_PRIV_PROTO: ${SNMP_V3_PRIV_PROTO:-AES}
+  SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
+  SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
+  OBS_GRAFANA: ${OBS_GRAFANA:-1}
+  # login (P7, tools/auth.py): non-secret settings; the secrets are in x-auth-secrets
+  OBS_AUTH: ${OBS_AUTH:-0}
+  OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
+  OBS_AUTH_EXPIRATION: ${OBS_AUTH_EXPIRATION:-12h}
+  OBS_AUTH_REMEMBER_ME: ${OBS_AUTH_REMEMBER_ME:-0}
+  OBS_AUTH_MAX_RETRIES: ${OBS_AUTH_MAX_RETRIES:-5}
+  OBS_AUTH_FIND_TIME: ${OBS_AUTH_FIND_TIME:-10m}
+  OBS_AUTH_BAN_TIME: ${OBS_AUTH_BAN_TIME:-15m}
+  OBS_AUTH_TOTP: ${OBS_AUTH_TOTP:-0}
+  TZ: ${TZ:-Asia/Tokyo}
+  OBS_CAPTURE: ${OBS_CAPTURE:-0}
+  DEMO_PCAP_REPLAY: ${DEMO_PCAP_REPLAY:-1}
+  CAPTURE_IFACE: ${CAPTURE_IFACE:-}
+  CAPTURE_BPF: ${CAPTURE_BPF:-}
+  CAPTURE_KEEP_HOURS: ${CAPTURE_KEEP_HOURS:-24}
+  PCAP_KEEP_HOURS: ${PCAP_KEEP_HOURS:-24}
+  PCAP_UPLOADS_TOTAL_MB: ${PCAP_UPLOADS_TOTAL_MB:-200}
+  # traffic surge thresholds (P5): the setup step writes them into Prometheus' recording rules and the screen's config
+  SURGE_FACTOR: ${SURGE_FACTOR:-3}
+  SURGE_MIN_KBPS: ${SURGE_MIN_KBPS:-200}
+  SURGE_BASELINE: ${SURGE_BASELINE:-1h}
+
+# Notification destinations' settings and secrets: only for the steps that generate the relay config (prod-setup, tools),
+# not for the long-running tools services.
+x-notify-env: &notify-env
+  OBS_RECEIVERS: ${OBS_RECEIVERS:-alerting/receivers.yaml}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_TLS: ${SMTP_TLS:-starttls}
+  SMTP_TLS_VERIFY: ${SMTP_TLS_VERIFY:-1}
+  SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+  DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+  LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+  LINE_API_URL: ${LINE_API_URL:-}
+  WEBHOOK_URL: ${WEBHOOK_URL:-}
+  WEBHOOK_BEARER_TOKEN: ${WEBHOOK_BEARER_TOKEN:-}
+
+# Login secrets (generated into .env by tools init / tools user secrets): only for the steps that check them (setup, tools)
+x-auth-secrets: &auth-secrets
+  OBS_AUTH_SESSION_SECRET: ${OBS_AUTH_SESSION_SECRET:-}
+  OBS_AUTH_STORAGE_KEY: ${OBS_AUTH_STORAGE_KEY:-}
+  OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}
+
+# One image for every tools-based service. Only setup-check (in every profile) and tools (`docker compose run`) build
+# it: several services building the same tag in one `up --build` race ("image already exists"); the others use the
+# image setup-check has just built and never try to pull it.
+x-tools: &tools
+  image: ghcr.io/c-ardinal/geofront-nw-tools:${GEOFRONT_VERSION:-local}
+  pull_policy: never
+  environment: *tools-env
+  volumes:
+    - ./:/work
+    - ${OBS_CONFIG_DIR:-.}:/config
+    - generated:/generated
+  logging:
+    driver: json-file
+    options: {max-size: 1m, max-file: "2"}
+
+x-setup-done: &setup-done
+  setup-check: {condition: service_completed_successfully}
+
+# flowd (capture profile) and flowd-demo (demo): capture files -> obs_flow_bytes_total, through the analyzer sandbox
+x-flowd: &flowd
+  <<: *ops
+  image: ghcr.io/c-ardinal/geofront-nw-flowd:${GEOFRONT_VERSION:-local}
+  build:
+    context: ./flowd
+    additional_contexts: *python-base
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9100/health', timeout=3)"]
+    interval: 60s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
+    start_interval: 5s
+  mem_limit: ${FLOWD_MEM:-192m}
+  cpus: ${FLOWD_CPUS:-0.5}
+
+services:
+  # ---- one-shot setup per profile ------------------------------------------------------------
+  demo-setup:
+    <<: *tools
+    profiles: [demo]
+    command: [targets, --demo]
+    environment:
+      <<: [*tools-env, *auth-secrets]
+    restart: "no"
+
+  prod-setup:
+    <<: *tools
+    profiles: [prod]
+    command: [targets]
+    environment:
+      <<: [*tools-env, *notify-env, *auth-secrets]
+    restart: "no"
+
+  # every profile: fails `up` with a clear message when no profile (so no setup) was chosen
+  setup-check:
+    <<: *tools
+    pull_policy: missing  # a published GEOFRONT_VERSION is pulled; local is built
+    build:
+      context: ./tools
+      additional_contexts:
+        repo: ./  # only the files the selftest reads are used (tools/Dockerfile)
+    command: [setup-check]
+    # also fixes the capture / upload volumes' owner and modes on every start (a volume first created by a tools run is
+    # root-owned: mask-api, as nobody, could not write uploads)
+    volumes:
+      - ./:/work
+      - ${OBS_CONFIG_DIR:-.}:/config
+      - generated:/generated
+      - capture-ring:/vol/capture
+      - pcap-uploads:/vol/uploads
+      - authelia-data:/vol/authelia  # owner fixed for Authelia (uid 10091)
+    depends_on:
+      demo-setup: {condition: service_completed_successfully, required: false}
+      prod-setup: {condition: service_completed_successfully, required: false}
+      capture-setup: {condition: service_completed_successfully, required: false}
+    restart: "no"
+
+  # capture profile: .env and profile must agree (OBS_CAPTURE=1, CAPTURE_IFACE); fails `up` with the reason otherwise
+  capture-setup:
+    <<: *tools
+    profiles: [capture]
+    command: [capture-setup]
+    depends_on:
+      prod-setup: {condition: service_completed_successfully, required: false}
+    restart: "no"
+
+  tools:
+    <<: *tools
+    build:
+      context: ./tools
+      additional_contexts:
+        repo: ./  # only the files the selftest reads are used (tools/Dockerfile)
+    pull_policy: build
+    profiles: [tools]
+    environment:
+      <<: [*tools-env, *notify-env, *auth-secrets]
+    volumes:
+      - ./:/work
+      - ${OBS_CONFIG_DIR:-.}:/config
+      - generated:/generated
+      - prometheus-data:/vol/prometheus
+      - loki-data:/vol/loki
+      - grafana-data:/vol/grafana
+      - alertmanager-data:/vol/alertmanager
+      - capture-ring:/vol/capture
+      - pcap-uploads:/vol/uploads
+      - geoip:/vol/geoip
+      - authelia-data:/vol/authelia
+      - caddy-data:/vol/caddy  # the proxy's own CA + certificates (backup / restore, doctor)
+    restart: "no"
+
+  # ---- demo ---------------------------------------------------------------------------------------
+  demo-gen:
+    <<: *ops
+    profiles: [demo]
+    image: ghcr.io/c-ardinal/geofront-nw-demo-gen:${GEOFRONT_VERSION:-local}
+    build:
+      context: ./demo-gen
+      additional_contexts:
+        <<: *python-base
+        drivers: ./drivers  # the demo devices (drivers/*/demo.json)
+    environment:
+      SYSLOG_HOST: alloy
+      SYSLOG_PORT: "514"
+      DEMO_AUTO_FAULTS: ${DEMO_AUTO_FAULTS:-1}
+      DEMO_AUTO_FAULT_INTERVAL: ${DEMO_AUTO_FAULT_INTERVAL:-240}
+    ports:
+      - "127.0.0.1:9116:9116"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9116/fault/status', timeout=3)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${DEMO_GEN_MEM:-128m}
+    cpus: ${DEMO_GEN_CPUS:-0.5}
+
+  # synthetic flows from the bundled synthetic pcap (DEMO_PCAP_REPLAY=1, default), replayed in a loop and scaled up so
+  # the globe looks like demo-gen's; its documentation addresses get demo-gen's demo locations (demo/demo-geo.json)
+  flowd-demo:
+    <<: *flowd
+    profiles: [demo]
+    environment:
+      FLOWD_REPLAY: demo:demo-home.pcap
+      FLOWD_REPLAY_SCALE: ${DEMO_PCAP_SCALE:-1500}
+      FLOWD_DEMO_GEO: /demo/demo-geo.json
+      # demo traffic surge (P5): one host x destination x10 for 4 min, first after 20 min, then every 32 min (two of
+      # demo-gen's DEMO_AUTO_FAULTS cycles); off with DEMO_AUTO_FAULTS=0
+      FLOWD_DEMO_SURGE: ${DEMO_AUTO_FAULTS:-1}
+      OBS_LAN_CIDRS: 192.168.100.0/24
+    volumes:
+      - ./demo:/demo:ro
+      - geoip:/geoip:ro
+      - generated:/etc/obs-generated:ro
+      - analyzer-run:/run/analyzer
+    depends_on:
+      <<: *setup-done
+      analyzer: {condition: service_healthy}
+
+  # ---- prod collectors ----------------------------------------------------------------------------
+  snmp-exporter:
+    <<: *ops
+    profiles: [prod]
+    image: prom/snmp-exporter:v0.30.1@sha256:e5fd5e8b43ace6c088fe9bf0b37b7fff0e04380bee352be7ec41b853a4dd5859
+    command:
+      - --config.file=/etc/snmp_exporter/snmp.yml
+      - --config.file=/etc/obs-generated/snmp/auths.yml
+      - --config.file=/etc/snmp_exporter_obs/lldp.yml  # module lldp (LLDP-MIB, read-only) for the network map
+      - --config.expand-environment-variables
+    environment:
+      SNMP_V3_USER: ${SNMP_V3_USER:-}
+      SNMP_V3_AUTH_PASS: ${SNMP_V3_AUTH_PASS:-}
+      SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
+      # (the v2c community is written into the generated auths.yml: snmp_exporter does not expand it)
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - ./snmp/lldp.yml:/etc/snmp_exporter_obs/lldp.yml:ro
+    depends_on:
+      prod-setup: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9116/"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${SNMP_EXPORTER_MEM:-96m}
+    cpus: ${SNMP_EXPORTER_CPUS:-0.5}
+
+  # ---- capture (with prod; Linux host only) ---------------------------------------------------------
+  # Host network (it must see the LAN interface) with only NET_RAW / NET_ADMIN; read-only root, writes only its ring
+  # volume. Exits with the reason (and is not restarted more than 3 times) on Docker Desktop / WSL, a missing
+  # interface or a BPF filter that does not compile; status in `tools capture status` and COLLECTION HEALTH.
+  capture:
+    <<: *ops
+    profiles: [capture]
+    image: ghcr.io/c-ardinal/geofront-nw-capture:${GEOFRONT_VERSION:-local}
+    build:
+      context: ./capture
+      additional_contexts: *python-base
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp:size=8m]
+    restart: on-failure:3
+    environment:
+      CAPTURE_IFACE: ${CAPTURE_IFACE:-}
+      CAPTURE_BPF: ${CAPTURE_BPF:-}
+      CAPTURE_SNAPLEN: ${CAPTURE_SNAPLEN:-1514}
+      CAPTURE_FILE_MB: ${CAPTURE_FILE_MB:-20}
+      CAPTURE_FILES: ${CAPTURE_FILES:-20}
+      CAPTURE_FILE_SECONDS: ${CAPTURE_FILE_SECONDS:-60}
+      CAPTURE_KEEP_HOURS: ${CAPTURE_KEEP_HOURS:-24}
+      CAPTURE_ALLOW_VM: ${CAPTURE_ALLOW_VM:-0}
+    volumes:
+      - capture-ring:/capture
+    depends_on:
+      capture-setup: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/capture/status.json')); assert s['running'] and time.time()-s['updated']<30"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 5s
+    mem_limit: ${CAPTURE_MEM:-128m}
+    cpus: ${CAPTURE_CPUS:-0.5}
+
+  flowd:
+    <<: *flowd
+    profiles: [capture]
+    environment:
+      OBS_LAN_CIDRS: ${OBS_LAN_CIDRS:-}
+      FLOWD_DELAY_S: ${FLOWD_DELAY_S:-90}
+      FLOWD_RDNS: ${FLOWD_RDNS:-0}
+      FLOWD_MAX_SERIES: ${FLOWD_MAX_SERIES:-3000}
+    volumes:
+      - capture-ring:/capture:ro
+      - geoip:/geoip:ro
+      - generated:/etc/obs-generated:ro
+      - analyzer-run:/run/analyzer
+    depends_on:
+      <<: *setup-done
+      analyzer: {condition: service_healthy}
+
+  # ---- testbed (simulated devices; use with prod) -------------------------------------------------
+  testbed-rtx:
+    <<: *ops
+    profiles: [testbed]
+    image: geofront-nw-testbed:local  # test fixture only, never published
+    build:
+      context: ./testbed
+      additional_contexts:
+        drivers: ./drivers  # the drivers' syslog fixtures (drivers/*/syslog.jsonl)
+    # its reverse-DNS name is how Alloy maps its syslog lines to the inventory name (another name only for a second
+    # testbed next to this one, e.g. scripts/e2e-fresh.sh: its inventory then uses that name as the address)
+    container_name: ${TESTBED_RTX_NAME:-testbed-rtx}
+    hostname: testbed-rtx
+    environment: &testbed-env
+      TB_DEVICE: rtx1300
+      SNMP_V3_USER: ${SNMP_V3_USER:-}
+      SNMP_V3_AUTH_PASS: ${SNMP_V3_AUTH_PASS:-}
+      SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
+      SNMP_V3_AUTH_PROTO: ${SNMP_V3_AUTH_PROTO:-SHA}
+      SNMP_V3_PRIV_PROTO: ${SNMP_V3_PRIV_PROTO:-AES}
+      SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}  # set: the simulators also answer SNMPv2c with it
+      SYSLOG_HOST: alloy
+      SYSLOG_PORT: "514"
+      SYSLOG_INTERVAL: "5"
+    healthcheck: &testbed-health
+      test: ["CMD", "python", "device.py", "--health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: 160m
+    cpus: 0.5
+
+  testbed-wlx:
+    <<: *ops
+    profiles: [testbed]
+    image: geofront-nw-testbed:local
+    pull_policy: never  # built by testbed-rtx (one build of the shared image per `up --build`)
+    container_name: ${TESTBED_WLX_NAME:-testbed-wlx}
+    hostname: testbed-wlx
+    environment:
+      <<: *testbed-env
+      TB_DEVICE: wlx413
+    healthcheck: *testbed-health
+    mem_limit: 160m
+    cpus: 0.5
+
+  # synthetic traffic to documentation addresses, for the capture path on a Linux host (capture CAPTURE_IFACE = the
+  # compose network's bridge). Nothing answers it.
+  testbed-traffic:
+    <<: *ops
+    profiles: [testbed]
+    image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+    command: [python, -u, /demo/traffic.py]
+    user: nobody
+    read_only: true
+    volumes:
+      - ./demo:/demo:ro
+    mem_limit: 48m
+    cpus: 0.1
+
+  # mock notification receivers (fake SMTP / Slack / Discord / LINE / webhook): nothing leaves the compose network.
+  # testbed/receivers.yaml + the dummy secrets in testbed/testbed.env point every receiver here.
+  notifymock:
+    <<: *ops
+    profiles: [testbed]
+    image: geofront-nw-testbed:local
+    pull_policy: never  # built by testbed-rtx
+    command: [python, -u, notifymock.py]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: 96m
+    cpus: 0.25
+
+  # ---- shared -------------------------------------------------------------------------------------
+  prometheus:
+    <<: *ops
+    image: prom/prometheus:v3.6.0@sha256:76947e7ef22f8a698fc638f706685909be425dbe09bd7a2cd7aca849f79b5f64
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-30d}
+      - --storage.tsdb.retention.size=${PROM_RETENTION_SIZE:-0}
+      # snapshot for `tools backup`. Reachable only on the internal network: Prometheus is not published,
+      # and the proxy's localhost-only :9090 view refuses /api/v1/admin/*.
+      - --web.enable-admin-api
+      # /-/reload for `tools targets` (rule files are not watched); internal network only like the admin API
+      - --web.enable-lifecycle
+      # small host: at most 4 queries evaluated at once (a wallboard poll queues instead of using every core)
+      - --query.max-concurrency=4
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - generated:/etc/obs-generated:ro
+      - prometheus-data:/prometheus
+    depends_on: *setup-done
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 5s
+    mem_limit: ${PROM_MEM:-512m}  # ~80 MiB measured with 3 devices; compaction of a 30 d TSDB fits
+    cpus: ${PROM_CPUS:-1.0}
+
+  loki:
+    <<: *ops
+    image: grafana/loki:3.5.5@sha256:31628519045e7f28692a7ae73b4a3fd293dccb425585ed5d16ceea3b5c9592e6
+    command: [-config.file=/etc/loki/loki-config.yaml, -config.expand-env=true]
+    environment:
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${LOKI_MEM:-512m}
+    cpus: ${LOKI_CPUS:-1.0}
+
+  alloy:
+    <<: *ops
+    image: grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --stability.level=experimental  # loki.source.syslog syslog_format = "raw"
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    environment:
+      SYSLOG_DROP_UNKNOWN: ${SYSLOG_DROP_UNKNOWN:-0}  # 1 = drop lines from senders that are not in the inventory
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - generated:/etc/obs-generated:ro
+    ports:
+      # syslog from the devices. Default 127.0.0.1 (nothing from the LAN); set SYSLOG_BIND to the LAN IP to receive.
+      - "${SYSLOG_BIND:-127.0.0.1}:${SYSLOG_PORT:-514}:514/udp"
+      - "${SYSLOG_BIND:-127.0.0.1}:${SYSLOG_PORT:-514}:514/tcp"
+    depends_on:
+      <<: *setup-done
+      loki: {condition: service_started}
+      # Alloy caches the senders' reverse-DNS names: when a testbed device is recreated (new IP), restart Alloy too
+      testbed-rtx: {condition: service_started, required: false, restart: true}
+      testbed-wlx: {condition: service_started, required: false, restart: true}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/12345 && printf 'GET /-/ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${ALLOY_MEM:-256m}
+    cpus: ${ALLOY_CPUS:-0.5}
+
+  # Optional: OBS_GRAFANA=0 leaves Grafana out; the command-center does not need it (/grafana/ then
+  # answers 502, evidence exports say grafana "unknown"). Raspberry Pi: saves ~100 MB and its background work.
+  grafana:
+    <<: *ops
+    scale: ${OBS_GRAFANA:-1}
+    image: grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
+    # Without the screens' login (127.0.0.1): anonymous Viewer. With it (always on a LAN exposure, or OBS_AUTH=1): only the
+    # role admin reaches Grafana (it shows raw, unmasked IP / MAC values), as the same user through the proxy's auth proxy
+    # headers (X-Obs-User, X-Obs-Grafana-Role Admin); no anonymous access, no own login form, no basic auth. The headers
+    # are believed only from the proxy's fixed address on the grafana-front network (GF_AUTH_PROXY_WHITELIST): another
+    # container sending them to grafana:3000 is refused.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        if [ "$$lan" = 1 ] || [ "$$OBS_AUTH" = 1 ]; then
+          export GF_AUTH_ANONYMOUS_ENABLED=false GF_AUTH_PROXY_ENABLED=true GF_AUTH_PROXY_HEADER_NAME=X-Obs-User \
+                 GF_AUTH_PROXY_HEADER_PROPERTY=username GF_AUTH_PROXY_AUTO_SIGN_UP=true GF_AUTH_PROXY_SYNC_TTL=1 \
+                 GF_AUTH_PROXY_HEADERS="Role:X-Obs-Grafana-Role" GF_AUTH_DISABLE_LOGIN_FORM=true GF_AUTH_BASIC_ENABLED=false \
+                 GF_AUTH_SIGNOUT_REDIRECT_URL=/auth/logout GF_AUTH_PROXY_WHITELIST="$$OBS_GRAFANA_PROXY_IP"
+          echo "login on: Grafana users come from the screens' login (auth proxy); no anonymous access, no own login form" >&2
+        else
+          export GF_AUTH_ANONYMOUS_ENABLED=true
+        fi
+        exec /run.sh
+    environment:
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_GRAFANA_PROXY_IP: ${OBS_GRAFANA_PROXY_IP:-172.31.253.2}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /dashboards/wallboard.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # small host: no Grafana-side alert evaluation (alerts are Prometheus + Alertmanager), no Live websocket push
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+      GF_LIVE_MAX_CONNECTIONS: "0"
+      GF_LOG_LEVEL: warn
+      # served by the proxy under /grafana/
+      GF_SERVER_ROOT_URL: "${OBS_PUBLIC_URL:-http://127.0.0.1:8080}/grafana/"  # absolute links (share / goto) use it
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      default: {}
+      grafana-front: {aliases: [grafana-front]}  # the proxy reaches it only as grafana-front (this network)
+    depends_on: [prometheus, loki]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 300s  # first start on a fresh volume runs ~700 DB migrations (2+ min measured, longer on a Pi)
+      start_interval: 5s
+    mem_limit: ${GRAFANA_MEM:-384m}
+    cpus: ${GRAFANA_CPUS:-0.5}
+
+  mask-api:
+    <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-mask-api:${GEOFRONT_VERSION:-local}
+    build:
+      context: ./mask-api
+      additional_contexts: *python-base
+      args:
+        # this tool's commit, written into evidence exports: OBS_COMMIT=$(git rev-parse --short HEAD) docker compose build
+        OBS_COMMIT: ${OBS_COMMIT:-unknown}
+    environment:
+      # evidence export (/evidence/): the Loki retention bounds the playback range; GRAFANA_URL for its version
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
+      GRAFANA_URL: http://grafana:3000
+      # writes (silences / ACK, pcap uploads, snapshot exports): with a login for a verified operator / admin only, the
+      # identity believed only with the proxy's key (OBS_AUTH_PROXY_KEY); without a login (127.0.0.1) for everyone
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}  # its host is one of the origins allowed to write
+      # /pcap/: packet analysis through the analyzer; uploads are the only other writes (same rules as silences)
+      PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
+      PCAP_UPLOADS_TOTAL_MB: ${PCAP_UPLOADS_TOTAL_MB:-200}
+      PCAP_KEEP_HOURS: ${PCAP_KEEP_HOURS:-24}
+      ANALYZER_TIMEOUT: ${PCAP_ANALYZE_TIMEOUT:-60}
+      ANALYZER_VALIDATE_TIMEOUT: ${PCAP_VALIDATE_TIMEOUT:-180}  # an upload is read to its end before it is accepted
+      PCAP_READS_PER_MIN: ${PCAP_READS_PER_MIN:-120}
+      # its address-token key, shared with notify-relay (which writes the same tokens into its records): memory only
+      OBS_TOKEN_KEY_FILE: /run/obs-key/token.key
+      # evidence export with the browser's screen snapshot (POST, same write rules as silences): the PNG's size cap
+      EVIDENCE_SNAPSHOT_MAX_MB: ${EVIDENCE_SNAPSHOT_MAX_MB:-8}
+    volumes:
+      - capture-ring:/capture:ro
+      - pcap-uploads:/uploads
+      - ./demo:/demo:ro
+      - analyzer-run:/run/analyzer
+      - token-key:/run/obs-key
+    depends_on:
+      <<: *setup-done
+      prometheus: {condition: service_started}
+      loki: {condition: service_started}
+      analyzer: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${MASK_API_MEM:-320m}
+    cpus: ${MASK_API_CPUS:-0.5}
+
+  # Packet analysis sandbox: tshark on the stored capture files, one process per request (time / memory / CPU bounded,
+  # at most PCAP_ANALYZE_CONCURRENCY at once). No network at all, read-only root, non-root, capture files read-only;
+  # mask-api (and flowd) reach it only through the Unix socket in the analyzer-run tmpfs volume.
+  analyzer:
+    <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-analyzer:${GEOFRONT_VERSION:-local}
+    build:
+      context: ./analyzer
+      additional_contexts:
+        <<: *python-base
+        demo: ./demo
+    network_mode: none
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=64m]
+    pids_limit: 64
+    environment:
+      ANALYZER_TIMEOUT: ${PCAP_ANALYZE_TIMEOUT:-60}
+      ANALYZER_VALIDATE_TIMEOUT: ${PCAP_VALIDATE_TIMEOUT:-180}  # an upload is read to its end before it is accepted
+      ANALYZER_CONCURRENCY: ${PCAP_ANALYZE_CONCURRENCY:-1}
+      ANALYZER_PROC_MEM_MB: ${PCAP_ANALYZE_PROC_MB:-384}
+      ANALYZER_MAX_ROWS: ${PCAP_MAX_PACKETS:-100000}
+    volumes:
+      - capture-ring:/capture:ro
+      - pcap-uploads:/uploads:ro
+      - ./demo:/demo:ro
+      - analyzer-run:/run/analyzer
+    healthcheck:
+      test: ["CMD", "python", "-c", "import analyzer; assert analyzer.call({'op': 'ping'}, timeout=5)['ok']"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${ANALYZER_MEM:-896m}
+    cpus: ${ANALYZER_CPUS:-1.0}
+
+  # Alertmanager: every Prometheus alert goes through it (routes per severity, repeats, silences / ACK). Not published:
+  # reachable only on the internal network; the screens read it masked and write silences through mask-api (/am/).
+  alertmanager:
+    <<: *ops
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    command:
+      - --config.file=/etc/obs-generated/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=${ALERTMANAGER_RETENTION:-168h}  # silences and the notification log (an ACK lasts at most 7 d)
+      - --cluster.listen-address=  # single instance: no HA gossip port
+      - --web.external-url=${OBS_PUBLIC_URL:-http://127.0.0.1:8080}
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - alertmanager-data:/alertmanager
+    depends_on: *setup-done
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${ALERTMANAGER_MEM:-64m}
+    cpus: ${ALERTMANAGER_CPUS:-0.25}
+
+  # Alertmanager's webhook -> e-mail / Slack / Discord / LINE / webhook (or the demo sink); records every attempt in
+  # Loki {job="notify"}. Internal network only. Secrets: the generated relay.json (0600) only.
+  notify-relay:
+    <<: *ops
+    image: ghcr.io/c-ardinal/geofront-nw-notify-relay:${GEOFRONT_VERSION:-local}
+    build:
+      context: ./notify-relay
+      additional_contexts: *python-base
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - token-key:/run/obs-key:ro  # mask-api's address-token key (records carry the screens' tokens; none -> a.b.c.x)
+    depends_on:
+      <<: *setup-done
+      loki: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:9095/health', timeout=3)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${NOTIFY_RELAY_MEM:-64m}
+    cpus: ${NOTIFY_RELAY_CPUS:-0.25}
+
+  command-center:
+    <<: *ops
+    image: nginx:1.29.2-alpine@sha256:61e01287e546aac28a3f56839c136b31f590273f3b41187a36f46f6a03bbfe22
+    volumes:
+      - ./command-center:/usr/share/nginx/html:ro
+      - ./command-center/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [mask-api]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${COMMAND_CENTER_MEM:-64m}
+    cpus: ${COMMAND_CENTER_CPUS:-0.25}
+
+  proxy:
+    <<: *ops
+    image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    environment:
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      OBS_AUTH_PROXY_KEY: ${OBS_AUTH_PROXY_KEY:-}  # sent to mask-api with the verified identity (caddy/Caddyfile)
+      PCAP_UPLOAD_MAX_MB: ${PCAP_UPLOAD_MAX_MB:-50}
+      EVIDENCE_SNAPSHOT_MAX_MB: ${EVIDENCE_SNAPSHOT_MAX_MB:-8}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # access mode (caddy/Caddyfile): auth on a LAN exposure or with OBS_AUTH=1, else open (127.0.0.1, no login).
+        # The same rule is in Authelia's / Grafana's entrypoints, mask-api (auth_required) and tools/auth.py (required).
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        pub="$$(printf '%s' "$$OBS_PUBLIC_URL" | sed -E 's#^[a-zA-Z]+://##; s#^(\[[^]/]*\]).*#\1#; s#^([^[][^:/]*)[:/].*#\1#')"
+        if [ "$$lan" = 1 ] || [ "$$OBS_AUTH" = 1 ]; then
+          export OBS_ACCESS=auth
+          scheme=https
+          bind="$$OBS_BIND"; [ "$$bind" = localhost ] && bind=127.0.0.1
+          # Host allowlist (DNS rebinding): OBS_PUBLIC_URL's host and the bind address (cookies are per host: no localhost)
+          hosts="$$pub"; case "$$bind" in 0.0.0.0|'') ;; *) hosts="$$hosts $$bind" ;; esac
+          case "$$bind" in 0.0.0.0|'') export OBS_TLS_DEFAULT_SNI="$$pub" ;; *) export OBS_TLS_DEFAULT_SNI="$$bind" ;; esac
+          if [ -z "$$(echo $$hosts)" ]; then
+            echo "ERROR: OBS_BIND=$$OBS_BIND needs OBS_PUBLIC_URL (https://<LAN name or IP>:<port>): no screen is served" >&2
+            sleep 30; exit 1
+          fi
+          [ "$${#OBS_AUTH_PROXY_KEY}" -ge 43 ] || echo "WARNING: OBS_AUTH_PROXY_KEY missing: mask-api trusts nobody (no writes). docker compose run --rm tools user secrets" >&2
+          echo "login required (Authelia), HTTPS from the proxy's own CA; plain HTTP is redirected (ログイン必須)" >&2
+        else
+          export OBS_ACCESS=open
+          scheme=http
+          # Host allowlist (DNS rebinding): loopback names and OBS_PUBLIC_URL's host
+          hosts="127.0.0.1 localhost [::1] $$pub"
+        fi
+        export OBS_CATCHALL="$$scheme://:8080"
+        export OBS_SITES="$$(for h in $$hosts; do echo "$$h"; done | awk -v s="$$scheme" 'NF && !seen[tolower($$0)]++ { printf "%s%s://%s:8080", (n++ ? ", " : ""), s, $$0 }')"
+        echo "screens answer for: $$OBS_SITES" >&2
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./caddy:/etc/caddy:ro  # Caddyfile + the access mode's parts
+      - generated:/srv/obs-generated:ro
+      - caddy-data:/data  # also the local CA (root certificate for the LAN devices: README)
+    networks:
+      default: {}
+      grafana-front: {ipv4_address: "${OBS_GRAFANA_PROXY_IP:-172.31.253.2}"}  # Grafana's GF_AUTH_PROXY_WHITELIST
+    ports:
+      - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:8080"
+      - "127.0.0.1:${PROM_LOCAL_PORT:-9090}:9090"
+      - "127.0.0.1:${GRAFANA_LOCAL_PORT:-3000}:3000"
+    depends_on:
+      command-center: {condition: service_started}
+      mask-api: {condition: service_started}
+      grafana: {condition: service_started, required: false}  # OBS_GRAFANA=0
+      authelia: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    mem_limit: ${PROXY_MEM:-128m}
+    cpus: ${PROXY_CPUS:-0.5}
+
+  # Login (P7): Authelia, asked by the proxy for every request (forward_auth) when a login is required (always on a LAN
+  # exposure, or OBS_AUTH=1); its login screen is served under /auth/. File users (argon2id, tools user), access only
+  # for the groups viewer / operator / admin, brute-force lockout, sessions in memory (a restart logs everyone out).
+  # Without a login (127.0.0.1) it only idles. Refuses to start without its generated config, secrets or a user:
+  # the proxy then answers 502 (nothing opens). Internal network only.
+  authelia:
+    <<: *ops
+    image: authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54
+    user: "10091:10091"
+    # (not read_only: Authelia rewrites its /app/.healthcheck.env at every start and refuses to start otherwise)
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=8m]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
+        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
+          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
+        if [ "$$lan" = 0 ] && [ "$$OBS_AUTH" != 1 ]; then
+          echo "no login required (OBS_BIND=$$OBS_BIND, OBS_AUTH=$${OBS_AUTH:-0}): idle"
+          touch /tmp/obs-auth-off
+          exec sleep 2147483647
+        fi
+        if [ ! -s /etc/obs-generated/authelia/configuration.yml ]; then
+          echo "ERROR: no generated Authelia configuration (setup step: docker compose logs demo-setup prod-setup)" >&2
+          sleep 30; exit 1
+        fi
+        if ! grep -q 'password:' /config/users_database.yml 2>/dev/null; then
+          echo "ERROR: no login user yet: docker compose run --rm tools user add <name> --role admin (nothing opens until then)" >&2
+          sleep 30; exit 1
+        fi
+        exec authelia --config /etc/obs-generated/authelia/configuration.yml
+    environment:
+      OBS_BIND: ${OBS_BIND:-127.0.0.1}
+      OBS_AUTH: ${OBS_AUTH:-0}
+      AUTHELIA_SESSION_SECRET: ${OBS_AUTH_SESSION_SECRET:-}
+      AUTHELIA_STORAGE_ENCRYPTION_KEY: ${OBS_AUTH_STORAGE_KEY:-}
+      TZ: ${TZ:-Asia/Tokyo}
+      GOMEMLIMIT: 160MiB  # Go runtime: give the argon2id buffers of finished logins back early (soft, below mem_limit)
+      # not read by Authelia: what the generated configuration is made from, so that `docker compose up -d` recreates
+      # (restarts) Authelia whenever it changes (Authelia does not reload its configuration by itself; the users file it does)
+      OBS_PUBLIC_URL: ${OBS_PUBLIC_URL:-}
+      OBS_PORT: ${OBS_PORT:-8080}
+      OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
+      OBS_AUTH_EXPIRATION: ${OBS_AUTH_EXPIRATION:-12h}
+      OBS_AUTH_REMEMBER_ME: ${OBS_AUTH_REMEMBER_ME:-0}
+      OBS_AUTH_MAX_RETRIES: ${OBS_AUTH_MAX_RETRIES:-5}
+      OBS_AUTH_FIND_TIME: ${OBS_AUTH_FIND_TIME:-10m}
+      OBS_AUTH_BAN_TIME: ${OBS_AUTH_BAN_TIME:-15m}
+      OBS_AUTH_TOTP: ${OBS_AUTH_TOTP:-0}
+    volumes:
+      - generated:/etc/obs-generated:ro
+      - authelia-data:/config  # users_database.yml (tools user), db.sqlite3 (bans, TOTP keys), notification.txt
+    depends_on: *setup-done
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /tmp/obs-auth-off ] || wget -q --spider http://127.0.0.1:9091/auth/api/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 5s
+    mem_limit: ${AUTHELIA_MEM:-256m}  # a login hashes with argon2id at 32 MiB (tools/auth.py)
+    cpus: ${AUTHELIA_CPUS:-0.5}
+
+# grafana-front: only the proxy and Grafana (internal, fixed subnet: the proxy's address is Grafana's auth proxy whitelist).
+# Change OBS_GRAFANA_NET / OBS_GRAFANA_NET_DYNAMIC / OBS_GRAFANA_PROXY_IP together if the subnet is taken on this host.
+networks:
+  grafana-front:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OBS_GRAFANA_NET:-172.31.253.0/29}
+          # addresses handed out automatically (Grafana): not the proxy's fixed one, which must stay free for it
+          ip_range: ${OBS_GRAFANA_NET_DYNAMIC:-172.31.253.4/30}
+
+volumes:
+  prometheus-data:
+  loki-data:
+  grafana-data:
+  alertmanager-data:
+  caddy-data:
+  authelia-data:  # login users, bans and TOTP keys (tools backup / restore)
+  generated:
+  # packet capture ring (+ status.json) and uploaded pcaps: bounded by their own retention, not in `tools backup`
+  # unless --include-captures
+  capture-ring:
+  pcap-uploads:
+  geoip:  # DB-IP Lite City + ASN (tools geoip update)
+  # the analyzer's Unix socket: memory only, owned by the analyzer user
+  analyzer-run:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=10001,gid=10001,mode=0755,size=1m"}
+  # mask-api's address-token key for notify-relay: memory only (never on disk, gone when both containers stop: new tokens),
+  # written by mask-api (nobody), read-only in notify-relay; no other container mounts it
+  token-key:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=65534,gid=65534,mode=0755,size=64k"}

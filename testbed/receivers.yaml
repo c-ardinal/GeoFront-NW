@@ -1,0 +1,24 @@
+# testbed only: every receiver type, all pointing at the notifymock service (testbed/notifymock.py) through the DUMMY
+# secrets in testbed/testbed.env. Nothing leaves the compose network. Short intervals so repeats show within minutes.
+receivers:
+  - name: mail
+    type: email
+    to: [ops@example.com, oncall@example.com]
+  - name: slack
+    type: slack
+  - name: discord
+    type: discord
+  - name: line
+    type: line
+    to: U0123456789abcdef0123456789abcdef
+  - name: hook
+    type: webhook
+
+routes:
+  critical: {receivers: [mail, line, hook], repeat: 2m}
+  warning: {receivers: [slack, discord], repeat: 3m}
+  info: {receivers: [], repeat: 24h}
+
+timing:
+  group_wait: 5s
+  group_interval: 30s

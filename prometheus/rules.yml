@@ -1,0 +1,93 @@
+groups:
+  - name: yamaha-demo
+    rules:
+      # summary: shown on the screens; summary_ja / value: used in the notifications (notify-relay, Japanese)
+      - alert: DeviceDown
+        expr: up{job="snmp"} == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} SNMP scrape failing"
+          summary_ja: "{{ $labels.instance }} から SNMP の応答がありません (収集に失敗)"
+          value: "up = {{ $value }}"
+
+      # WanHighUtilization is generated per profile from the WAN interface (demo: rtx1300 lan2; prod: the inventory's
+      # wan_interface): /etc/obs-generated/prometheus/wan-rules.yml, written by `tools targets`.
+
+      - alert: InterfaceErrors
+        expr: increase(ifInErrors{job="snmp"}[2m]) + increase(ifOutErrors{job="snmp"}[2m]) > 5
+        for: 30s
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} {{ $labels.ifName }} interface errors increasing"
+          summary_ja: "{{ $labels.instance }} {{ $labels.ifName }} のエラーが増えています (2 分で {{ $value | printf \"%.0f\" }} 件)"
+          value: "{{ $value | printf \"%.0f\" }} 件 / 2 分"
+
+      # ---- packet capture / flows (P3). flowd reports the capture service's status.json; no capture profile = no series
+      - alert: CaptureDown
+        # the capture service is configured (flowd follows the ring) but not running, its status is stale, or nothing
+        # has been written for 15 min (dumpcap stuck / interface without traffic)
+        expr: >-
+          (obs_flow_source_up{mode="capture"} == 0)
+          or (increase(obs_capture_packets_received_total[15m]) == 0 and on (instance) obs_capture_up == 1)
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "packet capture stopped or not writing ({{ $labels.instance }})"
+          summary_ja: "パケット取込が止まっているか、15 分間パケットを書いていません (tools capture status で理由を確認)"
+          value: "{{ $value | printf \"%.0f\" }}"
+
+      # live: the capture interface's kernel rx_dropped (the only live drop counter dumpcap's ring offers)
+      - alert: CaptureNicDrops
+        expr: increase(obs_capture_nic_rx_dropped_total[5m]) > 100
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "capture interface dropping packets ({{ $value | printf \"%.0f\" }} in 5 min, NIC rx_dropped)"
+          summary_ja: "キャプチャするインターフェースで受信ドロップが出ています (5 分で {{ $value | printf \"%.0f\" }} 件、NIC の rx_dropped)。CAPTURE_BPF で絞るか、負荷を確認してください"
+          value: "{{ $value | printf \"%.0f\" }} 件 / 5 分"
+
+      # dumpcap's own / pcap buffer drops: reported when a dumpcap session ends (restart, crash)
+      - alert: CaptureDumpcapDrops
+        expr: increase(obs_capture_dumpcap_dropped_total[1h]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "dumpcap reported {{ $value | printf \"%.0f\" }} dropped packets (ended capture sessions, last hour)"
+          summary_ja: "dumpcap が取りこぼしを報告しました (終了したセッション分、1 時間で {{ $value | printf \"%.0f\" }} 件)"
+          value: "{{ $value | printf \"%.0f\" }} 件 / 1 時間"
+
+      - alert: FlowFilesSkipped
+        expr: increase(obs_flowd_files_total{result=~"skipped|error"}[1h]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "flowd skipped {{ $value | printf \"%.0f\" }} capture files ({{ $labels.result }}) in the last hour"
+          summary_ja: "フロー集計が取り込めなかったリングファイルがあります (1 時間で {{ $value | printf \"%.0f\" }} 件、{{ $labels.result }})。そのぶん通信先の量が少なく出ます"
+          value: "{{ $value | printf \"%.0f\" }} 件"
+
+      - alert: GeoIPStale
+        expr: (time() - obs_geoip_db_build_timestamp_seconds) / 86400 > 45
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "GeoIP database {{ $labels.db }} is {{ $value | printf \"%.0f\" }} days old"
+          summary_ja: "GeoIP (DB-IP Lite {{ $labels.db }}) が {{ $value | printf \"%.0f\" }} 日前の版です (docker compose run --rm tools geoip update)"
+          value: "{{ $value | printf \"%.0f\" }} 日"
+
+      - alert: FlowSourceStale
+        # the flow source the setup step configured (flowd / flowd-demo / demo-gen) is not answering, or flowd's input
+        # (capture / replay) is not live
+        expr: (up{job="flows"} == 0) or (obs_flow_source_up == 0)
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "flow source down ({{ $labels.instance }})"
+          summary_ja: "通信先データ (フロー) の取得元 {{ $labels.instance }} が止まっています。地球儀・通信先は UNKNOWN 表示になります"
+          value: "{{ $value | printf \"%.0f\" }}"
+
+      - alert: DeviceRebooted
+        expr: sysUpTime{job="snmp"} / 100 < 300
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }} restarted (sysUpTime reset, counters discontinuous)"
+          summary_ja: "{{ $labels.instance }} が再起動しました (稼働時間がリセット。カウンタは不連続)"
+          value: "稼働 {{ $value | printf \"%.0f\" }} 秒"

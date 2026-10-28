@@ -1,0 +1,2 @@
+# OBS_ACCESS=open (127.0.0.1 without authentication): plain HTTP only
+auto_https off

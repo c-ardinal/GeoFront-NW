@@ -1,0 +1,74 @@
+# OBS_ACCESS=auth: every request is asked of Authelia (forward_auth, recipe of authelia.com/integration/proxies/caddy,
+# subpath variant) except the login screen itself (/auth/) and /healthz. Fail closed: Authelia stopped, slow or
+# unreachable -> 502 / 504, a request without a valid session -> Authelia's 302 to the login screen (or 401).
+# Roles = Authelia groups viewer / operator / admin (users without one of them are refused by Authelia's access rules).
+
+(site_tls) {
+	tls internal
+}
+
+(identity) {
+	# client copies first: neither the identity headers nor Authelia's own ever come from a client
+	request_header -X-Obs-User
+	request_header -X-Obs-Role
+	request_header -X-Obs-Auth
+	request_header -X-Obs-Grafana-Role
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Email
+	request_header -Remote-Name
+	@protected not path /auth /auth/* /healthz
+	forward_auth @protected authelia:9091 {
+		uri /auth/api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 5s
+		}
+	}
+	# the verified user and the highest of its roles (Remote-Groups is Authelia's comma-separated group list)
+	request_header @protected X-Obs-User {http.request.header.Remote-User}
+	request_header @protected X-Obs-Role viewer
+	@roleOperator {
+		not path /auth /auth/* /healthz
+		header_regexp Remote-Groups (^|,)\s*operator\s*(,|$)
+	}
+	request_header @roleOperator X-Obs-Role operator
+	@roleAdmin {
+		not path /auth /auth/* /healthz
+		header_regexp Remote-Groups (^|,)\s*admin\s*(,|$)
+	}
+	request_header @roleAdmin X-Obs-Role admin
+}
+
+# the login screen (Authelia's portal, served under /auth/ on the screens' own origin: its session cookie is Secure,
+# HttpOnly, SameSite and only for this host)
+(login_portal) {
+	@portal path /auth /auth/*
+	handle @portal {
+		reverse_proxy authelia:9091 {
+			transport http {
+				dial_timeout 2s
+			}
+		}
+	}
+}
+
+# Grafana (owner's rule: never unmask): it shows raw IP / MAC values, so with the login only the role admin may use it
+# (viewer / operator: 403), as the same user through Grafana's auth proxy (compose.yaml) with the Grafana role Admin.
+# Grafana's own password login and password change are closed here too (its local admin password is never usable).
+(grafana_access) {
+	route {
+		@gfNotAdmin not header X-Obs-Role admin
+		header @gfNotAdmin Content-Type "text/plain; charset=utf-8"
+		respond @gfNotAdmin "Grafana は admin の役割だけが使えます (伏せ字のない IP / MAC を表示するため)" 403
+		@gfOwnLogin path /grafana/login /grafana/login/* /grafana/api/login /grafana/api/login/* /grafana/api/user/password
+		respond @gfOwnLogin "Grafana's own login is off: the screens' login is used" 403
+		request_header X-Obs-Grafana-Role Admin
+	}
+}
+
+# old Grafana URL on 127.0.0.1:3000: nothing with the login
+(grafana_local) {
+	respond "with the login, open Grafana at OBS_PUBLIC_URL/grafana/ (role admin)" 403
+}

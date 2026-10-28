@@ -1,0 +1,94 @@
+{
+ "_comment": "SYNTHETIC demo locations for the documentation addresses in demo-home.pcap (the same as demo-gen's flows). Used only by the demo profile (FLOWD_DEMO_GEO); real lookups never use this file.",
+ "192.0.2.10": {
+  "cc": "JP",
+  "city": "Tokyo",
+  "lat": "35.6895",
+  "lon": "139.6917",
+  "asn": "AS64500"
+ },
+ "192.0.2.20": {
+  "cc": "JP",
+  "city": "Osaka",
+  "lat": "34.6937",
+  "lon": "135.5023",
+  "asn": "AS64501"
+ },
+ "192.0.2.30": {
+  "cc": "US",
+  "city": "Ashburn",
+  "lat": "39.0438",
+  "lon": "-77.4874",
+  "asn": "AS64502"
+ },
+ "192.0.2.40": {
+  "cc": "US",
+  "city": "San Jose",
+  "lat": "37.3382",
+  "lon": "-121.8863",
+  "asn": "AS64503"
+ },
+ "198.51.100.10": {
+  "cc": "US",
+  "city": "Seattle",
+  "lat": "47.6062",
+  "lon": "-122.3321",
+  "asn": "AS64504"
+ },
+ "198.51.100.20": {
+  "cc": "SG",
+  "city": "Singapore",
+  "lat": "1.3521",
+  "lon": "103.8198",
+  "asn": "AS64505"
+ },
+ "198.51.100.30": {
+  "cc": "DE",
+  "city": "Frankfurt",
+  "lat": "50.1109",
+  "lon": "8.6821",
+  "asn": "AS64506"
+ },
+ "198.51.100.40": {
+  "cc": "GB",
+  "city": "London",
+  "lat": "51.5072",
+  "lon": "-0.1276",
+  "asn": "AS64507"
+ },
+ "198.51.100.50": {
+  "cc": "NL",
+  "city": "Amsterdam",
+  "lat": "52.3676",
+  "lon": "4.9041",
+  "asn": "AS64508"
+ },
+ "203.0.113.10": {
+  "cc": "KR",
+  "city": "Seoul",
+  "lat": "37.5665",
+  "lon": "126.9780",
+  "asn": "AS64509"
+ },
+ "203.0.113.20": {
+  "cc": "AU",
+  "city": "Sydney",
+  "lat": "-33.8688",
+  "lon": "151.2093",
+  "asn": "AS64510"
+ },
+ "203.0.113.30": {
+  "cc": "HK",
+  "city": "Hong Kong",
+  "lat": "22.3193",
+  "lon": "114.1694",
+  "asn": "AS64511"
+ },
+ "203.0.113.40": {
+  "cc": "IE",
+  "city": "Dublin",
+  "lat": "53.3498",
+  "lon": "-6.2603",
+  "asn": "AS64512"
+ }
+}

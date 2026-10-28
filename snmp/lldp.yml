@@ -1,0 +1,38 @@
+# snmp_exporter module `lldp` (P5 network map): the LLDP-MIB (IEEE 802.1AB) remote systems table, read-only (GET/WALK).
+# Loaded next to the bundled snmp.yml (compose: snmp-exporter --config.file=/etc/snmp_exporter_obs/lldp.yml) and scraped
+# by Prometheus' `lldp` job every 2 min (prometheus/prometheus.yml). A device without LLDP-MIB (or whose SNMP view does
+# not include 1.0.8802) simply returns no rows: the map then uses the inventory only.
+# One series per neighbour: lldpRemSysName{lldpLocPortId (our port), lldpRemSysName, lldpRemPortId, lldpRemPortDesc} 1
+# (lldpRemTimeMark is dropped by the scrape job: it changes whenever the neighbour entry is refreshed).
+modules:
+  lldp:
+    walk:
+      - 1.0.8802.1.1.2.1.4.1.1.7   # lldpRemPortId
+      - 1.0.8802.1.1.2.1.4.1.1.8   # lldpRemPortDesc
+      - 1.0.8802.1.1.2.1.4.1.1.9   # lldpRemSysName
+      - 1.0.8802.1.1.2.1.3.7.1.3   # lldpLocPortId
+    metrics:
+      - name: lldpRemSysName
+        oid: 1.0.8802.1.1.2.1.4.1.1.9
+        type: DisplayString
+        help: The string value used to identify the system name of the remote system - 1.0.8802.1.1.2.1.4.1.1.9
+        indexes:
+          - labelname: lldpRemTimeMark
+            type: gauge
+          - labelname: lldpRemLocalPortNum
+            type: gauge
+          - labelname: lldpRemIndex
+            type: gauge
+        lookups:
+          - labels: [lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex]
+            labelname: lldpRemPortId
+            oid: 1.0.8802.1.1.2.1.4.1.1.7
+            type: DisplayString
+          - labels: [lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex]
+            labelname: lldpRemPortDesc
+            oid: 1.0.8802.1.1.2.1.4.1.1.8
+            type: DisplayString
+          - labels: [lldpRemLocalPortNum]
+            labelname: lldpLocPortId
+            oid: 1.0.8802.1.1.2.1.3.7.1.3
+            type: DisplayString
