@@ -103,7 +103,7 @@ Raspberry Pi に導入したら、次の順に確かめてください。
 
 1. `scripts/verify.sh quick` を実行します。
 2. `E2E_LAN_IP=<Pi の LAN の IP> scripts/verify.sh e2e-open e2e-auth resilience backup-restore` を実行します。
-3. `sudo reboot` で再起動し、`./geofront ps` ですべて healthy、`tools check` が OK になることを確かめます。
+3. `sudo reboot` で再起動し、`./geofront ps` ですべて healthy (loki はヘルスチェックなしで Up)、`tools check` が OK になることを確かめます。
 
 ## コミットしてはいけないデータの検査
 

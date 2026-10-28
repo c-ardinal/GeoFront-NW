@@ -15,6 +15,72 @@ YAMAHA RTX / WLX 用のドライバが付属しています。他社の機器に
 - ネットワーク図を表示し、通信の急増と原因候補を一覧にします
 - LAN に公開するときは、ログインと HTTPS が必須になります
 
+## 構成
+
+```mermaid
+flowchart LR
+  subgraph SRC["機器・LAN"]
+    DEV["RTX / WLX"]
+    MIR["ミラーポート"]
+  end
+
+  subgraph COL["収集"]
+    SNMP["snmp-exporter"]
+    ALLOY["alloy<br/>syslog の受信"]
+    CAP["capture<br/>dumpcap"]
+    FLOWD["flowd<br/>通信の集計・GeoIP"]
+  end
+
+  subgraph STORE["保存"]
+    PROM[("prometheus<br/>メトリクス・アラートの判定")]
+    LOKI[("loki<br/>syslog・通知の記録")]
+    PCAP[("pcap<br/>取込とアップロード")]
+  end
+
+  subgraph ALERT["通知"]
+    AM["alertmanager"]
+    RELAY["notify-relay"]
+    EXT["メール / Slack / Discord<br/>LINE / Webhook"]
+  end
+
+  subgraph WEB["画面"]
+    PROXY["proxy (Caddy)"]
+    AUTH["authelia<br/>ログイン"]
+    CC["command-center"]
+    MASK["mask-api<br/>伏せ字にして返す"]
+    ANA["analyzer<br/>tshark・ネットワークなし"]
+    GRAF["grafana"]
+  end
+
+  USER(["ブラウザ"])
+
+  DEV -- "SNMP" --> SNMP --> PROM
+  DEV -- "syslog" --> ALLOY --> LOKI
+  MIR --> CAP --> PCAP
+  FLOWD -- "解析を依頼" --> ANA
+  FLOWD --> PROM
+  PROM -- "アラート" --> AM --> RELAY --> EXT
+  RELAY -- "通知の記録" --> LOKI
+
+  USER --> PROXY
+  PROXY -. "ログインの確認" .-> AUTH
+  PROXY --> CC
+  PROXY --> MASK
+  PROXY --> GRAF
+  CC -- "/prom/・/loki/" --> MASK
+  MASK --> PROM
+  MASK --> LOKI
+  MASK -- "抑止・ACK" --> AM
+  MASK --> ANA
+  MASK -- "アップロード" --> PCAP
+  ANA --> PCAP
+  GRAF --> PROM
+  GRAF --> LOKI
+```
+
+収集と通知の矢印はデータの向き、画面の矢印は要求の向きです。ログインの確認は LAN に公開したときと `OBS_AUTH=1` のときだけ行います。
+デモでは機器と取込の代わりに demo-gen と flowd-demo が疑似データを出します。コンテナごとの役割は [docs/architecture.md](docs/architecture.md) を見てください。
+
 ## 必要なもの
 
 - Linux (arm64 / amd64) または Raspberry Pi 4 (4 GB、64 bit OS)
@@ -99,6 +165,7 @@ OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orpha
 
 | ドキュメント | 内容 |
 |---|---|
+| [docs/architecture.md](docs/architecture.md) | コンテナの一覧と役割、プロファイル |
 | [docs/configuration.md](docs/configuration.md) | 設定ディレクトリ、`.env` の項目、`*_FILE`、機器台帳、通知先 |
 | [docs/devices.md](docs/devices.md) | 機器側の設定例 (RTX / WLX の SNMPv3 と syslog、LLDP) |
 | [docs/notifications.md](docs/notifications.md) | アラートの通知、抑止と ACK |
