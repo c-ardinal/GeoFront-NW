@@ -41,6 +41,23 @@ function logList(host, entries, nav, markTs, res) {
 }
 const sevChart = (r, label, mark) => stackCols(r.cols, SEV_KEYS, r.t0, r.t1, label, mark, r.warnings, r.edge);
 
+// "推移を見る" / "ログを検索" (F1): the same item over a longer window, in the 推移 / ログ検索 views
+let lastNav = null;
+const nav = () => lastNav;
+function deepSection(items) {
+  const s = section('長い期間で見る', '推移 · ログ検索 · 伏せ字のまま');
+  const row = el('div', 'filters ops');
+  for (const [text, open] of items) {
+    const b = el('button', 'link-btn ops-btn', text);
+    b.type = 'button';
+    b.lang = 'ja';
+    b.addEventListener('click', () => { if (nav()) open(nav()); });
+    row.append(b);
+  }
+  s.body.append(row);
+  return s;
+}
+
 // ---- device ------------------------------------------------------------------------------
 export function deviceView(name) {
   let s, lastR = null;
@@ -53,9 +70,12 @@ export function deviceView(name) {
       s.chart.body.append(chart.wrap);
       s.ifBox = el('div');
       s.ifs.body.append(s.ifBox, keyLegend(IO_KEYS));
-      body.append(s.sum, s.chart.wrap, s.ifs.wrap, s.alerts.wrap, s.sev.wrap, s.logs.wrap, evidenceSection(() => ({ scope: 'device', instance: name })).wrap);
+      body.append(s.sum, s.chart.wrap, s.ifs.wrap, s.alerts.wrap, s.sev.wrap, s.logs.wrap,
+        deepSection([['推移を見る', (n) => n.trend({ family: 'if_bps', instance: name })], ['ログを検索', (n) => n.logsearch({ host: name })]]).wrap,
+        evidenceSection(() => ({ scope: 'device', instance: name })).wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const { m } = ctx.snap;
       const [kind, text] = upState(m.up.get(name));
       const isUp = m.up.get(name) === 1;
@@ -108,9 +128,13 @@ export function ifaceView(key) {
       s = { sum: el('div'), t: section('Traffic, last 1 h', 'Mbps'), e: section('Errors, last 1 h', 'per minute'), info: section('Interface') };
       s.t.body.append(traffic.wrap);
       s.e.body.append(errs.wrap);
-      body.append(s.sum, s.t.wrap, s.e.wrap, s.info.wrap, evidenceSection(() => ({ scope: 'iface', instance: inst, ifName })).wrap);
+      body.append(s.sum, s.t.wrap, s.e.wrap, s.info.wrap,
+        deepSection([['推移を見る', (n) => n.trend({ family: 'if_bps', instance: inst, ifName })], ['エラーの推移', (n) => n.trend({ family: 'if_errors', instance: inst, ifName })],
+          ['ログを検索', (n) => n.logsearch({ host: inst, q: ifName })]]).wrap,
+        evidenceSection(() => ({ scope: 'iface', instance: inst, ifName })).wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const r = ifaceRows(ctx.snap.m, ctx.seenIf).find((x) => x.key === key) || { operText: 'UNKNOWN' };
       const operKind = r.oper === 1 ? 'ok' : r.oper === 2 ? 'warn' : 'unknown';
       const uKind = !has(r.util) ? 'unknown' : r.util >= 90 ? 'crit' : r.util >= 70 ? 'warn' : 'ok';
@@ -140,8 +164,6 @@ export function ifaceView(key) {
 }
 
 // "この通信のパケット": opens packet analysis narrowed to this destination / host (filter + last 15 min of the ring)
-let lastNav = null;
-const nav = () => lastNav;
 function packetsSection(open) {
   const s = section('Packets', 'stored captures · masked');
   const b = el('button', 'link-btn ops-btn', 'この通信のパケット');
@@ -169,6 +191,8 @@ export function destView(d) {
       s.src.body.append(s.srcBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
       body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap,
+        ...(d.ip ? [] : [deepSection([['推移を見る (ASN ごと)', (n) => n.trend({ family: 'flow_asn', dst_country: d.cc })],
+          ['推移を見る (端末ごと)', (n) => n.trend({ family: 'flow_host', dst_country: d.cc })]]).wrap]),
         evidenceSection(() => (d.ip ? { scope: 'dest', ip: d.ip } : { scope: 'dest', cc: d.cc, city: d.city })).wrap);
     },
     async update(ctx) {
@@ -218,7 +242,9 @@ export function srcView(host) {
       s.ccBox = el('div');
       s.cc.body.append(s.ccBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
-      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap, evidenceSection(() => ({ scope: 'src', host })).wrap);
+      body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap,
+        deepSection([['推移を見る (国ごと)', (n) => n.trend({ family: 'flow_country', src_host: host })]]).wrap,
+        evidenceSection(() => ({ scope: 'src', host })).wrap);
     },
     async update(ctx) {
       lastNav = ctx.nav;
@@ -332,9 +358,11 @@ export function loglineView(e) {
     title: `Syslog ${e.host}`, src: 'loki',
     mount(body) {
       s = { sum: el('div'), line: section('Line'), vol: section('Host volume around the line', '±10 min · lines by severity · marker = this line'), ctx: section('Context', '±20 lines from the same host') };
-      body.append(s.sum, s.line.wrap, s.vol.wrap, s.ctx.wrap);
+      body.append(s.sum, s.line.wrap, s.vol.wrap, s.ctx.wrap,
+        deepSection([['ログを検索', (n) => n.logsearch({ host: e.host, severity: e.sev, preset: 86400 })]]).wrap);
     },
     async update(ctx) {
+      lastNav = ctx.nav;
       const pos = isPlayback() ? now() : 'live';
       if (pos !== at) { around = aroundRes = vol = null; at = pos; s.ctx.body.replaceChildren(); }
       if (s.ctx.body.childElementCount) return; // already rendered into the current mount, for this data time

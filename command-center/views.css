@@ -311,3 +311,74 @@
 @media (max-width: 767px) {
   #drawer .cr-h { flex-wrap: wrap; }
 }
+
+/* ---- 推移 (views-trend.js) and ログ検索 (views-logsearch.js), F1 ----
+   Static SVG, nothing animated (the same in LITE). Series colours: 1 / 2 are the app's in / out colours, the rest a fixed
+   categorical set that reads on both (dark) themes; every series is also named in the legend (never colour alone).
+   Values in the legend and the readout are tabular figures in fixed-width slots. */
+#modal { --tr-1: var(--spark-1); --tr-2: var(--spark-2); --tr-3: #e69f00; --tr-4: #56b4e9; --tr-5: #009e73; --tr-6: #f0e442;
+  --tr-7: #cc79a7; --tr-8: #d55e00; --tr-9: #8a96a3; }
+#modal .tr-bar, #modal .ls-bar { margin-bottom: var(--s2); }
+#modal .tr-scope { display: contents; }
+#modal .tr-range { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s2) var(--s3); margin: 0 0 var(--s2); }
+#modal .tr-custom { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s2); }
+#modal .tr-custom[hidden] { display: none; }
+#modal .tr-custom input[type="datetime-local"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); color-scheme: dark; }
+#modal .tr-why { margin: 0; min-width: 14em; font-size: var(--fs-s); color: var(--warn); }
+#modal .tr-acts { display: flex; gap: var(--s1); margin-bottom: var(--s1); }
+#modal .tr-status { display: block; min-height: 1.3em; font-size: var(--fs-s); color: var(--text-2); }
+#modal .tr-chart { position: relative; min-height: 220px; border: 1px solid var(--frame); background: var(--bg); touch-action: pan-y; cursor: crosshair; }
+#modal .tr-chart:focus-visible, #modal .ls-hbox:focus-visible, #modal .ls-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#modal .tr-svg { display: block; width: 100%; height: auto; }
+#modal .tr-grid { stroke: var(--track); stroke-width: 1; }
+#modal .tr-ax { fill: var(--text-2); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+#modal .tr-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; }
+#modal .tr-area { opacity: 0.55; stroke: none; }
+#modal .tr-cursor { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
+#modal .tr-sel { fill: var(--accent); opacity: 0.18; }
+#modal .tr-nodata { display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: default; }
+#modal .tr-dash { font: 600 40px/1 var(--sans); color: var(--text-2); }
+#modal .tr-nd { max-width: 36em; margin: var(--s2) var(--s3) 0; text-align: center; font-size: var(--fs-s); color: var(--text-2); }
+#modal .tr-read { min-height: 1.4em; margin: var(--s1) 0; font: var(--fs-s) var(--mono); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#modal .tr-legend { display: flex; flex-direction: column; gap: 2px; }
+#modal .tr-lg { display: grid; grid-template-columns: 18px minmax(0, 1fr) 11ch 14ch; column-gap: var(--s2); align-items: center; min-height: 28px;
+  font: var(--fs-s) var(--sans); color: var(--text); text-align: left; background: transparent; border: 1px solid transparent; padding: 0 var(--s1); cursor: pointer; }
+#modal .tr-lg:hover { border-color: var(--frame); }
+#modal .tr-lg:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modal .tr-lg[aria-pressed="false"] { color: var(--text-2); }
+#modal .tr-lg[aria-pressed="false"] .tr-sw { opacity: 0.25; }
+#modal .tr-sw { width: 18px; height: 4px; }
+#modal .tr-lg-n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#modal .tr-lg-v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#modal :is(.tr-note, .tr-help) { margin: var(--s1) 0 0; font-size: var(--fs-s); color: var(--text-2); }
+#modal .ls-q input[type="search"] { min-width: 18em; }
+#modal .ls-hbox { position: relative; height: 64px; border-bottom: 1px solid var(--frame); cursor: pointer; }
+#modal .ls-svg { display: block; width: 100%; height: 100%; }
+#modal .ls-col { fill: var(--spark-1); }
+#modal .ls-col.ls-cur { fill: var(--warn); }
+#modal .ls-axis { display: flex; justify-content: space-between; font: var(--fs-s) var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums; }
+#modal :is(.ls-tip, .ls-hwait) { min-height: 1.4em; font: var(--fs-s) var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+#modal .ls-hwait { color: var(--text-2); padding: var(--s2) 0; }
+#modal .ls-partial { margin: var(--s1) 0 0; font-size: var(--fs-s); color: var(--warn); }
+#modal .ls-list .log { grid-template-columns: 15ch 9ch 7ch minmax(0, 1fr); cursor: pointer; padding: 1px var(--s1); }
+#modal .ls-list .ls-t { color: var(--text-2); font-variant-numeric: tabular-nums; }
+#modal .ls-list .ls-sel { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
+#modal .ls-hit { color: #000; background: var(--warn); padding: 0 1px; }
+#modal .ls-selbar { margin: var(--s1) 0; align-items: center; }
+#modal .ls-selbar[hidden] { display: none; }
+#modal .ls-seltext { font: var(--fs-s) var(--mono); color: var(--text); min-width: 24ch; }
+#modal.stale :is(.tr-line, .ls-col) { opacity: 0.5; }
+[data-theme="film"] #modal .tr-dash { font-family: var(--display); }
+@media (max-width: 1279px) {
+  #modal .tr-custom input[type="datetime-local"], #modal .ls-go, #modal .tr-lg { min-height: 44px; }
+  #modal .ls-list .log { min-height: 44px; align-items: center; }
+  #modal .ls-hbox { height: 88px; }
+}
+@media (max-width: 767px) {
+  #modal .tr-lg { grid-template-columns: 18px minmax(0, 1fr) 11ch; }
+  #modal .tr-lg .tr-lg-v + .tr-lg-v { display: none; }
+  #modal .ls-q input[type="search"] { min-width: 0; width: 100%; }
+  #modal .ls-q { flex-basis: 100%; }
+  #modal .ls-list .log { grid-template-columns: 15ch minmax(0, 9ch) minmax(0, 1fr); row-gap: 0; white-space: normal; border-bottom: 1px solid var(--track); }
+  #modal .ls-list .log .log-m { grid-column: 1 / -1; }
+}
