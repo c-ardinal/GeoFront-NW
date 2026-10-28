@@ -178,25 +178,29 @@ export function trendView(init = {}) {
 
   function params() {
     const w = windowOf(st);
-    const span = (w.to - w.from) / 1000;
-    // a live preset moves with time: asked again once per step, not on every poll
-    const t1 = st.zoom.length || st.preset === 'custom' ? w.to / 1000 : Math.floor(w.to / 1000 / step(span)) * step(span);
-    const p = { family: st.family, from: (t1 - span).toFixed(0), to: t1.toFixed(0) };
+    const span = Math.round((w.to - w.from) / 1000);
+    const t1 = Math.floor(w.to / 1000);
+    const p = { family: st.family, from: String(t1 - span), to: String(t1) };
     for (const k of fam()?.scope || []) if (st.scope[k]) p[k] = st.scope[k];
-    return p;
+    return { p, span, t1 };
   }
   async function load(force) {
     if (!fam()) return;
     const missing = fam().required.filter((k) => !st.scope[k]);
     if (missing.length) { show(null, `${missing.map((k) => SCOPE_LABEL[k]).join('・')}を選んでください`); return; }
-    const p = params();
-    const key = new URLSearchParams(p).toString();
-    if (!force && key === st.key && st.data) return;
+    const { p, span, t1 } = params();
+    // a preset window moves with time (live: the clock, PLAYBACK: the cursor): it is asked again once it has moved by a
+    // step, not on every poll; its end is never rounded back (the newest values stay in it)
+    const moving = !st.zoom.length && st.preset !== 'custom';
+    const { from, to, ...rest } = p;
+    const key = new URLSearchParams(moving ? { ...rest, span } : p).toString();
+    if (!force && key === st.key && st.data && !(moving && Math.abs(t1 - st.lastTo) >= step(span))) return;
     const my = ++st.seq;
     s.status.textContent = '読み込み中…';
     try {
-      const d = await getJson(`/trend/series?${key}`);
+      const d = await getJson(`/trend/series?${new URLSearchParams(p)}`);
       if (my !== st.seq) return;
+      st.lastTo = t1;
       st.key = key;
       st.data = d;
       show(d, '');

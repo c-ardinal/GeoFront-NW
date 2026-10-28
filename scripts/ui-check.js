@@ -97,7 +97,9 @@ async function trendDeep(page) {
   await page.locator('#modal .tr-acts .link-btn', { hasText: '拡大を戻す' }).click();
   await page.locator('#modal .seg-btn', { hasText: '7d' }).click();
   await page.waitForFunction(() => /^7 日/.test(document.querySelector('#modal .tr-note')?.textContent || ''), null, { timeout: 30000 });
-  check('preset 7d: step sized for <= 600 points', true, (await page.textContent('#modal .tr-note')).split('·').slice(0, 3).join('·'));
+  const n7 = await page.textContent('#modal .tr-note');
+  const p7 = Number(/1 系列 (\d+) 点/.exec(n7)?.[1]);
+  check('preset 7d: step sized for <= 600 points, the newest values included', p7 > 0 && p7 <= 600, n7.split('·').slice(0, 3).join('·'));
   // another family / scope: interface drops (the testbed may not answer them: "—" is the right answer then)
   await page.selectOption('#modal .tr-bar select', 'if_drops');
   await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash') && !/読み込み中/.test(document.querySelector('#modal .tr-status').textContent), null, { timeout: 30000 });
