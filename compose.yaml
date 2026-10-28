@@ -477,13 +477,8 @@ services:
     volumes:
       - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
-      interval: 60s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-      start_interval: 5s
+    # no healthcheck: the image is distroless since 3.7 (no wget / shell) and loki has no health subcommand;
+    # tools check probes loki:3100/ready instead
     mem_limit: ${LOKI_MEM:-512m}
     cpus: ${LOKI_CPUS:-1.0}
 
