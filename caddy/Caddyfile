@@ -1,5 +1,5 @@
 # Front reverse proxy: the only service published beyond localhost.
-#   :8080 -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/,
+#   :8080 -> published on ${OBS_BIND}:${OBS_PORT} (default 127.0.0.1:8080): command-center at /, Grafana at /grafana/ (optional),
 #            the login screen (Authelia) at /auth/ when authentication is on
 #   :9090 -> 127.0.0.1 only: Prometheus UI, read-only (the admin API used by `tools backup` is never proxied)
 #   :3000 -> 127.0.0.1 only: old Grafana URLs, redirected to /grafana/
@@ -21,6 +21,22 @@
 
 import /etc/caddy/access-{$OBS_ACCESS}.caddy
 
+# Grafana is optional (compose profile grafana, off by default): when the proxy cannot reach it (no such container, or
+# not started yet), /grafana/ says so with a 404 page instead of an empty 502. Other proxy errors keep their status.
+(grafana_off) {
+	handle_errors 502 {
+		@gfDown path /grafana /grafana/*
+		handle @gfDown {
+			header Content-Type "text/html; charset=utf-8"
+			header Cache-Control no-store
+			respond `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Grafana は有効になっていません</title><body style="font-family:sans-serif;max-width:40em;margin:3em auto;line-height:1.7"><h1>Grafana は有効になっていません</h1><p>Grafana は任意の追加機能で、既定では動いていません。コマンドセンター (<a href="/">/</a>) の「推移」と「ログ検索」で、同じ情報を伏せ字のまま見られます。</p><p>使うときは、.env の COMPOSE_PROFILES に grafana を加えて <code>./geofront up -d</code> を実行してください (docs/operations.md)。有効にした直後は起動に数分かかります。</p></body></html>` 404
+		}
+		handle {
+			respond "{err.status_code} {err.status_text}" {err.status_code}
+		}
+	}
+}
+
 # mask-api: with the proxy's key, so mask-api believes the identity headers set above only from here (mask_api.identity)
 (mask_api) {
 	reverse_proxy mask-api:8000 {
@@ -31,6 +47,7 @@ import /etc/caddy/access-{$OBS_ACCESS}.caddy
 
 {$OBS_SITES} {
 	import site_tls
+	import grafana_off
 	# Everything in written order: first the identity (client copies of the identity headers removed, then the login
 	# check and the verified user / role in access-<mode>.caddy), then the routes.
 	route {
@@ -114,6 +131,19 @@ import /etc/caddy/access-{$OBS_ACCESS}.caddy
 				}
 			}
 		}
+		# 推移 / ログ検索 (F1, mask-api trend_api.py / logsearch.py): read-only, GET / HEAD only; PromQL and LogQL are built
+		# there from allowlisted parameters, never taken from the client
+		@search path /trend/* /logsearch/*
+		handle @search {
+			@searchWrite not method GET HEAD
+			header @searchWrite Content-Type application/json
+			respond @searchWrite `\{"status":"error","error":"read-only"\}` 405
+			import mask_api {
+				transport http {
+					response_header_timeout 30s
+				}
+			}
+		}
 		redir /grafana /grafana/ 308
 		handle /grafana/* {
 			import grafana_access
@@ -157,6 +187,7 @@ http://:9090 {
 # old Grafana URLs on 127.0.0.1: an identity is never passed here; with authentication nothing is served (Grafana only
 # through the screens' URL, for the role admin: access-auth.caddy)
 http://127.0.0.1:3000, http://localhost:3000, http://[::1]:3000 {
+	import grafana_off
 	request_header -X-Obs-User
 	request_header -X-Obs-Role
 	request_header -X-Obs-Grafana-Role
