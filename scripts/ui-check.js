@@ -164,6 +164,26 @@ async function drawerLinks(page) {
   await page.keyboard.press('Escape');
 }
 
+// destination drawers (needs flows, e.g. the demo profile): a country and an address-level (UNKNOWN GEO) destination
+// both offer 推移を見る with the destination's country kept
+async function destLinks(page) {
+  for (const [list, what] of [['#dest', 'country'], ['#unknown', 'address']]) {
+    const row = page.locator(`${list} .row.clickable`).first();
+    if (!(await row.count())) { console.log(`[--] destination drawer (${what}): no flow rows here, not checked`); continue; }
+    if (await page.evaluate(() => getComputedStyle(document.getElementById('tabs')).display !== 'none')) await page.click('#tabs button[data-tab="net"]');
+    await row.click();
+    await page.waitForSelector('#drawer:not([hidden])');
+    const link = page.locator('#drawer .link-btn', { hasText: '推移を見る' }).first();
+    check(`destination drawer (${what}) offers 推移を見る`, (await link.count()) > 0);
+    if (!(await link.count())) { await page.keyboard.press('Escape'); continue; }
+    await link.click();
+    await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash'), null, { timeout: 30000 });
+    const cc = await page.evaluate(() => [...document.querySelectorAll('#modal .tr-scope input')].map((i) => i.value).filter(Boolean).join(','));
+    check(`destination drawer (${what}) -> 推移 keeps the country`, !!cc, cc);
+    await page.keyboard.press('Escape');
+  }
+}
+
 async function playback(page) {
   const reqs = [];
   page.on('request', (r) => { if (r.url().includes('/trend/series')) reqs.push(r.url()); });
@@ -202,6 +222,7 @@ async function playback(page) {
     await trendDeep(page);
     await searchDeep(page);
     await drawerLinks(page);
+    await destLinks(page);
     await load(page, 'default', 'lite');
     check('LITE mode on', await page.evaluate(() => document.documentElement.dataset.render === 'lite'));
     await trendBasics(page, 'lite-1920', 1920);

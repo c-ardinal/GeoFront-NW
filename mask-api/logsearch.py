@@ -6,8 +6,10 @@ retention. The LogQL sent to Loki is the label selector only, built here from th
 the keyword / regex never reaches Loki. It is matched here on the MASKED lines, so it can never find a hidden
 address. Regular expressions (check_regex): at most REGEX_MAX characters, no groups with "(?" (lookaround, flags,
 named groups), no back references, no repeat inside a repeat, no alternation inside a repeat, at most one
-variable-length repeat (* + {m,n}) and a few "?": with each line cut to MATCH_MAX characters one line costs at most
-~MATCH_MAX^2 steps, and the scan's time budget is checked between lines.
+variable-length repeat (* + {m,n}) and with it at most one "?" (four without one): with each line cut to MATCH_MAX
+characters one line costs at most ~MATCH_MAX^2 steps (~15 ms measured on an adversarial line), and the scan's time
+budget is checked between lines. The highlight reuses the match that decided the line (a regex: that one match; a
+plain keyword: its literal occurrences, a linear scan), so nothing is matched again outside the budget.
 
 lines: newest first, `limit` per page; next_before (ns) continues older (end exclusive: the screen drops lines it
 already has). hist: lines per time bucket for the window (Loki's count_over_time without a keyword; with one, counted
@@ -96,8 +98,8 @@ def check_regex(pattern):
                 for b in av[1]:
                     walk(b, in_repeat)
     walk(tree, False)
-    if count["var"] > 1 or count["opt"] > 4:
-        raise Refused("長さの決まらない繰り返し (* + {m,n}) は 1 か所、? は 4 か所までです")
+    if count["var"] > 1 or count["opt"] > (1 if count["var"] else 4):
+        raise Refused("長さの決まらない繰り返し (* + {m,n}) は 1 か所までです。? はそれと一緒なら 1 か所、なければ 4 か所までです")
     return re.compile(pattern, re.IGNORECASE)
 
 
@@ -110,21 +112,32 @@ def matcher(q, is_regex):
     return check_regex(q) if is_regex else re.compile(re.escape(q), re.IGNORECASE)
 
 
-def parts_of(line, rx):
-    """[[text, hit]] for highlighting: the matches in the first MATCH_MAX characters (at most HITS_PER_LINE)."""
+def hit_spans(rx, is_regex, line):
+    """None when the line does not match; else the spans to mark in it (first MATCH_MAX characters): a regex -> the one
+    match that decided it (never searched again: a second search could cost as much as the first, outside the budget);
+    a plain keyword -> its occurrences, at most HITS_PER_LINE (a literal pattern: linear)."""
     if rx is None:
-        return [[line, False]]
-    out, pos = [], 0
-    for n, m in enumerate(rx.finditer(line, 0, MATCH_MAX)):
-        if n >= HITS_PER_LINE:
+        return []
+    if is_regex:
+        m = rx.search(line, 0, MATCH_MAX)
+        return None if m is None else [m.span()] if m.end() > m.start() else []
+    spans = []
+    for m in rx.finditer(line, 0, MATCH_MAX):
+        spans.append(m.span())
+        if len(spans) >= HITS_PER_LINE:
             break
-        if m.end() == m.start():
-            continue
-        if m.start() > pos:
-            out.append([line[pos:m.start()], False])
-        out.append([m.group(0), True])
-        pos = m.end()
-    if pos < len(line):
+    return spans or None
+
+
+def parts_of(line, spans):
+    """[[text, hit]] for highlighting, from spans found while matching (no matching here)."""
+    out, pos = [], 0
+    for a, b in spans:
+        if a > pos:
+            out.append([line[pos:a], False])
+        out.append([line[a:b], True])
+        pos = b
+    if pos < len(line) or not out:
         out.append([line[pos:], False])
     return out
 
@@ -173,7 +186,7 @@ def parse(query, now):
     if not limit.isdigit() or not 1 <= int(limit) <= PAGE_MAX:
         raise Refused(f"limit: 1 to {PAGE_MAX}")
     selector = M.loki_selector("{" + ",".join(labels) + "}")  # literal checks + token -> address
-    return {"selector": selector, "rx": rx, "from": t0, "to": t1, "start_ns": start_ns, "end_ns": end_ns, "limit": int(limit)}
+    return {"selector": selector, "rx": rx, "regex": rx is not None and p.get("regex") == "1", "from": t0, "to": t1, "start_ns": start_ns, "end_ns": end_ns, "limit": int(limit)}
 
 
 # ---- lines ----------------------------------------------------------------------------------------------------------
@@ -186,7 +199,7 @@ class _Spec:  # what mask_api.settled() reads
 
 
 def passes(rx, line):
-    return rx is None or rx.search(line, 0, MATCH_MAX) is not None
+    return rx is None or rx.search(line, 0, MATCH_MAX) is not None  # (counting only: no highlight needed)
 
 
 def lines(req, get_page=None, page_size=None, budget_s=BUDGET_S):
@@ -201,8 +214,9 @@ def lines(req, get_page=None, page_size=None, budget_s=BUDGET_S):
                 stopped = ts
                 break
             masked = M.mask_line(st, line)
-            if passes(req["rx"], masked):
-                hits.append((ts, M.mask_json(st), masked))
+            spans = hit_spans(req["rx"], req["regex"], masked)
+            if spans is not None:
+                hits.append((ts, M.mask_json(st), masked, spans))
         if stopped is not None:
             scan.partial.append("time budget used up")
             break
@@ -224,7 +238,7 @@ def lines(req, get_page=None, page_size=None, budget_s=BUDGET_S):
     else:
         nxt = scan.edge if scan.edge is not None and scan.edge < req["end_ns"] else None
     entries = [{"ts": str(ts), "host": st.get("host", ""), "severity": st.get("severity", ""), "facility": st.get("facility", ""),
-                "parts": parts_of(line, req["rx"])} for ts, st, line in page]
+                "parts": parts_of(line, spans)} for ts, st, line, spans in page]
     partial = sorted(set(scan.partial))
     return {"entries": entries, "next_before": str(nxt) if nxt and nxt > req["start_ns"] else None, "partial": partial,
             "scanned": scan.scanned}
@@ -366,7 +380,8 @@ def selftest():
         check_regex(good)
     # refused: catastrophic or unsupported regexes, injection through every value, raw / partial addresses, windows
     bad_rx = ["(a+)+$", "(a*)*b", "(a|aa)*c", "(x+x+)+y", "(.*a){10}", "a.*b.*c", "(?=a)", "(?<!a)b", "(?i)a", "(?P<n>a)",
-              "(a)\\1", "a{1,65}", "x" * 65, "[", "a**", "(ab|cd)+","a?b?c?d?e?f?"]
+              "(a)\\1", "a{1,65}", "x" * 65, "[", "a**", "(ab|cd)+", "a?b?c?d?e?f?",
+              "a?a?a?a?a*b", "[a-z]*.?.?.?.?=", "a.?.?.?.?.*b"]  # several "?" around a variable repeat: ~100-200 ms a line
     bad = [f"q={q(r)}&regex=1&{base}" for r in bad_rx]
     bad += [f"host={q('rtx1300\"} |= \"x')}&{base}", f"host={q('a,job=\"notify\"')}&{base}", f"host={q('rtx1300`')}&{base}",
             f"severity=errors&{base}", f"facility={q('local7\"')}&{base}", f"facility=local8&{base}", f"regex=2&q=a&{base}",
@@ -441,6 +456,16 @@ def selftest():
     t = time.monotonic()
     res = lines(slow, get_page=lambda s, a, b, lim, to, d="backward": [e for e in long_lines if a <= e[1] < b][:lim], page_size=5000, budget_s=1)
     assert time.monotonic() - t < 3 and res["entries"] == [], time.monotonic() - t
+    # the worst still accepted on lines of one repeated letter: matching + highlighting 200 lines stays inside the budget
+    # (the highlight reuses the deciding match: no second search per line)
+    for pat, body in (("[a-z]*.?=", "a=" + "a" * 1022), ("a.?.*b", "ab" + "a" * 1022), ("a?a*b", "ab" + "a" * 1022)):
+        worst = parse(f"q={q(pat)}&regex=1&limit=200&{base}", now)
+        same = [({"job": "syslog", "host": "x"}, t0n + i, body) for i in range(200)]
+        t = time.monotonic()
+        res = lines(worst, get_page=lambda s, a, b, lim, to, d="backward": [e for e in same if a <= e[1] < b][:lim], page_size=5000, budget_s=2)
+        took = time.monotonic() - t
+        assert took < 2.5 and res["entries"] and sum(h for e in res["entries"] for _, h in e["parts"]) == len(res["entries"]), (pat, took)
+    assert hit_spans(re.compile("lan", re.I), False, "LAN1 lan2 x") == [(0, 3), (5, 8)] and hit_spans(re.compile("q"), False, "abc") is None
     assert handle("POST", "/logsearch/lines")[0] == 405 and handle("GET", "/logsearch/other")[0] == 403
     assert handle("GET", "/logsearch/lines?q=" + q("(a+)+") + "&regex=1&from=1&to=2")[0] == 400
     print(f"logsearch selftest ok ({len(bad)} refused requests, {len(bad_rx)} unsafe regexes)")

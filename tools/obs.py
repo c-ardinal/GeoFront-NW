@@ -1801,9 +1801,7 @@ def cmd_backup(args):
             sources = [("prometheus", "prometheus", snap, None), ("loki", "loki", VOL / "loki", None),
                        ("alertmanager", "alertmanager", VOL / "alertmanager", None)]
             if gdb:  # Grafana's data only when it has any (optional, profile grafana): also kept while Grafana is off
-                sources.append(("grafana", "grafana", VOL / "grafana", skip_db))
-            if gdb:
-                sources.append(("grafana", "grafana/grafana.db", gdb, None))
+                sources += [("grafana", "grafana", VOL / "grafana", skip_db), ("grafana", "grafana/grafana.db", gdb, None)]
             adb = grafana_db_copy(tmp, VOL / "authelia/db.sqlite3", "authelia.sqlite3")
             if (VOL / "authelia/users_database.yml").exists():  # login users (argon2id hashes) + bans / TOTP keys
                 skip_adb = lambda ti: None if re.search(r"(^|/)db\.sqlite3(-wal|-shm|-journal)?$", ti.name) else ti

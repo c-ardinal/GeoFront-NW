@@ -210,11 +210,11 @@ export function logSearchView(init = {}) {
       ri.checked = f.regex;
       ri.addEventListener('change', () => { f.regex = ri.checked; });
       rl.append(ri, document.createTextNode(' 正規表現'));
-      rl.title = '64 文字まで。繰り返しの入れ子、先読み・後読み、後方参照は使えません。長さの決まらない繰り返し (* + {m,n}) は 1 か所まで';
+      rl.title = '64 文字まで。繰り返しの入れ子、先読み・後読み、後方参照は使えません。長さの決まらない繰り返し (* + {m,n}) は 1 か所まで。? はそれと一緒なら 1 か所、なければ 4 か所まで';
       const go = el('button', 'link-btn ls-go', '検索');
       go.type = 'submit';
       form.append(dev.l, sev.l, s.fac.l, ql, rl, go);
-      range = rangeControl(st, { presets: PRESETS, maxS: retention, onChange: () => { st.zoom = []; search().catch(() => {}); } });
+      range = rangeControl(st, { presets: PRESETS, maxS: () => retention, onChange: () => { st.zoom = []; search().catch(() => {}); } });
       const hs = section('時間ごとの件数', '同じ条件 · 棒を選ぶとその時間に絞ります');
       s.hist = el('div');
       hs.body.append(s.hist);

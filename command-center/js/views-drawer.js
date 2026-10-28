@@ -191,7 +191,7 @@ export function destView(d) {
       s.src.body.append(s.srcBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
       body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap,
-        ...(d.ip ? [] : [deepSection([['推移を見る (ASN ごと)', (n) => n.trend({ family: 'flow_asn', dst_country: d.cc })],
+        ...(!d.cc ? [] : [deepSection([['推移を見る (ASN ごと)', (n) => n.trend({ family: 'flow_asn', dst_country: d.cc })],
           ['推移を見る (端末ごと)', (n) => n.trend({ family: 'flow_host', dst_country: d.cc })]]).wrap]),
         evidenceSection(() => (d.ip ? { scope: 'dest', ip: d.ip } : { scope: 'dest', cc: d.cc, city: d.city })).wrap);
     },

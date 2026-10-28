@@ -37,7 +37,9 @@ export function fmtVal(v, unit) {
 const axisVal = (v, unit) => (unit === 'bps' ? fmtBps(v).replace(' ', '') : v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2));
 
 // Range control shared with ログ検索: presets + 開始 / 終了 (JST). onChange({ preset, from, to }) with ms (custom only).
+// maxS: the longest custom window in seconds, a number or a function (read when the window is applied)
 export function rangeControl(state, { presets = PRESETS, maxS = Infinity, onChange }) {
+  const lim = typeof maxS === 'function' ? maxS : () => maxS;
   const wrap = el('div', 'tr-range');
   const seg = el('div', 'seg');
   seg.setAttribute('role', 'group');
@@ -69,7 +71,7 @@ export function rangeControl(state, { presets = PRESETS, maxS = Infinity, onChan
     const from = fromInput(fi.value), to = Math.min(fromInput(ti.value), now());
     const bad = !Number.isFinite(from) || !Number.isFinite(to) ? '開始と終了を入れてください'
       : to - from < MIN_SPAN_S * 1000 ? '期間は 5 分以上にしてください'
-        : to - from > maxS * 1000 ? `期間は ${spanText(maxS)}までです` : '';
+        : to - from > lim() * 1000 ? `期間は ${spanText(lim())}までです` : '';
     why.textContent = bad;
     if (bad) return;
     Object.assign(state, { preset: 'custom', from, to });
