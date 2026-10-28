@@ -39,12 +39,12 @@ export OBS_CONFIG_DIR=/etc/geofront
 | 項目 | 既定 | 内容 |
 |---|---|---|
 | `COMPOSE_PROFILES` | なし | `prod` (実機)、`demo`、`prod,capture` (パケット取込あり) |
-| `COMPOSE_PROJECT_NAME` | `geofront-nw` | コンテナとボリュームの名前。`tools init` が固定します。変えると今までのデータが見えなくなります |
+| `COMPOSE_PROJECT_NAME` | `yamaha-observatory-trial` | コンテナとボリュームの名前。古いボリュームがないホストで `./geofront` から新しく導入すると `geofront-nw` になります。`tools init` が値を固定します。変えると今までのデータが見えなくなります |
 | `OBS_BIND` / `OBS_PORT` | `127.0.0.1` / `8080` | 画面を公開するアドレス。LAN 側の IP か `0.0.0.0` にすると LAN に公開します (ログインと HTTPS が必須) |
 | `OBS_PUBLIC_URL` | `http://127.0.0.1:8080` | 画面・通知・Grafana のリンクに使う URL |
 | `OBS_AUTH` | `0` | `1` にすると 127.0.0.1 でもログインが必須になります |
 | `OBS_AUTH_*` | なし | ログインの秘密値と、セッション・締め出しの設定 ([security.md](security.md)) |
-| `GF_ADMIN_PASSWORD` | `change-me` | Grafana の管理者パスワード。Grafana の初回起動のときだけ使われます |
+| `GF_ADMIN_PASSWORD` | `admin` | Grafana の管理者パスワード。`tools init` が設定します。Grafana の初回起動のときだけ使われます |
 | `OBS_GRAFANA` | `1` | `0` にすると Grafana を起動しません (Raspberry Pi に推奨) |
 | `SYSLOG_BIND` / `SYSLOG_PORT` | `127.0.0.1` / `514` | syslog の受信先 (UDP / TCP)。機器から受けるにはホストの LAN 側 IP にします |
 | `PROM_LOCAL_PORT` / `GRAFANA_LOCAL_PORT` | `9090` / `3000` | このホストだけで開ける Prometheus (読み取り専用) と、古い Grafana の URL の転送 |

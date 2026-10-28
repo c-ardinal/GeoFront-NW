@@ -1,4 +1,4 @@
-# 機種ドライバ (drivers/)
+# 機種ドライバ
 
 機種に固有のもの (SNMP の取得モジュール、LLDP を読むか、syslog の形式の回帰用 fixture、デモの機器) は
 `drivers/<vendor-model>/` にまとめ、本体 (tools・Prometheus・Alloy・mask-api・画面) は機種に依存しません。
@@ -19,7 +19,7 @@
 | `demo.json` | 任意 | demo-gen (イメージに同梱)、tools (demo profile の対象・台帳の代わり) | demo profile の機器 (インターフェース表、ルーターは `wan_if`、AP は `ap` の配分、`ssids`、`lldp` の隣接、`link` = ネットワーク図の親、`logs` / `error_logs` = syslog の文面)。疑似データ |
 
 SNMP の資格情報 (`snmp/auths.yml`) と LLDP のモジュール (`snmp/lldp.yml`) は標準 MIB なので全機種共通です
-(auth の名前 `yamaha_v3` / `yamaha_v2c` は 古い台帳と互換にするための名前で、中身は SNMPv3 authPriv / v2c の汎用設定です)。
+(auth の名前 `yamaha_v3` / `yamaha_v2c` は古い台帳と互換にするための名前で、中身は SNMPv3 authPriv / v2c の汎用設定です)。
 syslog の解析 (`alloy/config.alloy`) は形式で判定し (RFC 5424 / RFC 3164 のヘッダがあれば外し、PRI だけの行はそのまま)、
 機種名では分けていません。
 

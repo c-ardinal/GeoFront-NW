@@ -7,8 +7,18 @@ scripts/doctor.sh                      # ホストの項目も含めた診断
 ./geofront run --rm tools doctor       # ホストの項目を除いた診断
 ```
 
-doctor.sh は Docker 25 以上・compose・CPU (arm64 / amd64)・メモリ・ディスク・時刻 (NTP)・ポートの衝突・`.env` と台帳・利用者のいない LAN 公開・証明書・コミットしてはいけないデータを調べます。
-結果は OK / WARN / NG と直し方の表で出ます。NG があると終了コード 1 で終わります。機器には接続しません。
+doctor.sh は次の項目を調べます。機器には接続しません。
+
+- Docker 25 以上と compose
+- CPU (arm64 / amd64)、メモリ、ディスク
+- 時刻 (NTP)
+- ポートの衝突
+- `.env` と台帳
+- 利用者のいない LAN 公開
+- 証明書
+- コミットしてはいけないデータ
+
+結果は OK / WARN / NG と直し方の表で出て、NG があると終了コード 1 で終わります。
 
 ## 動作の確認
 
@@ -29,6 +39,8 @@ doctor.sh は Docker 25 以上・compose・CPU (arm64 / amd64)・メモリ・デ
 バックアップにはメトリクス・syslog・Grafana・抑止と ACK・ログインの利用者・認証局の証明書と鍵・機器台帳・通知先が入ります。
 動かしたままでも取れます。鍵と秘密値が入るので、アーカイブの扱いに注意してください。
 別のホストに戻すときは `--include-env` を付けて `.env` も含めてください。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` がないと読めません。
+
+restore は各ボリュームの今の中身を消して、アーカイブの内容に置き換えます。
 
 ```sh
 ./geofront stop prometheus loki grafana alertmanager authelia proxy
@@ -53,7 +65,7 @@ OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orpha
 
 - `--remove-orphans` を付けると、使われなくなったサービスのコンテナが消えます。
 - `OBS_COMMIT` は証跡に記録されるバージョンの情報です。渡さないと `unknown` になります。
-- LAN に公開している構成では、以前の版からの更新でログインが必須になります。先に `tools user secrets` と `tools user add <名前> --role admin` を実行してください。
+- LAN に公開している構成では、以前のバージョンから更新するとログインが必須になります。先に `tools user secrets` と `tools user add <名前> --role admin` を実行してください。
 
 配布イメージを使うときは、`.env` に `GEOFRONT_VERSION=v1.0.0` のようにタグを書き、`./geofront pull` と `./geofront up -d` を実行します。
 
@@ -61,7 +73,7 @@ OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orpha
 
 ```sh
 scripts/verify.sh                          # quick: selftests compose leak-scan doctor (数分)
-scripts/verify.sh full                     # quick に e2e-open e2e-auth resilience backup-restore upgrade arm64 を加える
+scripts/verify.sh full                     # selftests compose leak-scan e2e-open e2e-auth resilience backup-restore upgrade arm64 (doctor は含まない)
 scripts/verify.sh e2e-auth backup-restore  # 名前を並べて一部だけ
 ```
 
@@ -76,7 +88,7 @@ verify.sh を動かすには、ホストに bash・docker・python3 が要りま
 | e2e-open / e2e-auth | 新しいコピーで init から check まで通す (ログインなし / ログインあり)。`E2E_LAN_IP=<LAN の IP>` で LAN に公開して試す |
 | resilience | サービスを 1 つずつ止めて、画面がエラーを示し、起動すると戻る。`REBOOT_CMD="sudo systemctl restart docker"` でホストの再起動に近い状態も試す |
 | backup-restore | バックアップを別のプロジェクトに戻して、内容が一致する |
-| upgrade | 前の版のデータボリュームを今の版で起動できる |
+| upgrade | 前のバージョンのデータボリュームを今のバージョンで起動できる |
 | arm64 | イメージが linux/arm64 と linux/amd64 を含み、arm64 でビルドできる |
 
 Raspberry Pi に導入したら、次の順に確かめてください。
@@ -114,7 +126,7 @@ Linux ホストではパケット取込の経路も試せます (`COMPOSE_PROFIL
 
 ## デモの異常
 
-デモでは `DEMO_AUTO_FAULTS=1` (既定) のときに約 4 分ごとに異常が起こります。止めるには `.env` で `DEMO_AUTO_FAULTS=0` にします。手で起こすこともできます。
+デモでは `DEMO_AUTO_FAULTS=1` (既定) のとき、約 4 分ごとに異常が起こります。止めるときは `.env` を `DEMO_AUTO_FAULTS=0` にし、手で起こすときは次のコマンドを使います。
 
 ```sh
 curl "http://127.0.0.1:9116/fault/down?target=wlx222&seconds=120"   # DeviceDown

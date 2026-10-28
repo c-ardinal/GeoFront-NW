@@ -32,7 +32,7 @@ docker compose --profile demo up -d --build
 ```
 
 コマンドセンターは http://127.0.0.1:8080/ で、Grafana は http://127.0.0.1:8080/grafana/ (admin / admin) で開きます。
-止めるときは `docker compose --profile demo stop` を実行します。データごと消すときは `down -v` を使います。
+止めるときは `docker compose --profile demo stop` を、データごと消すときは `down -v` を使います。
 
 ## 本番への導入
 
@@ -42,7 +42,7 @@ docker compose --profile demo up -d --build
 1. リポジトリを取得します。
    ```sh
    git clone https://github.com/c-ardinal/GeoFront-NW.git && cd GeoFront-NW
-   export OBS_CONFIG_DIR=/etc/geofront      # 任意
+   export OBS_CONFIG_DIR=/etc/geofront      # 任意。root 権限が要ります (使わなければ ~/.config/geofront)
    ```
 2. 初期設定を行います。対話形式で `.env` と機器台帳が作られます。
    ```sh
@@ -82,6 +82,8 @@ LAN に公開した場合は、各端末にルート証明書を登録してく�
 git pull && scripts/doctor.sh
 OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orphans && ./geofront run --rm tools check
 ```
+
+イメージの取得を含む詳しい手順は [docs/operations.md](docs/operations.md#更新) にあります。
 
 ## バックアップと復元
 
