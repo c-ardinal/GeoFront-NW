@@ -4,7 +4,8 @@
 // Both themes x 390 / 768 / 1280 / 1920 / 2560 px: the views open from the panel headings (no new top-bar item), draw
 // (SVG or "—"), at most 600 points per series, no horizontal overflow, >= 44 px targets below 1280 px; then once:
 // legend toggle, keyboard readout, drag-to-zoom + 拡大を戻す, presets, log search (marks, histogram, refused regex,
-// selected line -> 原因候補), drawer deep links, LITE mode and PLAYBACK (the window ends at the cursor).
+// selected line -> 原因候補), drawer deep links, LITE mode and PLAYBACK (the window ends at the cursor). F2: the devices
+// modal / device drawer freshness ("Last seen" per device, "Data freshness (worst)").
 // One line per check (OK / NG); exit 1 when any is NG. Read-only: nothing is written to the stack.
 const fs = require('fs');
 const path = require('path');
@@ -164,6 +165,36 @@ async function drawerLinks(page) {
   await page.keyboard.press('Escape');
 }
 
+// F2: the per-device "Last seen" and the worst data freshness, in the devices modal (table or cards) and
+// the device drawer; a value or "> 15 min" (never empty), within the screen's width rules
+async function freshness(page, tag, w) {
+  if (await page.evaluate(() => getComputedStyle(document.getElementById('tabs')).display !== 'none')) await page.click('#tabs button[data-tab="sum"]');
+  await page.click('#p-devices > h2 .h-open');
+  await page.waitForSelector('#modal-root:not([hidden]) .tile');
+  await page.waitForTimeout(1500);
+  const t = await page.evaluate(() => {
+    const tile = [...document.querySelectorAll('#modal .tile')].find((x) => x.querySelector('.tile-l').textContent === 'Data freshness (worst)');
+    const body = document.getElementById('modal-body');
+    const cells = [...body.querySelectorAll('th, .card-f, .v-card *')].some((n) => /Last seen/.test(n.textContent));
+    return { tile: tile?.querySelector('.tile-v').textContent.trim(), cells, overflow: body.scrollWidth > body.clientWidth + 1 };
+  });
+  check(`${tag}: devices modal shows Data freshness (worst)`, /^(\d+ s|> 15 min)$/.test(t.tile || ''), t.tile);
+  check(`${tag}: devices modal lists Last seen per device`, t.cells);
+  check(`${tag}: devices modal has no horizontal overflow`, !t.overflow);
+  if (w < 1280) { const i = await modalInfo(page); check(`${tag}: devices modal targets >= 44 px`, !i.small.length, i.small.slice(0, 4).join(' ')); }
+  await shot(page, `${tag}-devices`);
+  await page.keyboard.press('Escape');
+}
+
+async function drawerFreshness(page) {
+  if (await page.evaluate(() => getComputedStyle(document.getElementById('tabs')).display !== 'none')) await page.click('#tabs button[data-tab="sum"]');
+  await page.locator('#devices .row.clickable').first().click();
+  await page.waitForSelector('#drawer:not([hidden]) .tile');
+  const v = await page.evaluate(() => [...document.querySelectorAll('#drawer .tile')].find((x) => x.querySelector('.tile-l').textContent === 'Last seen')?.querySelector('.tile-v').textContent.trim());
+  check('device drawer shows Last seen', /^(\d+ s|> 15 min)$/.test(v || ''), v);
+  await page.keyboard.press('Escape');
+}
+
 // destination drawers (needs flows, e.g. the demo profile): a country and an address-level (UNKNOWN GEO) destination
 // both offer 推移を見る with the destination's country kept
 async function destLinks(page) {
@@ -215,6 +246,7 @@ async function playback(page) {
         const head = await page.evaluate(() => document.getElementById('topbar').innerText);
         check(`${theme} ${w}: no 推移 / 検索 item in the top bar`, !/推移|検索/.test(head));
         await trendBasics(page, `${theme}-${w}`, w);
+        await freshness(page, `${theme}-${w}`, w);
       }
     }
     await page.setViewportSize({ width: 1920, height: 1080 });
@@ -222,6 +254,7 @@ async function playback(page) {
     await trendDeep(page);
     await searchDeep(page);
     await drawerLinks(page);
+    await drawerFreshness(page);
     await destLinks(page);
     await load(page, 'default', 'lite');
     check('LITE mode on', await page.evaluate(() => document.documentElement.dataset.render === 'lite'));

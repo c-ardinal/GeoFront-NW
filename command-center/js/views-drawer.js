@@ -2,7 +2,7 @@
 // Each drawer reads top-down: summary tiles -> charts / relation bars -> detail lists.
 import { el, has, fixed, fmtUptime, fmtDur, maskIp, maskText, jstFull, upState, now, isPlayback } from './util.js';
 import { lokiLogs, promRules } from './api.js';
-import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind, FLOW_TEXT, isWlx } from './panels.js';
+import { DEVICES, byKey, totalBps, ifaceRows, logRow, sevKind, FLOW_TEXT, isWlx, lastSeen, fmtSeen, seenKind } from './panels.js';
 import {
   section, kv, linkList, chartBlock, drawRange, fetchRange, mbps, lv, putIn, tiles, vsAvg, rankBars, keyLegend, timeline, alertLanes, alertKey,
   ALERT_KEYS, stackCols, SEV_KEYS, SEV_BAD, sevBuckets, multiples, seriesBy, maxOf, ipTokens, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
@@ -84,6 +84,7 @@ export function deviceView(name) {
       const sum = () => putIn(s.sum, tiles([
         { label: 'Status', value: text, kind, status: isUp ? 'SNMP answering' : 'no current SNMP data' },
         { label: 'Uptime', value: isUp && has(m.uptime.get(name)) ? fmtUptime(m.uptime.get(name)) : undefined },
+        { label: 'Last seen', value: has(lastSeen(m, name)) ? fmtSeen(lastSeen(m, name)) : undefined, kind: seenKind(lastSeen(m, name)), status: 'last successful SNMP scrape' },
         { label: 'Traffic ↓ (sum)', value: m.devIn.get(name), unit: 'Mbps', sub: vsAvg(pointsOf(lastR, 0), 1) && `1 h ${vsAvg(pointsOf(lastR, 0), 1)}`, spark: sparkOf(lastR, 0, 'sp-1') },
         { label: 'Traffic ↑ (sum)', value: m.devOut.get(name), unit: 'Mbps', sub: vsAvg(pointsOf(lastR, 1), 1) && `1 h ${vsAvg(pointsOf(lastR, 1), 1)}`, spark: sparkOf(lastR, 1, 'sp-2') },
         { label: 'Errors', value: err, unit: '/min', kind: errKind(err), status: errStatus(err) },
