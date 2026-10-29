@@ -21,7 +21,7 @@ target "_release" {
 target "tools" { inherits = ["_release"] }
 target "mask-api" {
   inherits = ["_release"]
-  args = { SELFTEST_EVIDENCE_BUDGET = "900" }  # arm64 under QEMU: the evidence selftest's exports need longer
+  args = { SELFTEST_EVIDENCE_BUDGET = "900" }  # slower arm64 runner: the evidence selftest's exports need longer
 }
 target "analyzer" { inherits = ["_release"] }
 target "flowd" { inherits = ["_release"] }
