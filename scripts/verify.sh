@@ -16,7 +16,7 @@
 #   upgrade         scripts/upgrade.sh (data volumes of bb2f21d = P6 -> this tree)
 #   arm64           scripts/arm64.sh (pulled images' arm64 digests, arm64 builds of tools / flowd / analyzer)
 # Throwaway projects are obs-e2e-*, removed with `down -v` at the end; the main project is never touched (only built).
-# Env: VERIFY_LOGS (default ${TMPDIR:-/tmp}/obs-verify-<time>), E2E_DIR, E2E_LAN_IP, E2E_GRAFANA, E2E_TAG / E2E_SLOT
+# Env: VERIFY_LOGS (default ${TMPDIR:-/tmp}/obs-verify-<time>), E2E_DIR, E2E_LAN_IP, E2E_TAG / E2E_SLOT
 # (scripts/e2e-fresh.sh), REBOOT_CMD, ARM64_IMAGES.
 set -u
 . "$(dirname "$0")/lib.sh"
@@ -50,7 +50,7 @@ selftests() {
 compose_cfg() {
   local f="$LOGS/lan-dummy.env" fail=0
   printf '%s\n' COMPOSE_PROFILES=prod OBS_BIND=192.0.2.10 OBS_PUBLIC_URL=https://192.0.2.10:8080 \
-    GF_ADMIN_PASSWORD=dummy-dummy-dummy "OBS_AUTH_SESSION_SECRET=$(rand 48)" "OBS_AUTH_STORAGE_KEY=$(rand 48)" \
+    "OBS_AUTH_SESSION_SECRET=$(rand 48)" "OBS_AUTH_STORAGE_KEY=$(rand 48)" \
     "OBS_AUTH_PROXY_KEY=$(rand 32)" > "$f"
   dc --profile demo config -q && echo "demo OK" || fail=1
   dc --env-file "$ROOT/testbed/testbed.env" config -q && echo "testbed OK" || fail=1

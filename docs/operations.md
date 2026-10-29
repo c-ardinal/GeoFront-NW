@@ -36,14 +36,14 @@ doctor.sh は次の項目を調べます。機器には接続しません。
 ./geofront run --rm tools backup --include-captures   # キャプチャとアップロードした pcap も含める
 ```
 
-バックアップにはメトリクス・syslog・Grafana (データがあるときだけ)・抑止と ACK・ログインの利用者・認証局の証明書と鍵・機器台帳・通知先が入ります。
+バックアップにはメトリクス・syslog・抑止と ACK・ログインの利用者・認証局の証明書と鍵・機器台帳・通知先が入ります。
 動かしたままでも取れます。鍵と秘密値が入るので、アーカイブの扱いに注意してください。
 別のホストに戻すときは `--include-env` を付けて `.env` も含めてください。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` がないと読めません。
 
 restore は各ボリュームの今の中身を消して、アーカイブの内容に置き換えます。
 
 ```sh
-./geofront stop prometheus loki grafana alertmanager authelia proxy
+./geofront stop prometheus loki alertmanager authelia proxy
 ./geofront run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz                  # --yes で確認を省く
 ./geofront run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz --with-config    # 台帳・通知先・.env も戻す
 ./geofront up -d
@@ -78,7 +78,6 @@ scripts/verify.sh e2e-auth backup-restore  # 名前を並べて一部だけ
 ```
 
 verify.sh を動かすには、ホストに bash・docker・python3 が要ります。検証は別のプロジェクト (`obs-e2e-*`) で行い、終わると消します。運用中のプロジェクトには触れません。
-e2e-open / e2e-auth は既定で Grafana なしで試します。`E2E_GRAFANA=1` を付けると Grafana も動かして試します。
 ほかの検証と同時に動かすときは、`E2E_TAG=<名前>` と `E2E_SLOT=1`〜`5` で、プロジェクト名とポートを分けてください。
 
 推移とログ検索の画面は `scripts/ui-check.js` でブラウザから確かめられます (Node.js と playwright-core が要ります。e2e-open を `KEEP=1` で残したプロジェクトに使います)。
@@ -120,7 +119,7 @@ git config core.hooksPath scripts/git-hooks   # コミットのたびに検査�
 ## 疑似実機での試験
 
 testbed は実機の代わりに疑似の機器 (SNMP シミュレータと syslog の送信器) で prod の構成を動かします。
-`.env` には触れず、別のプロジェクトと別のポート (画面 18080、Prometheus 19090、Grafana 13000、syslog 10514) で動きます。
+`.env` には触れず、別のプロジェクトと別のポート (画面 18080、Prometheus 19090、syslog 10514) で動きます。
 
 ```sh
 docker compose --env-file testbed/testbed.env up -d --build
@@ -155,42 +154,13 @@ curl "http://127.0.0.1:9116/fault/status"
 | `tools check` で SNMP が NG | 表示された原因の目安を確かめる ([devices.md](devices.md)) |
 | syslog が届かない | `SYSLOG_BIND` が LAN 側の IP か、台帳の `address` が送信元と一致するかを確かめる。DNS 名で書いた機器の IP が変わったら `./geofront restart alloy` |
 | 検索で「期限切れ」と出る | ページを読み込み直す |
-| `/grafana/` が「有効になっていません」と返す | Grafana は既定で動きません。使うときは下の「Grafana を使う」の手順で有効にする |
 | パケット取込が動かない | [capture.md](capture.md) の確認の順に調べる |
 
 ## Raspberry Pi での推奨設定
 
 既定値は Raspberry Pi 4 (4 GB) に合わせてあります。
 
-- Grafana は既定で動きません。コマンドセンターの「推移」と「ログ検索」で用が足ります。Pi では Grafana を有効にしないことを勧めます。
 - SD カードの容量が少ないときは、`PROM_RETENTION_SIZE` (例 `8GB`) で容量の上限を決めてください。
-
-## Grafana を使う
-
-Grafana は任意の追加機能です。既定では動かさず、コマンドセンターの「推移」と「ログ検索」で同じ情報を伏せ字のまま見られます ([ui.md](ui.md))。
-動かすときは、`.env` の `COMPOSE_PROFILES` に `grafana` を加えて起動します。
-
-```sh
-# .env: COMPOSE_PROFILES=prod,grafana   (デモなら demo,grafana)
-./geofront up -d
-./geofront run --rm tools check      # Grafana の health と管理者パスワードも確かめます
-```
-
-新しく導入するときは `tools init --grafana` でも同じ設定になります。`GF_ADMIN_PASSWORD` には既定値以外を入れてください。
-有効にしたときの扱い (ログインありの構成では admin だけが開ける、など) は [security.md](security.md) のとおりです。
-
-止めるときは `COMPOSE_PROFILES` から `grafana` を外し、Grafana のコンテナを止めて消します。データのボリューム (grafana-data) は消えません。
-
-```sh
-./geofront rm -s -f grafana
-```
-
-動いていない間、`/grafana/` は「有効になっていません」というページ (404) を返します。`tools doctor` と `tools check` は Grafana を求めません。
-
-以前のバージョンから更新すると、Grafana は既定で動かない構成になります。ただし、更新の前から動いていた Grafana のコンテナは、
-`up -d` でも `--remove-orphans` でも止まらず、そのまま動き続けます (compose に定義が残っているためです)。
-使い続けるときは、`.env` の `COMPOSE_PROFILES` に `grafana` を加えてください。ダッシュボードや利用者のデータ (grafana-data) は残っています。
-使わないときは、上の `./geofront rm -s -f grafana` で止めてください。`tools doctor` が、データが残っていることと、`.env` に残った `OBS_GRAFANA=1` を知らせます。
 
 ## 表示端末の描画モード
 

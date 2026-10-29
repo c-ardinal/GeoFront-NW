@@ -2,7 +2,7 @@
 // Every modal reads top-down: summary tiles (is it OK / what stands out) -> charts -> detail list (表 / カード).
 import { el, has, fixed, fmtUptime, fmtBytes, fmtDur, maskIp, maskText, jstFull, sortTable, upState, bar, refocus, now, isPlayback } from './util.js';
 import { promQuery, lokiLogs, lokiMetric, logqlString } from './api.js';
-import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow, sevKind, FLOW_TEXT, WAN, WAN_NOT_CONFIGURED, wanSel, wanLabel, WLAN, isWlx } from './panels.js';
+import { DEVICES, byKey, totalBps, ifaceRows, wlanRows, wanValues, logRow, sevKind, FLOW_TEXT, WAN, WAN_NOT_CONFIGURED, wanSel, wanLabel, WLAN, isWlx, lastSeen, fmtSeen, seenKind } from './panels.js';
 import {
   section, chartBlock, drawRange, fetchRange, rangeSelect, mbps, lv, linkBtn, putIn, tiles, vsAvg, rankBars, keyLegend, timeline,
   stackCols, SEV_KEYS, sevBuckets, sevTiles, SEV_LEVELS, SEV_BAD, sevKey, multiples, seriesBy, maxOf, dataView, listSection, alertLanes, alertKey, ipTokens, ALERT_KEYS, DIR_KEYS, IO_KEYS, dirSegs, pct, shareText, SNMP_UP, FLOWS_UP, FLOWS_DOWN, flowsMissing,
@@ -40,11 +40,12 @@ export function devicesModal() {
         { key: 'name', label: 'Device' }, { key: 'status', label: 'Status' }, { key: 'uptime', label: 'Uptime', num: true, fmt: (v) => (has(v) ? fmtUptime(v) : '—') },
         { key: 'in', label: '↓ Mbps', num: true, fmt: fmtN(1) }, { key: 'out', label: '↑ Mbps', num: true, fmt: fmtN(1) },
         { key: 'err', label: 'Errors /min', num: true, fmt: fmtN(1) }, { key: 'clients', label: 'WLAN clients', num: true, fmt: (v, r) => (isWlx(r.name) ? fixed(v, 0) : 'n/a') },
-        { key: 'ifCount', label: 'Interfaces', num: true },
+        { key: 'ifCount', label: 'Interfaces', num: true }, { key: 'seen', label: 'Last seen', num: true, fmt: fmtSeen },
       ], { key: 'name' }, (r) => ({
         title: r.name.toUpperCase(), badge: r.badge,
         fields: [['↓', fixed(r.in), 'Mbps'], ['↑', fixed(r.out), 'Mbps'], ['Errors', fixed(r.err), '/min'],
-          ['Uptime', has(r.uptime) ? fmtUptime(r.uptime) : undefined], ['WLAN clients', isWlx(r.name) ? fixed(r.clients, 0) : 'n/a'], ['Interfaces', r.ifCount]],
+          ['Uptime', has(r.uptime) ? fmtUptime(r.uptime) : undefined], ['WLAN clients', isWlx(r.name) ? fixed(r.clients, 0) : 'n/a'], ['Interfaces', r.ifCount],
+          ['Last seen', has(r.seen) ? fmtSeen(r.seen) : undefined]],
       }), (r) => r.name);
       const ls = listSection('Devices', 'click a row / card for details', dv);
       const ifSec = section('Interfaces per device');
@@ -63,12 +64,13 @@ export function devicesModal() {
       const rows = DEVICES.map((d) => {
         const [kind, text] = upState(m.up.get(d));
         return { name: d, status: text, badge: [kind, text], uptime: m.up.get(d) === 1 ? m.uptime.get(d) : undefined,
-          in: m.devIn.get(d), out: m.devOut.get(d), err: m.devErr.get(d), clients: m.clients.get(d), ifCount: ifs.filter((r) => r.inst === d).length };
+          in: m.devIn.get(d), out: m.devOut.get(d), err: m.devErr.get(d), clients: m.clients.get(d), ifCount: ifs.filter((r) => r.inst === d).length, seen: lastSeen(m, d) };
       });
       const online = rows.filter((r) => r.status === 'UP').length;
       const down = rows.filter((r) => r.status !== 'UP').map((r) => `${r.name} ${r.status}`);
       const err = sumDef(rows.map((r) => r.err));
       const firing = ctx.snap.alerts.filter((a) => a.state === 'firing' && DEVICES.includes(a.labels.instance)).length;
+      const worst = rows.filter((r) => has(r.seen)).sort((a, b) => b.seen - a.seen)[0];
       putIn(sum, tiles([
         { label: 'Online', value: `${online} / ${DEVICES.length}`, kind: online === DEVICES.length ? 'ok' : 'crit', status: down.length ? down.join(', ') : 'all UP' },
         { label: 'Traffic ↓ (sum)', value: sumDef(rows.map((r) => r.in)), unit: 'Mbps', sub: down.length ? 'UP devices only' : undefined },
@@ -76,6 +78,7 @@ export function devicesModal() {
         { label: 'Errors', value: err, unit: '/min', kind: has(err) ? (err > 0 ? 'warn' : 'ok') : 'unknown', status: has(err) ? (err > 0 ? 'errors seen' : 'none') : 'unknown' },
         { label: 'WLAN clients', value: sumDef(rows.filter((r) => isWlx(r.name)).map((r) => r.clients)), d: 0 },
         { label: 'Firing alerts', value: firing, d: 0, kind: firing ? 'crit' : 'ok', status: firing ? 'see Alerts' : 'none' },
+        { label: 'Data freshness (worst)', value: worst && fmtSeen(worst.seen), kind: seenKind(worst?.seen), status: worst ? `${worst.name} · last successful SNMP scrape` : 'unknown' },
       ]));
       dv.update(rows, (r) => ctx.nav.device(r.name));
       for (const d of DEVICES) subs.get(d).update(ifs.filter((r) => r.inst === d), (r) => ctx.nav.iface(r.key));

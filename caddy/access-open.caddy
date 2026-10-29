@@ -8,7 +8,6 @@
 	request_header -X-Obs-User
 	request_header -X-Obs-Role
 	request_header -X-Obs-Auth
-	request_header -X-Obs-Grafana-Role
 	request_header -Remote-User
 	request_header -Remote-Groups
 	request_header -Remote-Email
@@ -16,11 +15,4 @@
 }
 
 (login_portal) {
-}
-
-# Grafana: anonymous Viewer on 127.0.0.1 (compose.yaml, grafana's entrypoint)
-(grafana_access) {
-}
-
-(grafana_local) {
 }

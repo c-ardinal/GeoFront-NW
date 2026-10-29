@@ -52,7 +52,7 @@ export const putIn = (box, ...nodes) => refocus(box, () => box.replaceChildren(.
 
 // ---- range data (Prometheus) ---------------------------------------------------------------
 const stepFor = (secs) => Math.max(15, Math.round(secs / 240 / 15) * 15);
-// `$RATE` in a query becomes the rate window, Grafana $__rate_interval style: max(step + 1 scrape, 4 scrapes), so
+// `$RATE` in a query becomes the rate window: max(step + 1 scrape, 4 scrapes), so
 // consecutive windows overlap by one scrape and no counter increase falls between two evaluation points.
 // Scrape gates: `and` is evaluated per step of a range query, so points where the source's latest scrape failed become
 // gaps (rate() over a look-back window would otherwise keep drawing decaying values for a DOWN target).

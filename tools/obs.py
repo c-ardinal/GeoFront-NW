@@ -3,8 +3,8 @@
   init         .env と機器台帳 (inventory/devices.yaml) を対話または引数で作り、検証する
   check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表で出す
   targets      台帳から Prometheus の scrape 対象・Alloy の送信元対応表・snmp_exporter の auth を生成する
-  backup       設定と Prometheus スナップショット・Loki・Grafana を 1 つのアーカイブにまとめる
-  restore      backup のアーカイブを戻す (prometheus / loki / grafana / alertmanager は止めてから)
+  backup       設定と Prometheus スナップショット・Loki・抑止・利用者・認証局を 1 つのアーカイブにまとめる
+  restore      backup のアーカイブを戻す (prometheus / loki / alertmanager / authelia / proxy は止めてから)
   notify-test  各通知先にテスト通知を送り (Alertmanager 経由)、応答 (HTTP / SMTP) を表で出す
   test-syslog  fixtures を Alloy に送り、Loki に正しく解析されて入ったかを確かめる (回帰テスト)
   capture      パケット取込の状態 (status) / リングとアップロードの一覧 (list) / 保存期間を過ぎたものの削除 (prune)
@@ -19,11 +19,8 @@ the legacy layout) at /config, the generated volume at /generated, data volumes 
 environment compose passes in (from the config's .env or --env-file); `init` writes .env. Device specifics: drivers/.
 """
 import argparse
-import base64
 import getpass
 import functools
-import hashlib
-import hmac
 import ipaddress
 import json
 import os
@@ -44,7 +41,6 @@ import urllib.request
 from pathlib import Path
 
 import yaml
-from typing import NamedTuple
 
 from notify import (DEMO_PLAN, NOTIFY_ENV, RECEIVER_TYPES, RELAY, RELAY_UID, SMTP_PORTS, TEST_ALERT, URL_SECRETS,
                     alertmanager_config, check_receivers, notify_summary, relay_config, render_receivers)
@@ -73,7 +69,7 @@ TEMPLATE_VARS = ("SNMP_V3_AUTH_PROTO", "SNMP_V3_PRIV_PROTO")  # filled in by us;
 # community: that one is written into the generated auths.yml (generated volume only, mode 0600, never printed).
 LITERAL_SECRETS = ("SNMP_COMMUNITY",)
 # data volume -> owner the service runs as (a fresh volume first mounted here would otherwise be root-owned)
-VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "grafana": (472, 0), "alertmanager": (65534, 65534),
+VOLUMES = {"prometheus": (65534, 65534), "loki": (10001, 10001), "alertmanager": (65534, 65534),
            "capture": (0, 0), "uploads": (65534, 65534),  # these two only with backup --include-captures
            "authelia": (au.AUTHELIA_UID, au.AUTHELIA_UID),
            "caddy": (0, 0)}  # the proxy's own CA (its key) and certificates: the LAN devices trust that root
@@ -82,10 +78,8 @@ RESERVED_NAMES = ("unknown",)  # host label of syslog senders that are not in th
 PUBLIC_URL_RE = re.compile(r"https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?")  # host name, IPv4 or [IPv6]
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 HOST_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
-DEFAULT_GF_PASSWORDS = ("", "admin", "change-me")
 SAFE_ENV = re.compile(r"[A-Za-z0-9_./:,@+-]*")
 HTTP_TIMEOUT = 5
-GRAFANA = "http://grafana:3000/grafana"
 SNMP_TIMEOUT = 40
 
 
@@ -109,26 +103,6 @@ def env(key, default=""):
 
 def env_map():
     return dict(os.environ)
-
-
-# ---- Grafana: optional (F1), only with the compose profile grafana --------------------------------------------------
-
-def grafana_profile(values):
-    """Grafana is asked for: the profile grafana in COMPOSE_PROFILES (.env / the environment). Off by default."""
-    return "grafana" in {p.strip() for p in (values.get("COMPOSE_PROFILES") or "").split(",")}
-
-
-def grafana_running():
-    """A Grafana container is on the network now (also when started with `--profile grafana` on the command line)."""
-    try:
-        socket.getaddrinfo("grafana", 3000)
-        return True
-    except OSError:
-        return False
-
-
-def grafana_on():
-    return grafana_profile(env_map()) or grafana_running()
 
 
 # ---- device drivers (drivers/<vendor-model>/: driver.yaml, demo.json, syslog.jsonl; docs/drivers.md) -------------
@@ -319,15 +293,12 @@ def wan_of(rows, demo):
 
 def wan_rules(wan):
     """Prometheus rule file for the configured WAN interface (empty when there is none): the alert for download
-    utilization above 80 %, and the WAN traffic recorded as obs_wan:* series, which the Grafana wallboard reads (so its
-    WAN panels follow the inventory without naming a device)."""
+    utilization above 80 %."""
     if not wan:
         return {"groups": []}
     sel = 'job="snmp",instance="%s",ifName="%s"' % (wan["device"], wan["ifName"])
     where = f'{wan["device"]} {wan["ifName"]}'
     return {"groups": [{"name": "yamaha-wan", "rules": [
-        {"record": "obs_wan:ifHCInOctets:rate2m", "expr": f"rate(ifHCInOctets{{{sel}}}[2m])"},
-        {"record": "obs_wan:ifHCOutOctets:rate2m", "expr": f"rate(ifHCOutOctets{{{sel}}}[2m])"},
         {"alert": "WanHighUtilization",
          "expr": f"rate(ifHCInOctets{{{sel}}}[2m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
          "for": "30s", "labels": {"severity": "warning"},
@@ -363,7 +334,7 @@ def check_env(values, used_auths=()):
     """-> (errors, warnings) for compose's environment (from .env); Japanese messages."""
     errs, warns = [], []
     for key, v in values.items():
-        if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "GF_", "SMTP_", "SLACK_", "DISCORD_", "LINE_", "WEBHOOK_")) and ("'" in v or "\n" in v):
+        if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "SMTP_", "SLACK_", "DISCORD_", "LINE_", "WEBHOOK_")) and ("'" in v or "\n" in v):
             errs.append(f"{key}: ' (シングルクォート) と改行は使えません")
     for key in ("OBS_BIND", "SYSLOG_BIND"):
         v = values.get(key, "127.0.0.1")
@@ -380,21 +351,12 @@ def check_env(values, used_auths=()):
         errs.append("OBS_BIND=0.0.0.0 で OBS_PUBLIC_URL が空か 127.0.0.1 のままです: LAN からは 421 で開けません — "
                     "OBS_PUBLIC_URL にこのホストの LAN 名 / IP を設定してください (例 http://192.168.100.10:8080)")
     elif lan_bind(values) and (not pub or re.match(r"https?://(127\.|localhost)", pub)):
-        warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN から開くと Grafana のリンク (共有 URL など) がこの PC を指します。"
+        warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN から開くと通知のリンクがこの PC を指します。"
                      "LAN から開くときの URL (例 http://192.168.100.10:8080) にしてください")
     for key, default in (("OBS_PORT", "8080"), ("SYSLOG_PORT", "514")):
         v = values.get(key, default)
         if not (v.isdigit() and 0 < int(v) < 65536):
             errs.append(f"{key}={v}: 1〜65535 のポート番号にしてください")
-    gf = grafana_profile(values)
-    if values.get("OBS_GRAFANA") == "1" and not gf:  # the retired switch (scale): Grafana now needs its profile
-        warns.append("OBS_GRAFANA=1 は使われなくなりました。Grafana を使い続けるなら .env の COMPOSE_PROFILES に grafana を加えてください"
-                     " (例 prod,grafana)。加えなければ Grafana は起動せず、データ (grafana-data) はそのまま残ります")
-    if gf and values.get("GF_ADMIN_PASSWORD", "admin") in DEFAULT_GF_PASSWORDS:  # Grafana off: nothing to log in to
-        if au.required(values):  # with the login (always on the LAN) a default Grafana admin password is refused
-            errs.append("GF_ADMIN_PASSWORD が既定値のままログインありの構成 (LAN 公開) にしようとしています。Grafana の管理者パスワードを変えてください")
-        else:
-            warns.append("GF_ADMIN_PASSWORD が既定値です。Grafana 管理者パスワードを変えてください (初回起動時のみ反映)")
     a_errs, a_warns = au.check(values)
     errs += a_errs
     warns += a_warns
@@ -674,7 +636,7 @@ def reload_services():
 def cmd_targets(args):
     values = env_map()
     if args.demo:
-        errs, warns = check_env(values)  # e.g. a LAN-exposed demo with the default Grafana password
+        errs, warns = check_env(values)  # e.g. a LAN-exposed demo without OBS_PUBLIC_URL
         report(errs, warns)
         if errs:
             return 2
@@ -695,25 +657,12 @@ def cmd_targets(args):
     return 0
 
 
-# ---- Grafana admin credential check ---------------------------------------------------------------
-# GF_SECURITY_ADMIN_PASSWORD only takes effect when Grafana creates its database, so a volume first started by the
-# demo keeps admin/admin (or change-me) whatever .env says later. The check therefore reads the passwords Grafana
-# actually stores: the hashes in grafana.db (a consistent read-only copy, never a login, so it causes no failed-login
-# records and no lockouts, and works whatever a password was changed to in the UI). Reported by check / init (P7: the
-# LAN is gated by the screens' login instead, and Grafana then has no login form, so grafana-guard is gone).
-
-GRAFANA_DB = VOL / "grafana/grafana.db"
-DEFAULT_LOGIN_PASSWORDS = ("admin", "change-me", "")
-# Grafana 12.2 pkg/util/encoding.go EncodePassword: hex(pbkdf2.Key(sha256, password, salt, 10000, 50))
-GF_HASH_ITERATIONS, GF_HASH_BYTES = 10000, 50
-
-
 def lan_bind(values):
     return on_lan(values)
 
 
 def public_url(bind, port, given="", secure=False):
-    """Where browsers open the screens (Grafana builds its absolute links from it): given, else derived from OBS_BIND
+    """Where browsers open the screens (login and notification links): given, else derived from OBS_BIND
     (https with authentication), else None (0.0.0.0: every address of the host, so a name has to be chosen)."""
     if given:
         return given.rstrip("/")
@@ -724,130 +673,6 @@ def public_url(bind, port, given="", secure=False):
 
 def on_lan(values):
     return not au.is_local_bind(values.get("OBS_BIND", "127.0.0.1"))
-
-
-def grafana_hash(password, salt):
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), GF_HASH_ITERATIONS, GF_HASH_BYTES).hex()
-
-
-class GrafanaDbUnreadable(Exception):
-    """grafana.db could not be read or does not look like Grafana 12's schema: nothing is known, stay closed."""
-
-
-class GfAdmin(NamedTuple):
-    login: str
-    password: str  # "" = no local password (an OAuth / LDAP / proxy-auth account): cannot log in with a password
-    salt: str
-
-
-def grafana_admins(db_path=None):
-    """Every server admin (is_admin = 1) plus a login named "admin" if there is one, from a consistent copy of
-    grafana.db (sqlite backup API, source opened read-only). Raises GrafanaDbUnreadable when this cannot be told."""
-    src = Path(db_path or GRAFANA_DB)
-    if not src.is_file():
-        raise GrafanaDbUnreadable(f"{src} がありません (Grafana がまだ初期化していない?)")
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            con = sqlite3.connect(grafana_db_copy(tmp, src))
-            try:
-                if con.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                    raise GrafanaDbUnreadable("grafana.db の整合性検査に失敗しました")
-                cols = {r[1] for r in con.execute('PRAGMA table_info("user")')}
-                if not {"login", "password", "salt", "is_admin"} <= cols:
-                    raise GrafanaDbUnreadable(f"user テーブルが想定と違います (列: {sorted(cols) or 'なし'})")
-                rows = con.execute('SELECT login, password, salt, is_admin FROM "user" WHERE is_admin = 1 OR login = ?', ("admin",)).fetchall()
-            finally:
-                con.close()
-    except (OSError, sqlite3.Error) as e:
-        raise GrafanaDbUnreadable(f"grafana.db を読めません ({type(e).__name__}: {e})") from None
-    if not any(r[3] == 1 for r in rows):
-        raise GrafanaDbUnreadable("サーバー管理者 (is_admin) のユーザーが grafana.db にありません")
-    admins = []
-    for login, pw, salt, _ in rows:
-        if not pw and not salt:  # no local password at all
-            admins.append(GfAdmin(login, "", ""))
-        elif isinstance(pw, str) and re.fullmatch(r"[0-9a-f]{%d}" % (2 * GF_HASH_BYTES), pw) and isinstance(salt, str) and salt:
-            admins.append(GfAdmin(login, pw, salt))
-        else:
-            raise GrafanaDbUnreadable(f"ユーザー {login} のパスワードが想定の形式 (PBKDF2-SHA256 50 bytes hex) ではありません")
-    return admins
-
-
-def default_of(admin):
-    """The default password (admin / change-me / empty) this admin can log in with, or None."""
-    if not admin.password:
-        return None
-    return _default_for(admin.password, admin.salt)
-
-
-@functools.lru_cache(maxsize=64)
-def _default_for(password_hash, salt):
-    # the answer depends on the stored hash + salt only: the PBKDF2 hashes (10000 rounds x 3 candidates per admin) are
-    # derived again only when an admin's stored hash changed
-    return next((c for c in DEFAULT_LOGIN_PASSWORDS if hmac.compare_digest(grafana_hash(c, salt), password_hash)), None)
-
-
-def grafana_defaults(db_path=None):
-    """-> [(admin, default password)] for every admin that still has a default password ([] = none)."""
-    return [(a, d) for a in grafana_admins(db_path) if (d := default_of(a)) is not None]
-
-
-def grafana_guard(db_path=None):
-    """One check: positive only when the database was read and no server admin has a default password.
-    -> (ok, message)."""
-    try:
-        found = grafana_defaults(db_path)
-    except GrafanaDbUnreadable as e:
-        return False, f"確認できません: {e}。"
-    if found:
-        who = ", ".join(f"{a.login} ({d or '空'})" for a, d in found)
-        return False, (f"Grafana の管理者が既定のパスワードのままです: {who} (.env の GF_ADMIN_PASSWORD は Grafana の初回起動時にしか"
-                       "反映されません)。直す: docker compose run --rm tools grafana-reset-admin (ログインありの構成では "
-                       + manual_reset_hint("admin") + ")")
-    return True, "Grafana の管理者は既定のパスワードではありません (grafana.db の値で確認。画面で変えた値でもよい)"
-
-
-def change_password(login, old, new):
-    """One login, as that user with the default password the hash revealed, to set the new one (Grafana API)."""
-    token = base64.b64encode(f"{login}:{old}".encode()).decode()
-    body = json.dumps({"oldPassword": old, "newPassword": new, "confirmNew": new}).encode()
-    req = urllib.request.Request(GRAFANA + "/api/user/password", data=body, method="PUT",
-                                 headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=HTTP_TIMEOUT).close()
-
-
-def manual_reset_hint(login):
-    if login == "admin":
-        return "docker compose exec grafana grafana cli admin reset-admin-password '<.env の値>'"
-    return f"Grafana の画面 (Administration > Users and access > Users > {login}) でパスワードを変更"
-
-
-def cmd_grafana_reset_admin(args):
-    """Give every server admin that still has a default password the GF_ADMIN_PASSWORD from .env. Run on request
-    only: the stored hashes tell which admins have a default, and only those are logged in to, once each."""
-    new = env("GF_ADMIN_PASSWORD")
-    if new in DEFAULT_GF_PASSWORDS:
-        raise Fail("先に .env の GF_ADMIN_PASSWORD を既定値 (空 / admin / change-me) 以外にしてください")
-    try:
-        found = grafana_defaults()
-    except GrafanaDbUnreadable as e:
-        raise Fail(f"Grafana のデータベースを確認できません: {e}") from None
-    if not found:
-        print("[OK] 既定のパスワードの管理者はいません。画面で変えたパスワードが .env の値と違っても問題ありません。"
-              "\n     admin を .env の値に揃えたい場合だけ: " + manual_reset_hint("admin"))
-    failed = []
-    for admin, old in found:
-        try:
-            change_password(admin.login, old, new)
-            print(f"[OK] {admin.login}: 既定のパスワードを .env の GF_ADMIN_PASSWORD に変更しました")
-        except urllib.error.HTTPError as e:
-            failed.append(admin.login)
-            print(f"[NG] {admin.login}: Grafana が変更を受け付けませんでした (HTTP {e.code})。手で: {manual_reset_hint(admin.login)}")
-        except OSError:
-            raise Fail("Grafana に接続できません。docker compose up -d の後に実行してください") from None
-    ok, msg = grafana_guard()
-    print(f"[{'OK' if ok else 'NG'}] {msg}")
-    return 0 if ok and not failed else 1
 
 
 def cmd_setup_check(args):
@@ -950,11 +775,8 @@ def mode():
 
 def services(m):
     base = [("prometheus", "http://prometheus:9090/-/healthy"), ("loki", "http://loki:3100/ready"),
-            ("alloy", "http://alloy:12345/-/ready"), ("grafana", "http://grafana:3000/grafana/api/health"),
-            ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz"),
+            ("alloy", "http://alloy:12345/-/ready"), ("mask-api", "tcp://mask-api:8000"), ("command-center", "http://command-center/"), ("proxy", "http://proxy/healthz"),
             ("alertmanager", ALERTMANAGER + "/-/healthy"), ("notify-relay", RELAY + "/health")]
-    if not grafana_on():  # Grafana is optional (profile grafana, off by default): not a failure
-        base = [s for s in base if s[0] != "grafana"]
     if au.required(env_map()):
         base.append(("authelia", "http://authelia:9091/auth/api/health"))
     extra = {"demo": [("demo-gen", "http://demo-gen:9116/fault/status")],
@@ -1043,13 +865,6 @@ def cmd_check(args):
         rc |= not ok
         srows.append((name, "OK" if ok else "NG", detail))
     table(("サービス", "状態", "詳細"), srows)
-    print("\n■ Grafana の管理者パスワード (grafana.db に保存された値で確認。ログインはしない)")
-    if not grafana_on():
-        print("[--] Grafana は動いていません (任意の機能。使うときは COMPOSE_PROFILES に grafana)。確認しません"
-              + ("。以前のデータは grafana-data に残っています" if GRAFANA_DB.exists() else ""))
-    else:
-        ok, msg = grafana_guard()  # informational: with authentication Grafana has no login form (users come from Authelia)
-        print(f"[{'OK' if ok else '注意'}] {msg}")
     rc |= check_users()
     rc |= check_notify(m)
     rc |= check_capture(m)
@@ -1305,9 +1120,6 @@ def interactive(values, devices):
     values["OBS_PORT"] = ask("画面のポート", values["OBS_PORT"])
     values["SYSLOG_BIND"] = ask("syslog を受けるアドレス (機器から送るなら LAN 側 IP か 0.0.0.0)", values["SYSLOG_BIND"])
     values["SYSLOG_PORT"] = ask("syslog のポート (UDP/TCP)", values["SYSLOG_PORT"])
-    if grafana_profile(values) or ask("Grafana も動かしますか (任意。コマンドセンターだけで足ります) [y/N]", "n").lower().startswith("y"):
-        values["COMPOSE_PROFILES"] = "prod,grafana"
-        values["GF_ADMIN_PASSWORD"] = ask("Grafana 管理者パスワード", values["GF_ADMIN_PASSWORD"], secret=True)
     values["SNMP_V3_USER"] = ask("SNMPv3 ユーザー名 (機器側に設定したもの)", values["SNMP_V3_USER"])
     values["SNMP_V3_AUTH_PROTO"] = ask(f"SNMPv3 認証方式 ({'/'.join(AUTH_PROTOS)})", values["SNMP_V3_AUTH_PROTO"])
     values["SNMP_V3_AUTH_PASS"] = ask("SNMPv3 認証パスワード (8 文字以上)", values["SNMP_V3_AUTH_PASS"], secret=True)
@@ -1382,34 +1194,6 @@ def interactive_receivers(values):
                                                "warning": {"receivers": list(names), "repeat": "4h"}, "info": {"receivers": [], "repeat": "24h"}}}
 
 
-def grafana_password_from_env():
-    v = env("GF_ADMIN_PASSWORD")
-    return "" if v == "admin" else v  # "admin" is compose's fallback when .env has none, not a choice
-
-
-def offer_grafana_reset(new, args):
-    """An existing grafana-data volume keeps its old admin password: offer to set it to the new .env value
-    (decided from the stored hash; no login attempt)."""
-    try:
-        found = grafana_defaults()
-    except GrafanaDbUnreadable:
-        print("[注意] Grafana のデータベースがまだありません (未起動)。既存の grafana-data ボリュームを使う場合、新しい GF_ADMIN_PASSWORD は"
-              "反映されません。起動後に docker compose run --rm tools check で確認してください")
-        return
-    if not found:
-        return
-    yes = args.reset_grafana_admin or (not args.yes and sys.stdin.isatty()
-                                       and input(f"Grafana の管理者 {', '.join(a.login for a, _ in found)} が既定のパスワードのままです。.env の値に変更しますか? [Y/n]: ").lower() != "n")
-    if not yes:
-        print(f"[注意] Grafana の管理者 {', '.join(a.login for a, _ in found)} は既定のパスワードのままです。後で: docker compose run --rm tools grafana-reset-admin")
-        return
-    os.environ["GF_ADMIN_PASSWORD"] = new
-    try:
-        cmd_grafana_reset_admin(args)
-    except Fail as e:
-        print(f"[NG] {e}")
-
-
 def cmd_init(args):
     fix_capture_volumes()
     inv = inventory_path()
@@ -1417,8 +1201,8 @@ def cmd_init(args):
     if exists and not args.force:
         raise Fail("既にあります: " + ", ".join(rel(p) for p in exists)
                    + "。作り直すなら --force (元のファイルは .bak に残します)")
-    values = {"COMPOSE_PROFILES": "prod,grafana" if args.grafana else "prod", **pinned_settings(), "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
-              "SYSLOG_PORT": args.syslog_port, "GF_ADMIN_PASSWORD": args.grafana_password or grafana_password_from_env(),
+    values = {"COMPOSE_PROFILES": "prod", **pinned_settings(), "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
+              "SYSLOG_PORT": args.syslog_port,
               "SNMP_V3_USER": args.snmp_user or env("SNMP_V3_USER"), "SNMP_V3_AUTH_PROTO": args.snmp_auth_proto,
               "SNMP_V3_AUTH_PASS": env("SNMP_V3_AUTH_PASS"), "SNMP_V3_PRIV_PROTO": args.snmp_priv_proto,
               "SNMP_V3_PRIV_PASS": env("SNMP_V3_PRIV_PASS"), "SNMP_COMMUNITY": env("SNMP_COMMUNITY"),
@@ -1436,17 +1220,13 @@ def cmd_init(args):
         receivers = interactive_receivers(values)
     values["OBS_PUBLIC_URL"] = public_url(values["OBS_BIND"], values["OBS_PORT"], values["OBS_PUBLIC_URL"], au.required(values)) or ""
     if not values["OBS_PUBLIC_URL"] and not args.yes:
-        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 https://192.168.100.10:8080。ログイン・通知・Grafana のリンクに使う)").rstrip("/")
+        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 https://192.168.100.10:8080。ログイン・通知のリンクに使う)").rstrip("/")
     errs, warns, rows = validate(values, devices)
     if receivers is not None:
         n_errs, n_warns, _ = check_receivers(receivers, values, rel(receivers_path()))
         errs, warns = errs + n_errs, warns + n_warns
     if not values["OBS_PUBLIC_URL"] and not any("421" in e for e in errs):  # (check_env already says it for 0.0.0.0)
         errs.append("OBS_BIND=0.0.0.0 のときは --public-url で LAN から開く URL を指定してください (例 https://192.168.100.10:8080)")
-    if (grafana_profile(values) and values["GF_ADMIN_PASSWORD"] in DEFAULT_GF_PASSWORDS
-            and not any("GF_ADMIN_PASSWORD" in e for e in errs)):  # prod with Grafana: never the default
-        errs.append("Grafana 管理者パスワード (GF_ADMIN_PASSWORD) を既定値 (空 / admin / change-me) 以外にしてください")
-        warns = [w for w in warns if not w.startswith("GF_ADMIN_PASSWORD")]
     print("\n■ 設定の検証")
     report(errs, warns)
     if errs:
@@ -1466,11 +1246,6 @@ def cmd_init(args):
         write_atomic(receivers_path(), render_receivers(receivers))
         fix_owner(receivers_path())
         print(f"[OK] 書きました: {rel(receivers_path())} (通知先 {len(receivers['receivers'])} 件)。起動後に docker compose run --rm tools notify-test")
-    if grafana_profile(values):
-        offer_grafana_reset(values["GF_ADMIN_PASSWORD"], args)
-    elif GRAFANA_DB.exists():
-        print("[注意] 以前の Grafana のデータ (grafana-data) は残してあります。使うなら --grafana で作り直すか、"
-              ".env の COMPOSE_PROFILES に grafana を加えてください")
     if au.required(values):
         print("[OK] ログインの秘密値 (OBS_AUTH_*) を .env に作りました。画面はログイン必須 (HTTPS) です。\n"
               "次: 利用者を作る: docker compose run --rm tools user add <名前> --role admin   (operator / viewer も)")
@@ -1607,7 +1382,6 @@ def read_env_file(path=None):
 def published_ports(values, demo):
     v = lambda k, d: values.get(k) or d
     want = [("tcp", v("OBS_BIND", "127.0.0.1"), v("OBS_PORT", "8080")), ("tcp", "127.0.0.1", v("PROM_LOCAL_PORT", "9090")),
-            ("tcp", "127.0.0.1", v("GRAFANA_LOCAL_PORT", "3000")),
             ("tcp", v("SYSLOG_BIND", "127.0.0.1"), v("SYSLOG_PORT", "514")), ("udp", v("SYSLOG_BIND", "127.0.0.1"), v("SYSLOG_PORT", "514"))]
     if demo:
         want.append(("tcp", "127.0.0.1", "9116"))
@@ -1686,29 +1460,11 @@ def doctor_access_rows(values):
     return rows
 
 
-def doctor_grafana_rows(values, file_env):
-    if "grafana" not in profiles_of(file_env):
-        if GRAFANA_DB.exists():  # an older install used it: the data is kept, enabling the profile brings it back
-            return [("Grafana", dr.OK, "無効 (既定)。以前の Grafana のデータが grafana-data に残っています (消していません)",
-                     "使うなら .env の COMPOSE_PROFILES に grafana を加えて up -d")]
-        return [("Grafana", dr.OK, "無効 (既定。コマンドセンターだけで使えます)", "")]
-    if not GRAFANA_DB.exists():
-        return [("Grafana", dr.OK, "有効 (profile grafana)。初回の起動はまだです", "")]
-    try:
-        found = grafana_defaults()
-    except GrafanaDbUnreadable as e:
-        return [("Grafana の管理者 (保存値)", dr.WARN, str(e), "")]
-    if found:
-        return [("Grafana の管理者 (保存値)", dr.WARN, "既定のパスワードのまま: " + ", ".join(a.login for a, _ in found),
-                 "docker compose run --rm tools grafana-reset-admin")]
-    return [("Grafana の管理者 (保存値)", dr.OK, "既定のパスワードではありません", "")]
-
-
 def cmd_doctor(args):
     file_env = read_env_file()
     values = {**file_env, **env_map()}
     rows = (doctor_host_rows(values, file_env) + doctor_config_rows() + doctor_env_rows(values, file_env) + doctor_access_rows(values)
-            + doctor_grafana_rows(values, file_env))
+)
     print("■ 導入前の自己診断 (機器には接続しません)\n")
     table(("項目", "状態", "詳細", "直し方"), rows)
     ng = sum(r[1] == dr.NG for r in rows)
@@ -1731,10 +1487,10 @@ def snapshot_prometheus():
     return VOL / "prometheus/snapshots" / name
 
 
-def grafana_db_copy(tmp, src=None, name="grafana.db"):
+def sqlite_copy(tmp, src, name):
     """Consistent copy of a SQLite database while its service keeps running (sqlite backup API, source opened read-only;
-    grafana.db, Authelia's db.sqlite3). -> path of the copy, or None when there is no database."""
-    src = Path(src or VOL / "grafana/grafana.db")
+    Authelia's db.sqlite3). -> path of the copy, or None when there is no database."""
+    src = Path(src)
     if not src.exists():
         return None
     dst = Path(tmp) / name
@@ -1796,13 +1552,9 @@ def cmd_backup(args):
     staged = []
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            gdb = grafana_db_copy(tmp)
-            skip_db = lambda ti: None if re.search(r"(^|/)grafana\.db(-wal|-shm|-journal)?$", ti.name) else ti
             sources = [("prometheus", "prometheus", snap, None), ("loki", "loki", VOL / "loki", None),
                        ("alertmanager", "alertmanager", VOL / "alertmanager", None)]
-            if gdb:  # Grafana's data only when it has any (optional, profile grafana): also kept while Grafana is off
-                sources += [("grafana", "grafana", VOL / "grafana", skip_db), ("grafana", "grafana/grafana.db", gdb, None)]
-            adb = grafana_db_copy(tmp, VOL / "authelia/db.sqlite3", "authelia.sqlite3")
+            adb = sqlite_copy(tmp, VOL / "authelia/db.sqlite3", "authelia.sqlite3")
             if (VOL / "authelia/users_database.yml").exists():  # login users (argon2id hashes) + bans / TOTP keys
                 skip_adb = lambda ti: None if re.search(r"(^|/)db\.sqlite3(-wal|-shm|-journal)?$", ti.name) else ti
                 sources.append(("authelia", "authelia", VOL / "authelia", skip_adb))
@@ -1837,7 +1589,7 @@ def cmd_backup(args):
 
 
 def running_services():
-    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("grafana", 3000), ("alertmanager", 9093), ("authelia", 9091),
+    return [n for n, port in (("prometheus", 9090), ("loki", 3100), ("alertmanager", 9093), ("authelia", 9091),
                               ("proxy", 80))
             if probe(f"tcp://{n}:{port}")[0]]
 
@@ -1937,7 +1689,7 @@ def cmd_restore(args):
         raise Fail(f"アーカイブがありません: {args.archive}")
     busy = running_services()
     if busy:
-        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki grafana alertmanager authelia proxy")
+        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki alertmanager authelia proxy")
     with tarfile.open(path, "r:gz") as tar:
         members = tar.getmembers()
         try:
@@ -2184,31 +1936,11 @@ def cmd_test_syslog(args):
 
 # ---- self-test (image build) --------------------------------------------------------------------
 
-# `user` table exactly as grafana/grafana:12.2.0 creates it (sqlite_master of a fresh database), for the selftest
-GF_USER_SCHEMA = """CREATE TABLE `user` (
-`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL
-, `version` INTEGER NOT NULL
-, `login` TEXT NOT NULL
-, `email` TEXT NOT NULL
-, `name` TEXT NULL
-, `password` TEXT NULL
-, `salt` TEXT NULL
-, `rands` TEXT NULL
-, `company` TEXT NULL
-, `org_id` INTEGER NOT NULL
-, `is_admin` INTEGER NOT NULL
-, `email_verified` INTEGER NULL
-, `theme` TEXT NULL
-, `created` DATETIME NOT NULL
-, `updated` DATETIME NOT NULL
-, `help_flags1` INTEGER NOT NULL DEFAULT 0, `last_seen_at` DATETIME NULL, `is_disabled` INTEGER NOT NULL DEFAULT 0, is_service_account BOOLEAN DEFAULT 0, `uid` TEXT NULL, `is_provisioned` INTEGER NOT NULL DEFAULT 0)"""
-
-
 def selftest():
     """Pure checks of validation and generation (reads snmp/auths.yml and .env.example from the repository):
     docker compose run --rm tools --selftest"""
     good = {"SNMP_V3_USER": "obs", "SNMP_V3_AUTH_PASS": "a" * 8, "SNMP_V3_PRIV_PASS": "p" * 8, "SNMP_V3_AUTH_PROTO": "SHA",
-            "SNMP_V3_PRIV_PROTO": "AES", "OBS_BIND": "127.0.0.1", "SYSLOG_BIND": "127.0.0.1", "GF_ADMIN_PASSWORD": "x" * 12}
+            "SNMP_V3_PRIV_PROTO": "AES", "OBS_BIND": "127.0.0.1", "SYSLOG_BIND": "127.0.0.1"}
     dev = [{"name": "rtx1300", "kind": "rtx", "address": "192.168.100.1", "snmp_auth": "yamaha_v3"},
            {"name": "wlx413", "kind": "wlx", "address": "testbed-wlx:1161", "snmp_auth": "yamaha_v3", "syslog": False}]
     errs, warns, rows = validate(good, dev)
@@ -2241,17 +1973,6 @@ def selftest():
     assert check_env({**good, "SNMP_V3_PRIV_PASS": "it's"})[0]
     lan = {**good, **sec, "OBS_BIND": "192.168.100.10", "OBS_PUBLIC_URL": "https://192.168.100.10:8080"}
     assert check_env(lan) == ([], []), check_env(lan)
-    # with the login (LAN) a default Grafana admin password is refused; without it (127.0.0.1) a warning
-    assert any("GF_ADMIN_PASSWORD" in e for e in check_env({**lan, "COMPOSE_PROFILES": "prod,grafana", "GF_ADMIN_PASSWORD": "admin"})[0])
-    assert any("GF_ADMIN_PASSWORD" in e for e in check_env({**good, "COMPOSE_PROFILES": "grafana", "OBS_AUTH": "1", "GF_ADMIN_PASSWORD": "change-me"})[0])
-    assert not check_env({**good, "COMPOSE_PROFILES": "demo,grafana", "GF_ADMIN_PASSWORD": "admin"})[0] and check_env({**good, "COMPOSE_PROFILES": "demo,grafana", "GF_ADMIN_PASSWORD": "admin"})[1]
-    # F1: Grafana is optional (profile grafana); without it its admin password does not matter, an old OBS_GRAFANA=1 is pointed out
-    off = {k: v for k, v in lan.items() if k != "COMPOSE_PROFILES"}
-    assert check_env({**off, "GF_ADMIN_PASSWORD": "admin"}) == ([], []), check_env({**off, "GF_ADMIN_PASSWORD": "admin"})
-    assert check_env({**off, "GF_ADMIN_PASSWORD": "admin", "OBS_GRAFANA": "0"}) == ([], [])
-    legacy = check_env({**off, "OBS_GRAFANA": "1"})
-    assert not legacy[0] and any("COMPOSE_PROFILES に grafana" in w for w in legacy[1]), legacy
-    assert not check_env({**off, "OBS_GRAFANA": "1", "COMPOSE_PROFILES": "prod, grafana"})[1]
     assert any("https" in w for w in check_env({**lan, "OBS_PUBLIC_URL": "http://192.168.100.10:8080"})[1])
     errs, _, _ = validate({**good, "SNMP_V3_USER": ""}, dev)  # v3 auth dropped -> reported as missing credentials
     assert errs, errs
@@ -2304,11 +2025,7 @@ def selftest():
     rule = next(r for r in wrules if r.get("alert") == "WanHighUtilization")
     assert 'ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"}' in rule["expr"] and rule["annotations"]["summary"].startswith("WAN (rtx1300 lan2)")
     assert rule["annotations"]["summary_ja"].startswith("WAN (rtx1300 lan2) の下り使用率") and rule["annotations"]["value"]
-    rec = {r["record"]: r["expr"] for r in wrules if "record" in r}  # the Grafana wallboard's WAN panels read these
-    assert rec == {"obs_wan:ifHCInOctets:rate2m": 'rate(ifHCInOctets{job="snmp",instance="rtx1300",ifName="lan2"}[2m])',
-                   "obs_wan:ifHCOutOctets:rate2m": 'rate(ifHCOutOctets{job="snmp",instance="rtx1300",ifName="lan2"}[2m])'}, rec
-    wall = (WORK / "dashboards/wallboard.json").read_text(encoding="utf-8")
-    assert 'ifName=\\"lan2\\"' not in wall and "obs_wan:ifHCInOctets:rate2m" in wall, "wallboard WAN panels follow the inventory"
+    assert not [r for r in wrules if "record" in r]
     notify.selftest(good)
     cap.selftest()
     au.selftest()
@@ -2331,48 +2048,9 @@ def selftest():
     assert public_url("127.0.0.1", "8080") == "http://127.0.0.1:8080" and public_url("192.168.100.10", "8080") == "http://192.168.100.10:8080"
     assert public_url("0.0.0.0", "8080") is None and public_url("0.0.0.0", "80", "http://obs.lan/") == "http://obs.lan"
     assert public_url("192.168.100.10", "8080", secure=True) == "https://192.168.100.10:8080"
-    assert check_env({**good, "OBS_PUBLIC_URL": "http://x/grafana"})[0] and not check_env({**good, "OBS_PUBLIC_URL": "https://obs.lan:8443"})[0]
+    assert check_env({**good, "OBS_PUBLIC_URL": "http://x/path"})[0] and not check_env({**good, "OBS_PUBLIC_URL": "https://obs.lan:8443"})[0]
     assert any("OBS_PUBLIC_URL" in w for w in check_env({**good, "OBS_BIND": "192.168.100.10", "OBS_PUBLIC_URL": "http://127.0.0.1:8080"})[1])
     assert on_lan({"OBS_BIND": "0.0.0.0"}) and not on_lan({"OBS_BIND": "127.0.0.1"}) and not on_lan({})
-    # Grafana password hashes: vectors taken from a real grafana/grafana:12.2.0 database (grafana cli reset-admin-password)
-    salt = "1bF3IJQiSA"
-    gf_admin = "0a123e015ced970aa22ba46e1657696c11425abcfb89547ed53509767909fbda30e3b82555536f5efa07b3045d711af42724"
-    gf_ui = "713ad63a32a3af318a8c791378d7f55f18ffe81d34d507f5fd828bf526bc58926a9d602f5aa74d3570e49eaa8b7ea34521d1"
-    assert grafana_hash("admin", salt) == gf_admin and grafana_hash("ui-changed-Pw!1", salt) == gf_ui
-    with tempfile.TemporaryDirectory() as tmp:
-        def db(name, users, schema=GF_USER_SCHEMA):
-            path = f"{tmp}/{name}.db"
-            con = sqlite3.connect(path)
-            con.execute(schema)
-            for u in users:
-                if schema is GF_USER_SCHEMA:
-                    login, pw, salt, adm = u
-                    con.execute("INSERT INTO `user` (version, login, email, password, salt, org_id, is_admin, created, updated) "
-                                "VALUES (0, ?, ?, ?, ?, 1, ?, '2026-10-26', '2026-10-26')", (login, f"{login}@x", pw, salt, adm))
-                else:
-                    con.execute("INSERT INTO `user` VALUES (?, ?, ?)", u)
-            con.commit()
-            con.close()
-            return path
-        logins = lambda path: [(a.login, d) for a, d in grafana_defaults(path)]
-        assert logins(db("default", [("admin", gf_admin, salt, 1)])) == [("admin", "admin")]
-        assert logins(db("changed", [("admin", gf_ui, salt, 1)])) == []  # changed in the UI: fine
-        other = grafana_hash("change-me", "s2")
-        assert logins(db("second", [("admin", gf_ui, salt, 1), ("ops", other, "s2", 1), ("viewer", other, "s2", 0)])) == [("ops", "change-me")]
-        assert logins(db("renamed", [("root", gf_admin, salt, 1)])) == [("root", "admin")]  # no login named admin needed
-        assert logins(db("oauth", [("sso-admin", None, None, 1), ("admin", gf_ui, salt, 0)])) == []  # no local password: not a default
-        undecidable = [db("noadmin", [("ops", gf_ui, salt, 0)]), db("badhash", [("admin", "bcrypt$2y$xx", salt, 1)]),
-                       db("halfset", [("admin", gf_ui, "", 1)]),
-                       db("schema", [("admin", gf_ui, salt)], schema="CREATE TABLE `user` (login TEXT, password TEXT, salt TEXT)"),
-                       f"{tmp}/missing.db"]
-        Path(f"{tmp}/corrupt.db").write_bytes(b"SQLite format 3\0" + b"\xff" * 4000)
-        undecidable.append(f"{tmp}/corrupt.db")
-        for path in undecidable:
-            try:
-                grafana_defaults(path)
-                raise AssertionError(path)
-            except GrafanaDbUnreadable:
-                pass
     # restore: the manifest may only name volumes and an inventory under inventory/ or testbed/
     mem = lambda *names: [types.SimpleNamespace(name=n, size=1, isfile=lambda: True) for n in names + ("loki/chunk",)]
     good_m = {"parts": ["loki"], "inventory": "inventory/devices.yaml", "include_env": True}
@@ -2434,17 +2112,17 @@ def selftest():
     # docs: the README's non-interactive init example passes every value init requires (review S2)
     readme = (WORK / "README.md").read_text(encoding="utf-8")
     example = readme[readme.index("tools init --yes") - 200:readme.index("tools init --yes") + 300]
-    for var in ("SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS") + (("GF_ADMIN_PASSWORD",) if "--grafana" in example else ()):
+    for var in ("SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
         assert f"-e {var}=" in example, var
     # doctor (H1): assessments, .env parsing, the ports this stack publishes
     dr.selftest()
     with tempfile.TemporaryDirectory() as tmp:
         ef = Path(tmp) / ".env"
-        ef.write_text("# c\nOBS_PORT=8443 # https\nGF_ADMIN_PASSWORD='a b#c' # pw\nlower=x\nSYSLOG_PORT=\n"
-                      "export PROM_LOCAL_PORT=19090\n  export   GRAFANA_LOCAL_PORT = 13000\nOBS_PUBLIC_URL=https://h#x\n"
+        ef.write_text("# c\nOBS_PORT=8443 # https\nSMTP_PASSWORD='a b#c' # pw\nlower=x\nSYSLOG_PORT=\n"
+                      "export PROM_LOCAL_PORT=19090\n  export   PROM_MEM = 512m\nOBS_PUBLIC_URL=https://h#x\n"
                       'SMTP_FROM="a \\"b\\" # c" # d\n', encoding="utf-8")
-        want = {"OBS_PORT": "8443", "GF_ADMIN_PASSWORD": "a b#c", "SYSLOG_PORT": "", "PROM_LOCAL_PORT": "19090",
-                "GRAFANA_LOCAL_PORT": "13000", "OBS_PUBLIC_URL": "https://h#x", "SMTP_FROM": 'a "b" # c'}
+        want = {"OBS_PORT": "8443", "SMTP_PASSWORD": "a b#c", "SYSLOG_PORT": "", "PROM_LOCAL_PORT": "19090",
+                "PROM_MEM": "512m", "OBS_PUBLIC_URL": "https://h#x", "SMTP_FROM": 'a "b" # c'}
         assert read_env_file(ef) == want, read_env_file(ef)
     # R1 drivers: the inventory kind picks the driver (drivers/*/driver.yaml); the demo devices are the drivers' demo.json
     assert {"rtx", "wlx", "other"} <= set(kinds()) and kinds()[-1] == "other" and snmp_modules("rtx") == snmp_modules("other") == "if_mib,system", kinds()
@@ -2466,8 +2144,8 @@ def selftest():
         ef.write_text("COMPOSE_PROJECT_NAME=old\nA=1", encoding="utf-8")
         assert pin_env(ef, {"COMPOSE_PROJECT_NAME": "new", "OBS_CONFIG_DIR": "/etc/geofront"}) == ["OBS_CONFIG_DIR"]
         assert ef.read_text(encoding="utf-8") == "COMPOSE_PROJECT_NAME=old\nA=1\nOBS_CONFIG_DIR=/etc/geofront\n"
-    assert env_file_values({"GF_ADMIN_PASSWORD": "s3cret", "OBS_PORT": "8080"}, {"GF_ADMIN_PASSWORD_FILE": "/run/gf"},
-                           frozenset({"GF_ADMIN_PASSWORD"})) == {"OBS_PORT": "8080", "GF_ADMIN_PASSWORD_FILE": "/run/gf"}
+    assert env_file_values({"SMTP_PASSWORD": "s3cret", "OBS_PORT": "8080"}, {"SMTP_PASSWORD_FILE": "/run/pw"},
+                           frozenset({"SMTP_PASSWORD"})) == {"OBS_PORT": "8080", "SMTP_PASSWORD_FILE": "/run/pw"}
     pp = published_ports({"OBS_BIND": "192.0.2.10", "OBS_PORT": "443", "SYSLOG_BIND": "0.0.0.0"}, demo=False)
     assert ("tcp", "192.0.2.10", 443) in pp and ("udp", "0.0.0.0", 514) in pp and ("tcp", "127.0.0.1", 9116) not in pp, pp
     print("selftest ok")
@@ -2487,12 +2165,9 @@ def parser():
     i.add_argument("--public-url", default="", help="LAN から開く URL (既定: --bind と --port から。0.0.0.0 のときは必須)")
     i.add_argument("--syslog-bind", default="127.0.0.1", help="syslog 受信アドレス (機器から受けるなら LAN 側 IP)")
     i.add_argument("--syslog-port", default="514")
-    i.add_argument("--grafana-password", default="", help="(履歴に残るので環境変数 GF_ADMIN_PASSWORD 推奨)")
     i.add_argument("--snmp-user", default="")
     i.add_argument("--snmp-auth-proto", default="SHA", choices=AUTH_PROTOS)
     i.add_argument("--snmp-priv-proto", default="AES", choices=PRIV_PROTOS)
-    i.add_argument("--reset-grafana-admin", action="store_true", help="動いている Grafana の admin が既定値なら .env の値に変える")
-    i.add_argument("--grafana", action="store_true", help="Grafana も動かす (COMPOSE_PROFILES に grafana。既定は動かさない)")
     i.add_argument("--wan", default="", metavar="機器名:ifName", help="WAN 側インターフェース (例 rtx1300:lan2)")
     i.add_argument("--auth", action="store_true", help="127.0.0.1 公開でもログインを必須にする (OBS_AUTH=1。LAN 公開では常に必須)")
     i.epilog = "SNMP のパスワードは引数にせず -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... (または対話) で渡します"
@@ -2504,11 +2179,10 @@ def parser():
     b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
     b.add_argument("--out", default="backups", help="出力先 (設定ディレクトリ OBS_CONFIG_DIR からの相対、既定 backups)")
     b.add_argument("--include-captures", action="store_true", help="キャプチャのリングとアップロードした pcap も含める (既定は含めない)")
-    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / grafana / alertmanager、キャプチャを含むなら capture / flowd / mask-api も停止しておく)")
+    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / alertmanager / authelia / proxy、キャプチャを含むなら capture / flowd / mask-api も停止しておく)")
     r.add_argument("archive")
     r.add_argument("--with-config", action="store_true", help="機器台帳・通知先 (と含まれていれば .env) も戻す")
     r.add_argument("--yes", action="store_true", help="確認せずに実行")
-    sub.add_parser("grafana-reset-admin", help="Grafana の admin パスワードを .env の GF_ADMIN_PASSWORD にする")
     sub.add_parser("setup-check", help="(起動時に自動) profile の設定が済んでいるか")
     n = sub.add_parser("notify-test", help="各通知先にテスト通知 (Alertmanager 経由) を送り、応答を表で出す")
     n.add_argument("--receiver", default="", metavar="名前", help="この通知先だけ (既定: すべて)")
@@ -2546,7 +2220,7 @@ def main(argv):
     p = parser()
     args = p.parse_args(argv)
     cmds = {"init": cmd_init, "check": cmd_check, "targets": cmd_targets, "backup": cmd_backup,
-            "grafana-reset-admin": cmd_grafana_reset_admin, "setup-check": cmd_setup_check,
+            "setup-check": cmd_setup_check,
             "restore": cmd_restore, "test-syslog": cmd_test_syslog, "notify-test": cmd_notify_test,
             "capture": cmd_capture, "geoip": cmd_geoip, "capture-setup": cmd_capture_setup, "user": cmd_user, "doctor": cmd_doctor,
             "migrate-config": cmd_migrate_config}

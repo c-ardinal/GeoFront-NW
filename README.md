@@ -3,7 +3,6 @@
 GeoFront-NW は宅内ネットワークを観測するための docker compose 一式です。ルーターやアクセスポイントから
 SNMP・syslog・パケットを集め、専用の司令室画面 (コマンドセンター) に表示します。
 収集・保存・通知には定番の OSS (Prometheus、Loki、Alloy、Alertmanager) を使います。伏せ字・解析・履歴再生・推移・ログ検索・ログインは、コマンドセンターと mask-api が加える機能です。
-Grafana は任意で追加できます ([docs/operations.md](docs/operations.md#grafana-を使う))。
 YAMAHA RTX / WLX 用のドライバが付属しています。他社の機器にはドライバを追加して対応します ([docs/drivers.md](docs/drivers.md))。
 
 ## 機能
@@ -52,7 +51,6 @@ flowchart LR
     CC["command-center"]
     MASK["mask-api<br/>伏せ字にして返す"]
     ANA["analyzer<br/>tshark・ネットワークなし"]
-    GRAF["grafana<br/>任意 (profile grafana)"]
   end
 
   USER(["ブラウザ"])
@@ -69,7 +67,6 @@ flowchart LR
   PROXY -. "ログインの確認" .-> AUTH
   PROXY --> CC
   PROXY -- "/trend/・/logsearch/ など" --> MASK
-  PROXY -.-> GRAF
   CC -- "/prom/・/loki/" --> MASK
   MASK --> PROM
   MASK --> LOKI
@@ -77,12 +74,9 @@ flowchart LR
   MASK --> ANA
   MASK -- "アップロード" --> PCAP
   ANA --> PCAP
-  GRAF -.-> PROM
-  GRAF -.-> LOKI
 ```
 
 収集と通知の矢印はデータの向き、画面の矢印は要求の向きです。ログインの確認は LAN に公開したときと `OBS_AUTH=1` のときだけ行います。
-点線の grafana は既定では動きません。
 デモでは機器と取込の代わりに demo-gen と flowd-demo が疑似データを出します。コンテナごとの役割は [docs/architecture.md](docs/architecture.md) を見てください。
 
 ## 必要なもの
@@ -101,7 +95,7 @@ git clone https://github.com/c-ardinal/GeoFront-NW.git && cd GeoFront-NW
 docker compose --profile demo up -d --build
 ```
 
-コマンドセンターは http://127.0.0.1:8080/ で開きます。Grafana は既定では動きません。使うときは `--profile grafana` を加えて起動します ([docs/operations.md](docs/operations.md#grafana-を使う))。
+コマンドセンターは http://127.0.0.1:8080/ で開きます。
 止めるときは `docker compose --profile demo stop` を、データごと消すときは `down -v` を使います。
 
 ## 本番への導入
@@ -153,7 +147,6 @@ git pull && scripts/doctor.sh
 OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orphans && ./geofront run --rm tools check
 ```
 
-更新すると Grafana は既定で動かない構成になりますが、すでに動いているコンテナは動き続けます。使い続けるときは `.env` の `COMPOSE_PROFILES` に `grafana` を加え (データの grafana-data は残ります)、使わないときは `./geofront rm -s -f grafana` で止めてください。
 イメージの取得を含む詳しい手順は [docs/operations.md](docs/operations.md#更新) にあります。
 
 ## バックアップと復元

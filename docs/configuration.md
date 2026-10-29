@@ -38,16 +38,14 @@ export OBS_CONFIG_DIR=/etc/geofront
 
 | 項目 | 既定 | 内容 |
 |---|---|---|
-| `COMPOSE_PROFILES` | なし | `prod` (実機)、`demo`、`prod,capture` (パケット取込あり)。`grafana` を加えると Grafana も動きます (例 `prod,grafana`。既定は動かしません) |
+| `COMPOSE_PROFILES` | なし | `prod` (実機)、`demo`、`prod,capture` (パケット取込あり) |
 | `COMPOSE_PROJECT_NAME` | `yamaha-observatory-trial` | コンテナとボリュームの名前。古いボリュームがないホストで `./geofront` から新しく導入すると `geofront-nw` になります。`tools init` が値を固定します。変えると今までのデータが見えなくなります |
 | `OBS_BIND` / `OBS_PORT` | `127.0.0.1` / `8080` | 画面を公開するアドレス。LAN 側の IP か `0.0.0.0` にすると LAN に公開します (ログインと HTTPS が必須) |
-| `OBS_PUBLIC_URL` | `http://127.0.0.1:8080` | 画面・通知・Grafana のリンクに使う URL |
+| `OBS_PUBLIC_URL` | `http://127.0.0.1:8080` | 画面・ログイン・通知のリンクに使う URL |
 | `OBS_AUTH` | `0` | `1` にすると 127.0.0.1 でもログインが必須になります |
 | `OBS_AUTH_*` | なし | ログインの秘密値と、セッション・締め出しの設定 ([security.md](security.md)) |
-| `GF_ADMIN_PASSWORD` | `admin` | Grafana の管理者パスワード。Grafana を動かすときだけ使います (`tools init --grafana` が設定します)。Grafana の初回起動のときだけ使われます |
-| `OBS_GRAFANA` | なし | 使われなくなりました。Grafana は `COMPOSE_PROFILES` の `grafana` で動かします。`OBS_GRAFANA=1` が残っていると `tools doctor` が知らせます |
 | `SYSLOG_BIND` / `SYSLOG_PORT` | `127.0.0.1` / `514` | syslog の受信先 (UDP / TCP)。機器から受けるにはホストの LAN 側 IP にします |
-| `PROM_LOCAL_PORT` / `GRAFANA_LOCAL_PORT` | `9090` / `3000` | このホストだけで開ける Prometheus (読み取り専用) と、古い Grafana の URL の転送 |
+| `PROM_LOCAL_PORT` | `9090` | このホストだけで開ける Prometheus (読み取り専用) |
 | `SYSLOG_DROP_UNKNOWN` | `0` | `1` にすると、台帳にない送信元からの syslog を捨てます |
 | `SNMP_V3_USER` `SNMP_V3_AUTH_PROTO` `SNMP_V3_AUTH_PASS` `SNMP_V3_PRIV_PROTO` `SNMP_V3_PRIV_PASS` | 方式は `SHA` / `AES` | SNMPv3 authPriv のユーザーと方式とパスワード |
 | `SNMP_COMMUNITY` | 空 | SNMPv2c のコミュニティ。v3 を使えない機器があるときだけ設定します |
@@ -67,7 +65,7 @@ export OBS_CONFIG_DIR=/etc/geofront
 `./geofront` を使う場合は、秘密値を `.env` に書く代わりにファイルから渡せます。
 環境変数か `.env` に `<名前>_FILE=/path` と書くと、そのファイルの中身が値になります。`tools init` はこの値を `.env` に書きません。
 
-ファイルで渡せる値: `GF_ADMIN_PASSWORD` `SNMP_V3_AUTH_PASS` `SNMP_V3_PRIV_PASS` `SNMP_COMMUNITY` `SMTP_PASSWORD` `SLACK_WEBHOOK_URL`
+ファイルで渡せる値: `SNMP_V3_AUTH_PASS` `SNMP_V3_PRIV_PASS` `SNMP_COMMUNITY` `SMTP_PASSWORD` `SLACK_WEBHOOK_URL`
 `DISCORD_WEBHOOK_URL` `LINE_CHANNEL_ACCESS_TOKEN` `WEBHOOK_URL` `WEBHOOK_BEARER_TOKEN` `OBS_AUTH_SESSION_SECRET`
 `OBS_AUTH_STORAGE_KEY` `OBS_AUTH_PROXY_KEY`
 

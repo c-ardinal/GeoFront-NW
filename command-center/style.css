@@ -455,7 +455,7 @@ ul { list-style: none; }
 .fld { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-s); color: var(--text-2); }
 .fld.chk { flex-direction: row; align-items: center; }
 .filters select, .filters input[type="search"] { font: var(--fs) var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--frame); padding: 3px var(--s2); min-width: 140px; }
-.v-sub { margin-bottom: var(--s2); }
+.v-sub { margin-bottom: var(--s2); overflow-x: auto; } /* per-device interface tables: scroll inside on phones */
 .filters input::placeholder { color: var(--text-2); opacity: 1; }
 .cell-btn { font: inherit; color: inherit; background: transparent; border: 0; padding: 0; text-align: inherit; cursor: pointer; }
 .cell-btn:hover { text-decoration: underline; text-underline-offset: 3px; }

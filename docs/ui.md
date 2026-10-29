@@ -3,18 +3,8 @@
 | 画面 | URL |
 |---|---|
 | コマンドセンター | `OBS_PUBLIC_URL` (既定 http://127.0.0.1:8080/) |
-| Wallboard (Grafana、動かしたときだけ) | `<OBS_PUBLIC_URL>/grafana/d/yamaha-wallboard?kiosk` |
-| Grafana (動かしたときだけ) | `<OBS_PUBLIC_URL>/grafana/` |
-
-Grafana は既定では動きません。コマンドセンターだけで、長い期間の推移とログの検索まで行えます。Grafana を使うときの手順は [operations.md](operations.md) にあります。
 
 地球儀・地図の背景・フォントはインターネットから取得します。オフラインでは地球儀と地図の背景が表示されませんが、ほかのパネルは動きます。
-
-## Wallboard
-
-Grafana を動かしたときに使える、1 画面のダッシュボードで、1920×1080 の kiosk 表示に収まります。
-WAN の速度、オンラインの機器の数、発報中のアラート、syslog の件数、データの鮮度、宛先の地図、機器の状態、最新の syslog を表示します。
-値が取れないときの表示は、0 ではなく `NO DATA` か `STALE` です。
 
 ## コマンドセンター
 

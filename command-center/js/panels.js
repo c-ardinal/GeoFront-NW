@@ -168,6 +168,14 @@ export function fitRightColumn() {
   shareHeight([['p-if', false], ['p-wlan', false], ['p-alerts', true]]);
 }
 
+// Last seen (seconds since the last successful SNMP scrape), DOWN devices included; a device known to Prometheus
+// without a success in the last LAST_SEEN_MAX_S counts as that bound (shown "> 15 min"); not known at all: undefined.
+// Thresholds as the freshness of the screens: >= 45 s late, >= 120 s stale.
+export const LAST_SEEN_MAX_S = 900;
+export const lastSeen = (m, d) => (m.lastOk.has(d) ? Math.min(m.lastOk.get(d), LAST_SEEN_MAX_S) : m.up.has(d) ? LAST_SEEN_MAX_S : undefined);
+export const fmtSeen = (v) => (!has(v) ? '—' : v >= LAST_SEEN_MAX_S ? '> 15 min' : `${v.toFixed(0)} s`);
+export const seenKind = (v) => (!has(v) ? 'unknown' : v >= 120 ? 'crit' : v >= 45 ? 'warn' : 'ok');
+
 export function renderDevices(m, nav) {
   const rows = [head('', 'DEVICE', '#↓ Mbps', '#↑ Mbps', '#ERR/m', '#CLI', '#UPTIME')];
   for (const d of DEVICES) {

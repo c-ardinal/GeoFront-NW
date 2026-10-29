@@ -158,11 +158,14 @@ function renderSurgeButton(s) {
 // keeps returning decaying numbers (and 0 errors) for ~1-2 min after a target goes DOWN, which must not be shown.
 const UP = 'on (instance) (up{job="snmp"} == 1)';
 const gate = (expr) => `(${expr}) and ${UP}`;
+const UP_TS = 'timestamp(up{job="snmp"}) and up{job="snmp"} == 1'; // timestamp() of the raw selector = the sample time
 const ERR_EXPR = `(rate(ifInErrors{job="snmp"}[${RATE_WIN}]) + rate(ifOutErrors{job="snmp"}[${RATE_WIN}])) * 60`;
 const Q = {
   // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
   flows: `(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(obs_flow_bytes_total[${RATE_WIN}])) * 8) and on () (up{job="flows"} == 1)`,
   uptime: gate('sysUpTime{job="snmp"} / 100'),
+  // seconds since each device's last successful scrape, DOWN devices included; none within 15 min = no series (> 15 min)
+  lastOk: `time() - max by (instance) (${UP_TS} or max_over_time((${UP_TS})[${P.LAST_SEEN_MAX_S}s:${SCRAPE_S}s]))`,
   devIn: gate(`sum by (instance) (rate(ifHCInOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
   devOut: gate(`sum by (instance) (rate(ifHCOutOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
   devErr: gate(`sum by (instance) (${ERR_EXPR})`),
@@ -239,7 +242,7 @@ async function pollProm() {
   ]);
   if (gen !== state.gen) throw new Error('superseded'); // asked for another data time
   const m = {
-    up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'),
+    up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'), lastOk: vmap(res.lastOk, 'instance'),
     devIn: vmap(res.devIn, 'instance'), devOut: vmap(res.devOut, 'instance'), devErr: vmap(res.devErr, 'instance'),
     clients: vmap(res.clients, 'instance'),
     ifIn: vmap(res.ifIn, 'instance', 'ifName'), ifOut: vmap(res.ifOut, 'instance', 'ifName'),
