@@ -6,22 +6,22 @@
 
 | コンテナ | 役割 | つながる先 |
 |---|---|---|
-| proxy | 入口です (Caddy)。許可したホスト名だけに答えます。LAN に公開したときは HTTPS にして、Authelia でログインを確かめます | command-center、mask-api、grafana、authelia。127.0.0.1:9090 で Prometheus を読み取り専用で見せます |
+| proxy | 入口です (Caddy)。許可したホスト名だけに答えます。LAN に公開したときは HTTPS にして、Authelia でログインを確かめます。Grafana が動いていないときは、`/grafana/` に「有効になっていません」のページを返します | command-center、mask-api (`/trend/`・`/logsearch/` など)、grafana (任意)、authelia。127.0.0.1:9090 で Prometheus を読み取り専用で見せます |
 | authelia | ログインと役割 (viewer / operator / admin) を扱います。ログインが要らないときは待機だけします | proxy から呼ばれます |
 | command-center | 画面の静的ファイルを返します (nginx) | `/prom/` と `/loki/` を mask-api へ渡します |
-| mask-api | 画面が使う API です。IP や MAC を伏せ字にしてから返します。抑止と ACK、pcap の解析とアップロード、証跡、原因候補もここで扱います | prometheus、loki、alertmanager、analyzer、grafana (証跡に書くバージョンだけ) |
+| mask-api | 画面が使う API です。IP や MAC を伏せ字にしてから返します。抑止と ACK、pcap の解析とアップロード、証跡、原因候補、推移 (`/trend/`)、ログ検索 (`/logsearch/`) もここで扱います | prometheus、loki、alertmanager、analyzer、grafana (動いているときだけ。証跡に書くバージョン) |
 | analyzer | pcap を tshark で解析します。ネットワークを持たず、Unix ソケットだけで呼ばれます | mask-api と flowd から呼ばれます。pcap を読み取り専用で読みます |
 | prometheus | メトリクスを保存し、アラートを判定します | snmp-exporter、flowd、demo-gen から取得し、alertmanager へ送ります |
 | loki | syslog と通知の記録を保存します | alloy と notify-relay から受け取ります |
 | alloy | syslog を受信し、送信元を台帳の機器名に読み替えます | loki へ送ります |
 | alertmanager | 通知をまとめ、重要度ごとに振り分けます。抑止と ACK を保存します | notify-relay へ送ります |
 | notify-relay | 通知の本文を作り、各通知先へ送ります。デモでは外部に送らず、デモ用の受信先に記録します | 外部の通知先、loki (記録)、alertmanager (済んだ ACK の解除) |
-| grafana | ダッシュボードです。ログインがあるときは admin だけが開けます。`OBS_GRAFANA=0` で止められます | prometheus、loki |
 
 ## プロファイルで加わるコンテナ
 
 | コンテナ | プロファイル | 役割 |
 |---|---|---|
+| grafana | grafana | ダッシュボードです (任意。既定では動きません)。demo か prod と一緒に使います。ログインがあるときは admin だけが開けます。止めてもデータ (grafana-data) は残ります ([operations.md](operations.md#grafana-を使う)) |
 | demo-gen | demo | 疑似の SNMP・syslog・通信量を出します。疑似の異常を約 4 分ごとに起こします |
 | flowd-demo | demo | 付属の疑似 pcap を繰り返し再生し、通信先を地球儀に出します |
 | snmp-exporter | prod | 台帳の機器に SNMP で問い合わせます (読み取りだけ) |
