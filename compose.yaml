@@ -16,7 +16,10 @@ name: yamaha-observatory-trial
 #            (docker compose --env-file testbed/testbed.env up -d)
 #   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
 #            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; docs/capture.md)
-# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
+#   grafana  with demo or prod, off by default (F1): Grafana under /grafana/ (admin only with the login). The command-center
+#            covers everything without it (推移 / ログ検索); its data volume grafana-data is kept while it is off
+#            (.env: COMPOSE_PROFILES=prod,grafana)
+# Shared services (prometheus, loki, alloy, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
 # run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
 # Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|user|help>
@@ -58,7 +61,10 @@ x-tools-env: &tools-env
   SNMP_V3_PRIV_PROTO: ${SNMP_V3_PRIV_PROTO:-AES}
   SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
   SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
-  OBS_GRAFANA: ${OBS_GRAFANA:-1}
+  # Grafana runs only with the profile grafana; tools read the profiles to know (OBS_GRAFANA is the retired switch, still
+  # read once to tell an old .env's owner what to change)
+  COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+  OBS_GRAFANA: ${OBS_GRAFANA:-}
   # login (P7, tools/auth.py): non-secret settings; the secrets are in x-auth-secrets
   OBS_AUTH: ${OBS_AUTH:-0}
   OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
@@ -517,11 +523,11 @@ services:
     mem_limit: ${ALLOY_MEM:-256m}
     cpus: ${ALLOY_CPUS:-0.5}
 
-  # Optional: OBS_GRAFANA=0 leaves Grafana out; the command-center does not need it (/grafana/ then
-  # answers 502, evidence exports say grafana "unknown"). Raspberry Pi: saves ~100 MB and its background work.
+  # Optional (profile grafana, off by default): the command-center does not need it. Off, the proxy answers /grafana/ with
+  # a "not enabled" 404 page and evidence exports say grafana "unknown"; its volume grafana-data stays as it is.
   grafana:
     <<: *ops
-    scale: ${OBS_GRAFANA:-1}
+    profiles: [grafana]
     image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     # Without the screens' login (127.0.0.1): anonymous Viewer. With it (always on a LAN exposure, or OBS_AUTH=1): only the
     # role admin reaches Grafana (it shows raw, unmasked IP / MAC values), as the same user through the proxy's auth proxy
@@ -591,7 +597,7 @@ services:
         OBS_COMMIT: ${OBS_COMMIT:-unknown}
     environment:
       # evidence export (/evidence/): the Loki retention bounds the playback range; GRAFANA_URL for its version
-      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}  # also the longest ログ検索 window (logsearch.py)
       GRAFANA_URL: http://grafana:3000
       # writes (silences / ACK, pcap uploads, snapshot exports): with a login for a verified operator / admin only, the
       # identity believed only with the proxy's key (OBS_AUTH_PROXY_KEY); without a login (127.0.0.1) for everyone
@@ -792,7 +798,7 @@ services:
     depends_on:
       command-center: {condition: service_started}
       mask-api: {condition: service_started}
-      grafana: {condition: service_started, required: false}  # OBS_GRAFANA=0
+      grafana: {condition: service_started, required: false}  # only with the profile grafana
       authelia: {condition: service_started}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]

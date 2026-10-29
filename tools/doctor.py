@@ -9,7 +9,7 @@ import time
 
 OK, WARN, NG = "OK", "WARN", "NG"
 ENGINE_MIN = (25, 0)  # healthcheck start_interval
-COMPOSE_MIN = (2, 20)  # depends_on required: false (optional setup steps, OBS_GRAFANA=0)
+COMPOSE_MIN = (2, 20)  # depends_on required: false (optional setup steps, Grafana)
 MEM_OK, MEM_MIN = 3.5 * 2**30, 1.8 * 2**30  # Raspberry Pi 4 4 GB defaults (docs/operations.md); below MEM_MIN the limits cannot fit
 DISK_MIN = 2 * 2**30
 CLOCK_SLACK_S = 3600
@@ -53,7 +53,7 @@ def memory(total):
     if total >= MEM_OK:
         return OK, gib, ""
     if total >= MEM_MIN:
-        return WARN, f"{gib} (既定の上限は 4 GB 向け)", ".env に OBS_GRAFANA=0、PROM_MEM / LOKI_MEM などを小さく"
+        return WARN, f"{gib} (既定の上限は 4 GB 向け)", ".env の PROM_MEM / LOKI_MEM などを小さく (Grafana は既定で動かしません)"
     return NG, f"{gib} (足りません)", "4 GB 以上のホストにしてください"
 
 
