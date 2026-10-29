@@ -19,9 +19,7 @@ project="${COMPOSE_PROJECT_NAME:-$(dc config 2>/dev/null | sed -n 's/^name: //p'
 own="$(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Ports}}' 2>/dev/null | sed 's/, /\n/g' |
   sed -nE 's#^(.*):([0-9]+)->[0-9]+/(tcp|udp)$#\3:\1:\2#p' | tr '\n' ' ')"
 args+=(-e "OBS_DOCTOR_OWN=$own")
-for v in PROM_LOCAL_PORT GRAFANA_LOCAL_PORT; do  # compose takes them from the shell before .env; tools-env does not carry them
-  [ -n "${!v:-}" ] && args+=(-e "$v=${!v}")
-done
+[ -n "${PROM_LOCAL_PORT:-}" ] && args+=(-e "PROM_LOCAL_PORT=$PROM_LOCAL_PORT")  # compose takes it from the shell before .env
 # the host's listeners; when no tool can read them OBS_DOCTOR_LISTEN stays unset and doctor says WARN (never "free")
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)  # Git Bash on Windows (Docker Desktop): Windows' netstat

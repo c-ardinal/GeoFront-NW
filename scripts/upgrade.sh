@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Update from an older version's data volumes (docs/operations.md): the old version (default bb2f21d = P6) runs on the demo
 # profile in a throwaway project until it has data and a silence; then this tree takes over the same volumes with
-# `up -d --build --remove-orphans` and the old .env. Checks: tools check all OK, the old metrics / syslog / silence /
-# Grafana users unchanged at the same time, the retired grafana-guard container gone, new services (Authelia) up.
+# `up -d --build --remove-orphans` and the old .env. Checks: tools check all OK, the old metrics / syslog / silence
+# unchanged at the same time, no container of a removed service left, new services (Authelia) up.
 #   scripts/upgrade.sh [old-ref]     Env: E2E_DIR (default ${TMPDIR:-/tmp}/obs-e2e); KEEP=1 leaves it running;
 #   UPGRADE_MIGRATE=1 (default): then `tools migrate-config` to a config directory outside the tree, up with it, same data
 set -u
@@ -24,12 +24,8 @@ COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 COMPOSE_PROFILES=demo
 OBS_PORT=48080
 PROM_LOCAL_PORT=48090
-GRAFANA_LOCAL_PORT=48030
 SYSLOG_PORT=48514
-GF_ADMIN_PASSWORD=e2e-gf-$(rand)
-OBS_GRAFANA_NET=172.31.253.32/29
-OBS_GRAFANA_PROXY_IP=172.31.253.34
-OBS_GRAFANA_NET_DYNAMIC=172.31.253.36/30
+DEMO_AUTO_FAULTS=${DEMO_AUTO_FAULTS:-0}
 EOF
 chmod 600 "$OLD_DIR/.env"
 log "old version $OLD: up"
@@ -58,7 +54,7 @@ kept() {
 import json, sys
 a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 bad = 0
-for k in ("prom_up_samples_10m", "prom_ifHCInOctets", "loki_syslog_lines_10m", "silences", "grafana_users"):
+for k in ("prom_up_samples_10m", "prom_ifHCInOctets", "loki_syslog_lines_10m", "silences"):
     ok = a[k] == b[k] and a[k] not in (None, [], "0") and not str(a[k]).startswith("error")
     bad += not ok
     print(f"[{'OK' if ok else 'NG'}] {k} kept: {str(a[k])[:60]} -> {str(b[k])[:60]}")
@@ -80,8 +76,9 @@ if [ "${UPGRADE_MIGRATE:-1}" = 1 ]; then
   log "migrated: $migrated"
   kept "$before" "$migrated" || rc=1
 fi
-if docker ps -a --format '{{.Names}}' | grep -q "^$COMPOSE_PROJECT_NAME-grafana-guard"; then log "NG: orphan grafana-guard remains"; rc=1
-else log "OK: grafana-guard (retired) removed by --remove-orphans"; fi
+orphans="$(docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" --format '{{.Label "com.docker.compose.service"}}' |
+  grep -vxF -f <(dc config --services) || true)"
+[ -z "$orphans" ] && log "OK: no container of a removed service left (--remove-orphans)" || { log "NG: left: $orphans"; rc=1; }
 [ "$(dc ps --status running -q authelia)" ] && log "OK: authelia (new) running" || { log "NG: authelia not running"; rc=1; }
 [ "$rc" = 0 ] && log "OK: upgrade from $OLD" || log "NG: upgrade from $OLD"
 exit "$rc"

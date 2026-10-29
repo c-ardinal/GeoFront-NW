@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # backup -> restore round trip with login, into another project (= another host): users, Authelia's data, the proxy's
-# CA (caddy-data: same root certificate, so the devices need no new registration), Grafana, Prometheus, Loki and
+# CA (caddy-data: same root certificate, so the devices need no new registration), Prometheus, Loki and
 # Alertmanager's silences must be the same afterwards. Source: the project `KEEP=1 scripts/e2e-fresh.sh auth` leaves.
 #   scripts/backup-restore.sh        Env: E2E_DIR; KEEP=1 leaves the restored project running; E2E_CONFIG=outside for
 #                                    the R1 layout (config in OBS_CONFIG_DIR = <tree>-config on both sides)
@@ -46,7 +46,6 @@ dc run --rm -T tools restore "$arch" --with-config --yes || die "restore"
 # the restored .env is the source host's; only this test's project-specific lines differ (both projects on one host)
 set_env COMPOSE_PROJECT_NAME "$COMPOSE_PROJECT_NAME"
 set_env TESTBED_RTX_NAME obs-e2e-restore-rtx; set_env TESTBED_WLX_NAME obs-e2e-restore-wlx
-set_env OBS_GRAFANA_NET 172.31.253.40/29; set_env OBS_GRAFANA_PROXY_IP 172.31.253.42; set_env OBS_GRAFANA_NET_DYNAMIC 172.31.253.44/30
 [ "$outside" = 1 ] && set_env OBS_CONFIG_DIR "$OBS_CONFIG_DIR"  # the restored .env names the source's directory
 sed -i "s/obs-e2e-auth-rtx/obs-e2e-restore-rtx/; s/obs-e2e-auth-wlx/obs-e2e-restore-wlx/" "$DST_CFG/inventory/devices.yaml"
 dc up -d --build > "$DST/up.log" 2>&1 || { tail -n 30 "$DST/up.log" >&2; die "up"; }

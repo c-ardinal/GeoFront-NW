@@ -87,8 +87,6 @@ def main():
         "prom_ifHCInOctets": prom("sum(ifHCInOctets)", a.at),
         "loki_syslog_lines_10m": loki('sum(count_over_time({job="syslog"}[10m]))', a.at),
         "silences": silences(),
-        "grafana_users": sqlite_rows(VOL / "grafana/grafana.db", 'SELECT login, created FROM "user" ORDER BY id'),
-        "grafana_dashboards": sqlite_rows(VOL / "grafana/grafana.db", "SELECT uid FROM dashboard ORDER BY uid"),
         "authelia_users_sha": sha(VOL / "authelia/users_database.yml"),
         "authelia_auth_logs": sqlite_rows(VOL / "authelia/db.sqlite3", "SELECT count(*) FROM authentication_logs"),
         "ca_root_sha": sha(pki / "root.crt"),

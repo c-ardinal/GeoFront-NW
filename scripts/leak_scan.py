@@ -10,7 +10,8 @@ Findings (NG fails, WARN is reported only):
   path     .env / *.env / .env.* (not *.example), keys and certificates, pcap / pcapng (not the synthetic demo),
            SQLite / *.db, *.mmdb, site config (inventory/devices.yaml, alerting/receivers.yaml), Authelia users, backups
   ipv4     anything but documentation (RFC 5737), loopback, 0.0.0.0/8 / broadcast / netmasks, multicast, link-local,
-           the compose subnets 172.31.253.0/24 and the well-known special-purpose blocks written as CIDR;
+           172.31.253.0/24 (internal compose subnets of earlier versions, in the history) and the well-known
+           special-purpose blocks written as CIDR;
            192.168.100.0/24 (YAMAHA's factory default, used as an example) is WARN
   ipv6     global addresses outside 2001:db8::/32 (RFC 3849); unique-local (fc00::/7) is WARN
   mac      universally administered (burned-in) MACs outside 00:00:5e:00:53:xx (RFC 7042), also as xxxx.xxxx.xxxx;
@@ -285,7 +286,7 @@ def report(title, findings, allow=frozenset()):
 def selftest():
     lv = lambda s: [(a, b) for a, b, _ in scan_line(s)]
     assert lv("syslog host 192.0.2.10 and 198.51.100.7:443, 203.0.113.9.50211") == []
-    assert lv("127.0.0.1 0.0.0.0 255.255.255.0 224.0.0.251 172.31.253.2 OBS_GRAFANA_NET=172.31.253.0/29") == []
+    assert lv("127.0.0.1 0.0.0.0 255.255.255.0 224.0.0.251 172.31.253.2 subnet=172.31.253.0/29") == []
     assert lv("OID 1.3.6.1.2.1.31.1.1.1.6 v1.2.3.4 192.168.100.x 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16") == []
     assert lv("snmp host 192.168.100.10") == [("WARN", "ipv4")]
     assert lv("my LAN 10.20.30.40") == [("NG", "ipv4")] and lv("10.1.2.3:8080") == [("NG", "ipv4")]  # leak-scan: allow (selftest vector)
@@ -302,8 +303,8 @@ def selftest():
                    "export PASS=hunter2hunter2", "password: hunter2hunter2", '"token": "abcdef123456"', "priv_password: s3cr3tvalue"):  # leak-scan: allow (selftest vector)
         assert lv(single) == [("NG", "secret")], single
     assert lv("BYPASS=whatever1 password: ${SNMP_V3_AUTH_PASS} token: <token> secret_name: x") == []
-    assert lv("SNMP_V3_AUTH_PASS=testbed-auth-dummy GF_ADMIN_PASSWORD=change-me OBS_AUTH_PROXY_KEY=${OBS_AUTH_PROXY_KEY:-}") == []
-    assert lv('-e GF_ADMIN_PASSWORD="$GF" SNMP_COMMUNITY= OBS_AUTH_STORAGE_KEY=$(rand 48) WEBHOOK_URL=<url>') == []
+    assert lv("SNMP_V3_AUTH_PASS=testbed-auth-dummy SMTP_PASSWORD=change-me OBS_AUTH_PROXY_KEY=${OBS_AUTH_PROXY_KEY:-}") == []
+    assert lv('-e SMTP_PASSWORD="$PW" SNMP_COMMUNITY= OBS_AUTH_STORAGE_KEY=$(rand 48) WEBHOOK_URL=<url>') == []
     assert lv("url https://hooks.slack.com/services/T0123/B0456/abcdefXYZ") == [("NG", "secret")]  # leak-scan: allow (selftest vector)
     assert lv("hash $argon2id$v=19$m=65536,t=3,p=4$abcdefgh$abcdefghijklmnop0123") == [("NG", "secret")] and lv("$argon2id$v=19$m=1,t=3,p=4$") == []  # leak-scan: allow (selftest vector)
     assert lv("10.9.8.7  # leak-scan: allow (test value)") == []

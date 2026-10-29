@@ -28,6 +28,10 @@ dc() {
 down_project() {
   case "$1" in obs-e2e-*) ;; *) die "down_project: only throwaway obs-e2e-* projects, not $1" ;; esac
   (cd / && docker compose -p "$1" down -v --remove-orphans >/dev/null 2>&1)
+  # volumes / networks an older test copy's compose.yaml had and this one has not: by the project's label
+  docker volume ls -q --filter "label=com.docker.compose.project=$1" | xargs -r docker volume rm >/dev/null 2>&1
+  docker network ls -q --filter "label=com.docker.compose.project=$1" | xargs -r docker network rm >/dev/null 2>&1
+  return 0
 }
 
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -69,7 +73,7 @@ wait_healthy() {
   done
 }
 
-# JSON state of the data (Prometheus / Loki / Alertmanager / Grafana / Authelia / CA) at time $1, from inside the tools
+# JSON state of the data (Prometheus / Loki / Alertmanager / Authelia / CA) at time $1, from inside the tools
 # container (internal network + data volumes): scripts/state.py
 state() {
   local out

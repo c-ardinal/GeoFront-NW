@@ -1,13 +1,11 @@
 """HTTP checks of the screens from the host, as a browser would reach them (stdlib only; python3 on the Pi).
 
-  probe.py screens --url http://127.0.0.1:8080                      open mode: screens, APIs, Grafana admin, Host check
-  probe.py screens --url https://192.0.2.10:8080 --ca root.crt  login: HTTPS with the proxy's CA, roles, Grafana admin
+  probe.py screens --url http://127.0.0.1:8080                      open mode: screens, APIs, Host check
+  probe.py screens --url https://192.0.2.10:8080 --ca root.crt  login: HTTPS with the proxy's CA, roles
   probe.py status  --url ... [--ca ...] PATH...                     one line per PATH: its HTTP status (logged in as admin)
-  --grafana on|off (default off): Grafana is optional (profile grafana, F1); off = /grafana/ answers the "not enabled" 404
-Secrets from the environment only: E2E_GF_PW (Grafana admin, open mode), E2E_ADMIN / E2E_VIEWER ("user:password").
+Secrets from the environment only: E2E_ADMIN / E2E_VIEWER ("user:password").
 Prints one line per check (OK / NG); exit 1 when any is NG."""
 import argparse
-import base64
 import http.client
 import json
 import os
@@ -17,7 +15,9 @@ import time
 import urllib.parse
 
 RESULTS = []
-GRAFANA = False
+# the devices modal's "Last seen" (F2, command-center/js/main.js Q.lastOk): accepted by mask-api's /prom/ path
+UP_TS = 'timestamp(up{job="snmp"}) and up{job="snmp"} == 1'
+LAST_OK = f"time() - max by (instance) ({UP_TS} or max_over_time(({UP_TS})[900s:30s]))"
 
 
 class Client:
@@ -78,18 +78,18 @@ def common(c):
     q = urllib.parse.urlencode({"query": '{job="syslog"}', "limit": 5, "start": int((time.time() - 900) * 1e9), "end": int(time.time() * 1e9)})
     st, _, b = c.req("GET", "/loki/loki/api/v1/query_range?" + q)
     check("Loki (mask-api 経由): syslog の行", st == 200 and (js(b) or {}).get("data", {}).get("result"), st)
-    if GRAFANA:
-        st, _, b = c.req("GET", "/grafana/api/health")
-        check("Grafana health", st == 200, st)
+    st, _, b = c.req("GET", "/prom/api/v1/query?query=" + urllib.parse.quote(LAST_OK))
+    res = (js(b) or {}).get("data", {}).get("result", [])
+    check("機器ごとの Last seen (mask-api 経由)", st == 200 and res and all(0 <= float(r["value"][1]) <= 900 for r in res),
+          f"{st} {[(r['metric'].get('instance'), round(float(r['value'][1]))) for r in res]}")
     trend_and_search(c)
     st, _, _ = c.req("GET", "/", host="evil.example:%d" % c.port)
     check("知らない Host -> 421", st == 421, st)
 
 
-def grafana_off(c, who):
-    st, hd, b = c.req("GET", "/grafana/")
-    check(f"{who}: Grafana 無効 -> 404 の案内", st == 404 and "有効になっていません" in b.decode("utf-8", "replace")
-          and hd.get("content-type", "").startswith("text/html"), st)
+def unknown_path(c, who):
+    st, _, _ = c.req("GET", "/no-such-page/")
+    check(f"{who}: 知らないパス -> 404", st == 404, st)
 
 
 def trend_and_search(c):
@@ -141,14 +141,7 @@ def screens_open(c):
     st, _, b = c.req("GET", "/obs/exposure.json")
     check("exposure: open", st == 200 and (js(b) or {}).get("access") == "open", b[:80])
     common(c)
-    if not GRAFANA:
-        grafana_off(c, "open")
-    else:
-        token = base64.b64encode(f"admin:{os.environ.get('E2E_GF_PW', '')}".encode()).decode()
-        st, _, b = c.req("GET", "/grafana/api/user", {"Authorization": "Basic " + token})
-        check("Grafana admin (GF_ADMIN_PASSWORD)", st == 200 and (js(b) or {}).get("isGrafanaAdmin") is True, st)
-        st, _, b = c.req("GET", "/grafana/api/dashboards/uid/yamaha-wallboard")
-        check("Grafana wallboard (匿名 Viewer)", st == 200, st)
+    unknown_path(c, "open")
     st, _, b = c.req("GET", "/am/ops")
     check("書き込み可 (127.0.0.1、ログインなし)", st == 200 and (js(b) or {}).get("writable") is True, b[:100])
 
@@ -171,14 +164,7 @@ def screens_auth(c):
     st, _, b = c.req("GET", "/am/ops")
     o = js(b) or {}
     check("admin: 役割と書き込み", st == 200 and o.get("role") == "admin" and o.get("writable") is True and o.get("auth") is True, b[:120])
-    if not GRAFANA:
-        grafana_off(c, "admin")
-    else:
-        st, _, b = c.req("GET", "/grafana/api/user")
-        u = js(b) or {}
-        check("Grafana: admin として入れる (auth proxy)", st == 200 and u.get("login") == os.environ.get("E2E_ADMIN", "").split(":")[0], f"{st} {u.get('login')}")
-        st, _, b = c.req("GET", "/grafana/api/dashboards/uid/yamaha-wallboard")
-        check("Grafana wallboard (admin)", st == 200, st)
+    unknown_path(c, "admin")
     if os.environ.get("E2E_VIEWER"):
         v = Client(c.base, c.ca)
         st, ok = v.login(os.environ["E2E_VIEWER"])
@@ -186,8 +172,7 @@ def screens_auth(c):
         st, _, b = v.req("GET", "/am/ops")
         o = js(b) or {}
         check("viewer: 読み取りだけ", st == 200 and o.get("role") == "viewer" and o.get("writable") is False, b[:120])
-        st, _, _ = v.req("GET", "/grafana/")
-        check("viewer: Grafana は 403", st == 403, st)
+        unknown_path(v, "viewer")
     c.cookie = sc
 
 
@@ -196,12 +181,9 @@ def main():
     ap.add_argument("what", choices=("screens", "status"))
     ap.add_argument("--url", required=True)
     ap.add_argument("--ca", default=None)
-    ap.add_argument("--grafana", choices=("on", "off"), default="off")
     ap.add_argument("paths", nargs="*")
     a = ap.parse_args()
     c = Client(a.url, a.ca)
-    global GRAFANA
-    GRAFANA = a.grafana == "on"
     if a.what == "status":
         if c.tls:
             st, ok = c.login(os.environ.get("E2E_ADMIN", ""))
