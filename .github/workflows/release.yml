@@ -1,6 +1,7 @@
-# Tag v*: build the self-built images for linux/amd64 and linux/arm64 (each Dockerfile runs its selftest during the build,
-# per platform), and only after every build and the selftests passed, push them to
-# ghcr.io/c-ardinal/geofront-nw-<svc>:<tag> (tools, mask-api, analyzer, flowd, notify-relay, demo-gen, capture).
+# Tag v*: build the self-built images natively per arch (amd64 on ubuntu-24.04, arm64 on ubuntu-24.04-arm; each
+# Dockerfile runs its selftest during the build) and push them as ghcr.io/c-ardinal/geofront-nw-<svc>:<tag>-<arch>
+# (tools, mask-api, analyzer, flowd, notify-relay, demo-gen, capture); only after both arches passed, the manifest job
+# joins them into <tag>. Not QEMU: the analyzer selftest's tshark rlimits (RLIMIT_FSIZE/RLIMIT_AS) fail under emulation.
 # Installations use them with GEOFRONT_VERSION=<tag> in their .env (docs/operations.md).
 name: release
 
@@ -14,34 +15,60 @@ permissions:
 
 jobs:
   images:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     env:
-      GEOFRONT_VERSION: ${{ github.ref_name }}
+      GEOFRONT_VERSION: ${{ github.ref_name }}-${{ matrix.arch }}
+      PLATFORMS: linux/${{ matrix.arch }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
       - name: leak-scan (working tree + history)
+        if: matrix.arch == 'amd64'
         run: bash scripts/leak-scan.sh --all
       - name: selftests (amd64, clean containers)
+        if: matrix.arch == 'amd64'
         env:
           VERIFY_LOGS: ${{ runner.temp }}/verify
         run: bash scripts/verify.sh selftests compose
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
-      - name: build amd64 + arm64 (build-time selftests, nothing pushed yet)
+      - name: build (build-time selftests, nothing pushed yet)
         run: OBS_COMMIT="${GITHUB_SHA::9}" docker buildx bake -f compose.yaml -f .github/docker-bake.hcl release
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: push (same build, from the cache)
+      - name: push <tag>-<arch> (same build, from the cache)
         run: OBS_COMMIT="${GITHUB_SHA::9}" docker buildx bake -f compose.yaml -f .github/docker-bake.hcl release --push
       - name: logs
-        if: always()
+        if: always() && matrix.arch == 'amd64'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-verify-logs
           path: ${{ runner.temp }}/verify
           retention-days: 7
+
+  manifest:
+    needs: images
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: join <tag>-amd64 + <tag>-arm64 into <tag>
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          for svc in tools mask-api analyzer flowd notify-relay demo-gen capture; do
+            img="ghcr.io/c-ardinal/geofront-nw-$svc"
+            docker buildx imagetools create -t "$img:$TAG" "$img:$TAG-amd64" "$img:$TAG-arm64"
+          done
