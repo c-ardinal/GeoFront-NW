@@ -52,7 +52,7 @@ source is the Debian source package of that version (snapshot.debian.org keeps e
 | authelia/authelia | Apache-2.0 |
 | nginx | BSD-2-Clause |
 | prom/prometheus, prom/alertmanager, prom/snmp-exporter | Apache-2.0 |
-| grafana/grafana, grafana/loki | AGPL-3.0 |
+| grafana/loki | AGPL-3.0 |
 | grafana/alloy | Apache-2.0 |
 | python (base of the self-built images) | PSF-2.0 + Debian |
 
@@ -61,7 +61,6 @@ source is the Debian source package of that version (snapshot.debian.org keeps e
 | Data | License | Notes |
 |---|---|---|
 | DB-IP Lite: IP to City Lite, IP to ASN Lite (`tools geoip update`) | Creative Commons Attribution 4.0 (CC BY 4.0) | Not contained in the repository or the images. Attribution "IP Geolocation by DB-IP" (https://db-ip.com) is shown on the screens and in the README |
-| Map tiles of the Grafana wallboard: Esri World Dark Gray Canvas | Esri terms of use | Fetched by the browser at run time |
 
 ## Synthetic data in this repository
 

@@ -1,12 +1,11 @@
 """HTTP checks of the screens from the host, as a browser would reach them (stdlib only; python3 on the Pi).
 
-  probe.py screens --url http://127.0.0.1:8080                      open mode: screens, APIs, Grafana admin, Host check
-  probe.py screens --url https://192.0.2.10:8080 --ca root.crt  login: HTTPS with the proxy's CA, roles, Grafana admin
+  probe.py screens --url http://127.0.0.1:8080                      open mode: screens, APIs, Host check
+  probe.py screens --url https://192.0.2.10:8080 --ca root.crt  login: HTTPS with the proxy's CA, roles
   probe.py status  --url ... [--ca ...] PATH...                     one line per PATH: its HTTP status (logged in as admin)
-Secrets from the environment only: E2E_GF_PW (Grafana admin, open mode), E2E_ADMIN / E2E_VIEWER ("user:password").
+Secrets from the environment only: E2E_ADMIN / E2E_VIEWER ("user:password").
 Prints one line per check (OK / NG); exit 1 when any is NG."""
 import argparse
-import base64
 import http.client
 import json
 import os
@@ -16,6 +15,9 @@ import time
 import urllib.parse
 
 RESULTS = []
+# the devices modal's "Last seen" (F2, command-center/js/main.js Q.lastOk): accepted by mask-api's /prom/ path
+UP_TS = 'timestamp(up{job="snmp"}) and up{job="snmp"} == 1'
+LAST_OK = f"time() - max by (instance) ({UP_TS} or max_over_time(({UP_TS})[900s:30s]))"
 
 
 class Client:
@@ -76,21 +78,70 @@ def common(c):
     q = urllib.parse.urlencode({"query": '{job="syslog"}', "limit": 5, "start": int((time.time() - 900) * 1e9), "end": int(time.time() * 1e9)})
     st, _, b = c.req("GET", "/loki/loki/api/v1/query_range?" + q)
     check("Loki (mask-api 経由): syslog の行", st == 200 and (js(b) or {}).get("data", {}).get("result"), st)
-    st, _, b = c.req("GET", "/grafana/api/health")
-    check("Grafana health", st == 200, st)
+    st, _, b = c.req("GET", "/prom/api/v1/query?query=" + urllib.parse.quote(LAST_OK))
+    res = (js(b) or {}).get("data", {}).get("result", [])
+    check("機器ごとの Last seen (mask-api 経由)", st == 200 and res and all(0 <= float(r["value"][1]) <= 900 for r in res),
+          f"{st} {[(r['metric'].get('instance'), round(float(r['value'][1]))) for r in res]}")
+    trend_and_search(c)
     st, _, _ = c.req("GET", "/", host="evil.example:%d" % c.port)
     check("知らない Host -> 421", st == 421, st)
+
+
+def unknown_path(c, who):
+    st, _, _ = c.req("GET", "/no-such-page/")
+    check(f"{who}: 知らないパス -> 404", st == 404, st)
+
+
+def trend_and_search(c):
+    """F1: 推移 / ログ検索 through mask-api (templates only, masked), with refused injections."""
+    now = time.time()
+    win = {"from": f"{now - 3600:.0f}", "to": f"{now:.0f}"}
+    st, _, b = c.req("GET", "/trend/families")
+    fams = [f["family"] for f in ((js(b) or {}).get("data") or {}).get("families", [])]
+    check("推移: 種類の一覧", st == 200 and "if_bps" in fams and "flow_country" in fams, f"{st} {len(fams)} 種類")
+    for fam, scope, want in (("if_bps", {"instance": "rtx1300", "ifName": "lan2"}, True), ("dev_up", {}, True),
+                             ("wan_util", {"instance": "rtx1300", "ifName": "lan2"}, True), ("if_drops", {"instance": "rtx1300"}, None),
+                             ("flow_country", {}, None), ("capture_ring", {}, None)):
+        st, _, b = c.req("GET", "/trend/series?" + urllib.parse.urlencode({"family": fam, **scope, **win}))
+        d = (js(b) or {}).get("data") or {}
+        ser = d.get("series", [])
+        pts = max((len(x["points"]) for x in ser), default=0)
+        ok = st == 200 and d.get("step") and pts <= 600 and (want is None or (ser and pts > 1))
+        check(f"推移: {fam} {scope or ''}".rstrip(), ok, f"{st} {len(ser)} 系列 {pts} 点 step {d.get('step')}")
+    for bad in ({"family": "if_bps", "instance": 'rtx1300"} or vector(1) #', **win}, {"family": "if_bps", "instance": "192.0.2.10", **win},
+                {"family": "up", **win}, {"family": "dev_up", "query": "up", **win}):
+        st, _, b = c.req("GET", "/trend/series?" + urllib.parse.urlencode(bad))
+        check(f"推移: 拒否 {str(bad)[:60]}", st == 400, st)
+    st, _, _ = c.req("POST", "/trend/series", {"Content-Type": "application/json"}, "{}")
+    check("推移: POST は 405", st == 405, st)
+    st, _, b = c.req("GET", "/logsearch/facets")
+    check("ログ検索: facet", st == 200 and "severities" in ((js(b) or {}).get("data") or {}), st)
+    st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({"limit": 20, **win}))
+    d = (js(b) or {}).get("data") or {}
+    ents = d.get("entries", [])
+    check("ログ検索: 新しい順の行", st == 200 and ents and all(int(ents[i]["ts"]) >= int(ents[i + 1]["ts"]) for i in range(len(ents) - 1)),
+          f"{st} {len(ents)} 行")
+    word = next((w for e in ents for t, _ in e["parts"] for w in t.split() if len(w) >= 4 and w.isalpha()), "LAN")
+    st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({"q": word.lower(), "limit": 20, **win}))
+    d = (js(b) or {}).get("data") or {}
+    hit = [e for e in d.get("entries", []) if any(h for _, h in e["parts"])]
+    check(f"ログ検索: 語句 {word.lower()} (大小文字を区別しない、印付き)", st == 200 and hit and len(hit) == len(d["entries"]), f"{st} {len(hit)} 行")
+    st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"q": word, **win}))
+    h = (js(b) or {}).get("data") or {}
+    check("ログ検索: 件数の棒グラフ", st == 200 and len(h.get("counts", [])) == 60 and sum(h["counts"]) > 0, f"{st} {sum(h.get('counts', []))} 件")
+    st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"from": f"{now - 930.5:.1f}", "to": f"{now:.0f}"}))
+    h = (js(b) or {}).get("data") or {}
+    check("ログ検索: 棒グラフ (端数の最後の棒も数える)", st == 200 and len(h.get("counts", [])) == 16 and sum(h["counts"]) > 0, f"{st} {h.get('counts', [])[-3:]}")
+    for bad in ({"q": "(a+)+$", "regex": "1"}, {"q": "192.0.2.10"}, {"host": 'rtx1300"} |= "x'}, {"q": "a", "regex": "1", "query": "x"}):
+        st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({**bad, **win}))
+        check(f"ログ検索: 拒否 {str(bad)[:50]}", st == 400, st)
 
 
 def screens_open(c):
     st, _, b = c.req("GET", "/obs/exposure.json")
     check("exposure: open", st == 200 and (js(b) or {}).get("access") == "open", b[:80])
     common(c)
-    token = base64.b64encode(f"admin:{os.environ.get('E2E_GF_PW', '')}".encode()).decode()
-    st, _, b = c.req("GET", "/grafana/api/user", {"Authorization": "Basic " + token})
-    check("Grafana admin (GF_ADMIN_PASSWORD)", st == 200 and (js(b) or {}).get("isGrafanaAdmin") is True, st)
-    st, _, b = c.req("GET", "/grafana/api/dashboards/uid/yamaha-wallboard")
-    check("Grafana wallboard (匿名 Viewer)", st == 200, st)
+    unknown_path(c, "open")
     st, _, b = c.req("GET", "/am/ops")
     check("書き込み可 (127.0.0.1、ログインなし)", st == 200 and (js(b) or {}).get("writable") is True, b[:100])
 
@@ -113,11 +164,7 @@ def screens_auth(c):
     st, _, b = c.req("GET", "/am/ops")
     o = js(b) or {}
     check("admin: 役割と書き込み", st == 200 and o.get("role") == "admin" and o.get("writable") is True and o.get("auth") is True, b[:120])
-    st, _, b = c.req("GET", "/grafana/api/user")
-    u = js(b) or {}
-    check("Grafana: admin として入れる (auth proxy)", st == 200 and u.get("login") == os.environ.get("E2E_ADMIN", "").split(":")[0], f"{st} {u.get('login')}")
-    st, _, b = c.req("GET", "/grafana/api/dashboards/uid/yamaha-wallboard")
-    check("Grafana wallboard (admin)", st == 200, st)
+    unknown_path(c, "admin")
     if os.environ.get("E2E_VIEWER"):
         v = Client(c.base, c.ca)
         st, ok = v.login(os.environ["E2E_VIEWER"])
@@ -125,8 +172,7 @@ def screens_auth(c):
         st, _, b = v.req("GET", "/am/ops")
         o = js(b) or {}
         check("viewer: 読み取りだけ", st == 200 and o.get("role") == "viewer" and o.get("writable") is False, b[:120])
-        st, _, _ = v.req("GET", "/grafana/")
-        check("viewer: Grafana は 403", st == 403, st)
+        unknown_path(v, "viewer")
     c.cookie = sc
 
 

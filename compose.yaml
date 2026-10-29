@@ -16,7 +16,7 @@ name: yamaha-observatory-trial
 #            (docker compose --env-file testbed/testbed.env up -d)
 #   capture  with prod, off by default: dumpcap ring on a LAN interface (Linux host only) -> flowd -> real flows + GeoIP
 #            (.env: COMPOSE_PROFILES=prod,capture, OBS_CAPTURE=1, CAPTURE_IFACE=...; docs/capture.md)
-# Shared services (prometheus, loki, alloy, grafana, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
+# Shared services (prometheus, loki, alloy, mask-api, command-center, proxy, alertmanager, notify-relay, analyzer)
 # run in every profile. The demo also runs flowd-demo, which replays the synthetic demo/demo-home.pcap as its flows.
 # One-shot `demo-setup` / `prod-setup` write the per-profile scrape targets into the `generated` volume first.
 # Tools: docker compose run --rm tools <init|check|targets|notify-test|backup|restore|test-syslog|capture|geoip|user|help>
@@ -51,14 +51,13 @@ x-tools-env: &tools-env
   SYSLOG_BIND: ${SYSLOG_BIND:-127.0.0.1}
   SYSLOG_PORT: ${SYSLOG_PORT:-514}
   OBS_INVENTORY: ${OBS_INVENTORY:-inventory/devices.yaml}
-  GF_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
   SNMP_V3_USER: ${SNMP_V3_USER:-}
   SNMP_V3_AUTH_PROTO: ${SNMP_V3_AUTH_PROTO:-SHA}
   SNMP_V3_AUTH_PASS: ${SNMP_V3_AUTH_PASS:-}
   SNMP_V3_PRIV_PROTO: ${SNMP_V3_PRIV_PROTO:-AES}
   SNMP_V3_PRIV_PASS: ${SNMP_V3_PRIV_PASS:-}
   SNMP_COMMUNITY: ${SNMP_COMMUNITY:-}
-  OBS_GRAFANA: ${OBS_GRAFANA:-1}
+  COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
   # login (P7, tools/auth.py): non-secret settings; the secrets are in x-auth-secrets
   OBS_AUTH: ${OBS_AUTH:-0}
   OBS_AUTH_INACTIVITY: ${OBS_AUTH_INACTIVITY:-30m}
@@ -210,7 +209,6 @@ services:
       - generated:/generated
       - prometheus-data:/vol/prometheus
       - loki-data:/vol/loki
-      - grafana-data:/vol/grafana
       - alertmanager-data:/vol/alertmanager
       - capture-ring:/vol/capture
       - pcap-uploads:/vol/uploads
@@ -517,69 +515,6 @@ services:
     mem_limit: ${ALLOY_MEM:-256m}
     cpus: ${ALLOY_CPUS:-0.5}
 
-  # Optional: OBS_GRAFANA=0 leaves Grafana out; the command-center does not need it (/grafana/ then
-  # answers 502, evidence exports say grafana "unknown"). Raspberry Pi: saves ~100 MB and its background work.
-  grafana:
-    <<: *ops
-    scale: ${OBS_GRAFANA:-1}
-    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
-    # Without the screens' login (127.0.0.1): anonymous Viewer. With it (always on a LAN exposure, or OBS_AUTH=1): only the
-    # role admin reaches Grafana (it shows raw, unmasked IP / MAC values), as the same user through the proxy's auth proxy
-    # headers (X-Obs-User, X-Obs-Grafana-Role Admin); no anonymous access, no own login form, no basic auth. The headers
-    # are believed only from the proxy's fixed address on the grafana-front network (GF_AUTH_PROXY_WHITELIST): another
-    # container sending them to grafana:3000 is refused.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
-        if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
-          { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
-        if [ "$$lan" = 1 ] || [ "$$OBS_AUTH" = 1 ]; then
-          export GF_AUTH_ANONYMOUS_ENABLED=false GF_AUTH_PROXY_ENABLED=true GF_AUTH_PROXY_HEADER_NAME=X-Obs-User \
-                 GF_AUTH_PROXY_HEADER_PROPERTY=username GF_AUTH_PROXY_AUTO_SIGN_UP=true GF_AUTH_PROXY_SYNC_TTL=1 \
-                 GF_AUTH_PROXY_HEADERS="Role:X-Obs-Grafana-Role" GF_AUTH_DISABLE_LOGIN_FORM=true GF_AUTH_BASIC_ENABLED=false \
-                 GF_AUTH_SIGNOUT_REDIRECT_URL=/auth/logout GF_AUTH_PROXY_WHITELIST="$$OBS_GRAFANA_PROXY_IP"
-          echo "login on: Grafana users come from the screens' login (auth proxy); no anonymous access, no own login form" >&2
-        else
-          export GF_AUTH_ANONYMOUS_ENABLED=true
-        fi
-        exec /run.sh
-    environment:
-      OBS_BIND: ${OBS_BIND:-127.0.0.1}
-      OBS_AUTH: ${OBS_AUTH:-0}
-      OBS_GRAFANA_PROXY_IP: ${OBS_GRAFANA_PROXY_IP:-172.31.253.2}
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_USERS_DEFAULT_THEME: dark
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /dashboards/wallboard.json
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
-      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
-      # small host: no Grafana-side alert evaluation (alerts are Prometheus + Alertmanager), no Live websocket push
-      GF_UNIFIED_ALERTING_ENABLED: "false"
-      GF_LIVE_MAX_CONNECTIONS: "0"
-      GF_LOG_LEVEL: warn
-      # served by the proxy under /grafana/
-      GF_SERVER_ROOT_URL: "${OBS_PUBLIC_URL:-http://127.0.0.1:8080}/grafana/"  # absolute links (share / goto) use it
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./dashboards:/dashboards:ro
-      - grafana-data:/var/lib/grafana
-    networks:
-      default: {}
-      grafana-front: {aliases: [grafana-front]}  # the proxy reaches it only as grafana-front (this network)
-    depends_on: [prometheus, loki]
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-      start_period: 300s  # first start on a fresh volume runs ~700 DB migrations (2+ min measured, longer on a Pi)
-      start_interval: 5s
-    mem_limit: ${GRAFANA_MEM:-384m}
-    cpus: ${GRAFANA_CPUS:-0.5}
-
   mask-api:
     <<: *ops
     image: ghcr.io/c-ardinal/geofront-nw-mask-api:${GEOFRONT_VERSION:-local}
@@ -590,9 +525,8 @@ services:
         # this tool's commit, written into evidence exports: OBS_COMMIT=$(git rev-parse --short HEAD) docker compose build
         OBS_COMMIT: ${OBS_COMMIT:-unknown}
     environment:
-      # evidence export (/evidence/): the Loki retention bounds the playback range; GRAFANA_URL for its version
-      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
-      GRAFANA_URL: http://grafana:3000
+      # evidence export (/evidence/): the Loki retention bounds the playback range
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}  # also the longest ログ検索 window (logsearch.py)
       # writes (silences / ACK, pcap uploads, snapshot exports): with a login for a verified operator / admin only, the
       # identity believed only with the proxy's key (OBS_AUTH_PROXY_KEY); without a login (127.0.0.1) for everyone
       OBS_BIND: ${OBS_BIND:-127.0.0.1}
@@ -750,7 +684,7 @@ services:
     command:
       - |
         # access mode (caddy/Caddyfile): auth on a LAN exposure or with OBS_AUTH=1, else open (127.0.0.1, no login).
-        # The same rule is in Authelia's / Grafana's entrypoints, mask-api (auth_required) and tools/auth.py (required).
+        # The same rule is in Authelia's entrypoint, mask-api (auth_required) and tools/auth.py (required).
         # loopback = localhost or a canonical IPv4 127.x.y.z (as Python's ipaddress: no leading zeros); anything else = LAN
         if printf '%s' "$${OBS_BIND:-127.0.0.1}" | awk -F. '$$0 == "localhost" { exit 0 } NF != 4 || $$1 != "127" { exit 1 }
           { for (i = 2; i <= 4; i++) if ($$i !~ /^(0|[1-9][0-9]?[0-9]?)$$/ || $$i + 0 > 255) exit 1 }'; then lan=0; else lan=1; fi
@@ -782,17 +716,12 @@ services:
       - ./caddy:/etc/caddy:ro  # Caddyfile + the access mode's parts
       - generated:/srv/obs-generated:ro
       - caddy-data:/data  # also the local CA (root certificate for the LAN devices: docs/security.md)
-    networks:
-      default: {}
-      grafana-front: {ipv4_address: "${OBS_GRAFANA_PROXY_IP:-172.31.253.2}"}  # Grafana's GF_AUTH_PROXY_WHITELIST
     ports:
       - "${OBS_BIND:-127.0.0.1}:${OBS_PORT:-8080}:8080"
       - "127.0.0.1:${PROM_LOCAL_PORT:-9090}:9090"
-      - "127.0.0.1:${GRAFANA_LOCAL_PORT:-3000}:3000"
     depends_on:
       command-center: {condition: service_started}
       mask-api: {condition: service_started}
-      grafana: {condition: service_started, required: false}  # OBS_GRAFANA=0
       authelia: {condition: service_started}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
@@ -869,21 +798,9 @@ services:
     mem_limit: ${AUTHELIA_MEM:-256m}  # a login hashes with argon2id at 32 MiB (tools/auth.py)
     cpus: ${AUTHELIA_CPUS:-0.5}
 
-# grafana-front: only the proxy and Grafana (internal, fixed subnet: the proxy's address is Grafana's auth proxy whitelist).
-# Change OBS_GRAFANA_NET / OBS_GRAFANA_NET_DYNAMIC / OBS_GRAFANA_PROXY_IP together if the subnet is taken on this host.
-networks:
-  grafana-front:
-    internal: true
-    ipam:
-      config:
-        - subnet: ${OBS_GRAFANA_NET:-172.31.253.0/29}
-          # addresses handed out automatically (Grafana): not the proxy's fixed one, which must stay free for it
-          ip_range: ${OBS_GRAFANA_NET_DYNAMIC:-172.31.253.4/30}
-
 volumes:
   prometheus-data:
   loki-data:
-  grafana-data:
   alertmanager-data:
   caddy-data:
   authelia-data:  # login users, bans and TOTP keys (tools backup / restore)

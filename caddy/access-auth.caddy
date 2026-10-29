@@ -12,7 +12,6 @@
 	request_header -X-Obs-User
 	request_header -X-Obs-Role
 	request_header -X-Obs-Auth
-	request_header -X-Obs-Grafana-Role
 	request_header -Remote-User
 	request_header -Remote-Groups
 	request_header -Remote-Email
@@ -52,23 +51,4 @@
 			}
 		}
 	}
-}
-
-# Grafana (owner's rule: never unmask): it shows raw IP / MAC values, so with the login only the role admin may use it
-# (viewer / operator: 403), as the same user through Grafana's auth proxy (compose.yaml) with the Grafana role Admin.
-# Grafana's own password login and password change are closed here too (its local admin password is never usable).
-(grafana_access) {
-	route {
-		@gfNotAdmin not header X-Obs-Role admin
-		header @gfNotAdmin Content-Type "text/plain; charset=utf-8"
-		respond @gfNotAdmin "Grafana は admin の役割だけが使えます (伏せ字のない IP / MAC を表示するため)" 403
-		@gfOwnLogin path /grafana/login /grafana/login/* /grafana/api/login /grafana/api/login/* /grafana/api/user/password
-		respond @gfOwnLogin "Grafana's own login is off: the screens' login is used" 403
-		request_header X-Obs-Grafana-Role Admin
-	}
-}
-
-# old Grafana URL on 127.0.0.1:3000: nothing with the login
-(grafana_local) {
-	respond "with the login, open Grafana at OBS_PUBLIC_URL/grafana/ (role admin)" 403
 }

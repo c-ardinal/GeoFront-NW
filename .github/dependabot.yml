@@ -1,9 +1,11 @@
+# Dependabot targets develop (the work branch); main receives PRs only at a release.
 # Update proposals (pull requests) for the pinned images and the workflow actions. Images stay pinned by tag + digest:
 # check linux/amd64 + linux/arm64 before merging (docs/operations.md, scripts/arm64.sh).
 version: 2
 updates:
   - package-ecosystem: docker-compose
     directory: "/"
+    target-branch: develop  # work branch: PRs to main only for releases
     schedule: {interval: monthly}
     open-pull-requests-limit: 2
     groups:
@@ -13,6 +15,7 @@ updates:
         update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directories: ["/analyzer", "/capture", "/demo-gen", "/flowd", "/mask-api", "/notify-relay", "/testbed", "/tools"]
+    target-branch: develop  # work branch: PRs to main only for releases
     schedule: {interval: monthly}
     open-pull-requests-limit: 2
     groups:
@@ -22,6 +25,7 @@ updates:
         update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: develop  # work branch: PRs to main only for releases
     schedule: {interval: monthly}
     open-pull-requests-limit: 2
     groups:

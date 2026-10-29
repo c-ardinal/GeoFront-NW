@@ -14,6 +14,8 @@ import * as PB from './playback.js';
 import { downloadEvidence, snapshotGate } from './evidence.js';
 import * as T from './topology.js';
 import * as C from './correlate.js';
+import { trendView } from './views-trend.js';
+import { logSearchView } from './views-logsearch.js';
 
 const POLL_MS = 10000;
 const STALE_AFTER_MS = POLL_MS * 2;
@@ -71,6 +73,9 @@ const nav = {
   // 原因候補 around a moment (P5): anchor { at: ms, label, ctx }; the traffic surge list
   correlate: (anchor) => UI.openDrawer(C.correlateView(anchor)),
   surges: () => UI.openModal(C.surgeModal()),
+  // 推移 / ログ検索 (F1): init = the family and scope / the filter to start with
+  trend: (init) => UI.openModal(trendView(init)),
+  logsearch: (init) => UI.openModal(logSearchView(init)),
   // packet analysis: opts { dest, src } narrow it to that traffic (filter from the flows' address tokens, last 15 min);
   // opts.since / opts.until (unix s): a ring file of that time span (a 原因候補 window)
   packets: async (opts = {}) => {
@@ -116,6 +121,20 @@ function wirePanelTitles() {
   a.setAttribute('aria-label', 'Packet analysis: open captured or uploaded packets');
   a.addEventListener('click', () => nav.packets());
   g.insertBefore(a, g.querySelector('.h-r'));
+  // 推移 / ログ検索 (F1): in the headings of the panels they extend (no item in the top bar)
+  const headBtn = (panel, text, aria, open) => {
+    const h = document.querySelector(`#${panel} > h2`);
+    const b = el('button', 'h-act', text);
+    b.type = 'button';
+    b.lang = 'ja';
+    b.title = aria;
+    b.setAttribute('aria-label', aria);
+    b.addEventListener('click', open);
+    h.insertBefore(b, h.querySelector('.h-open'));
+  };
+  headBtn('p-wan', '推移', '推移: WAN の利用率を長い期間で見る', () => nav.trend(P.WAN.instance ? { family: 'wan_util', instance: P.WAN.instance, ifName: P.WAN.ifName } : { family: 'if_bps' }));
+  headBtn('p-if', '推移', '推移: インターフェースの通信量・エラーを長い期間で見る', () => nav.trend({ family: 'if_bps', ...(P.WAN.instance ? { instance: P.WAN.instance, ifName: P.WAN.ifName } : {}) }));
+  headBtn('p-logs', '検索', 'ログ検索: syslog を語句・機器・重要度・期間で探す', () => nav.logsearch());
   // traffic surges (P5): the count in a fixed-width slot, opens the list
   const sb = el('button', 'h-act h-surge', '急増 —');
   sb.id = 'surge-btn';
@@ -139,11 +158,14 @@ function renderSurgeButton(s) {
 // keeps returning decaying numbers (and 0 errors) for ~1-2 min after a target goes DOWN, which must not be shown.
 const UP = 'on (instance) (up{job="snmp"} == 1)';
 const gate = (expr) => `(${expr}) and ${UP}`;
+const UP_TS = 'timestamp(up{job="snmp"}) and up{job="snmp"} == 1'; // timestamp() of the raw selector = the sample time
 const ERR_EXPR = `(rate(ifInErrors{job="snmp"}[${RATE_WIN}]) + rate(ifOutErrors{job="snmp"}[${RATE_WIN}])) * 60`;
 const Q = {
   // gated like the SNMP values: a failed flows scrape must not keep showing decaying rates
   flows: `(sum by (src_host, dst_ip, dst_country, dst_city, lat, lon, asn, direction) (rate(obs_flow_bytes_total[${RATE_WIN}])) * 8) and on () (up{job="flows"} == 1)`,
   uptime: gate('sysUpTime{job="snmp"} / 100'),
+  // seconds since each device's last successful scrape, DOWN devices included; none within 15 min = no series (> 15 min)
+  lastOk: `time() - max by (instance) (${UP_TS} or max_over_time((${UP_TS})[${P.LAST_SEEN_MAX_S}s:${SCRAPE_S}s]))`,
   devIn: gate(`sum by (instance) (rate(ifHCInOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
   devOut: gate(`sum by (instance) (rate(ifHCOutOctets{job="snmp"}[${RATE_WIN}])) * 8 / 1e6`),
   devErr: gate(`sum by (instance) (${ERR_EXPR})`),
@@ -220,7 +242,7 @@ async function pollProm() {
   ]);
   if (gen !== state.gen) throw new Error('superseded'); // asked for another data time
   const m = {
-    up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'),
+    up: vmap(res.up, 'instance'), uptime: vmap(res.uptime, 'instance'), lastOk: vmap(res.lastOk, 'instance'),
     devIn: vmap(res.devIn, 'instance'), devOut: vmap(res.devOut, 'instance'), devErr: vmap(res.devErr, 'instance'),
     clients: vmap(res.clients, 'instance'),
     ifIn: vmap(res.ifIn, 'instance', 'ifName'), ifOut: vmap(res.ifOut, 'instance', 'ifName'),

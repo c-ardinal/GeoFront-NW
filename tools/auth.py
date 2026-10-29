@@ -27,7 +27,7 @@ from argon2.exceptions import VerifyMismatchError
 ROLES = ("viewer", "operator", "admin")  # Authelia groups; the proxy maps the highest one to X-Obs-Role
 AUTHELIA_UID = 10091  # Authelia runs as this uid (compose.yaml); its data volume and users file belong to it
 USER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")  # within mask-api's operator name rule ([A-Za-z0-9._@-]{1,64})
-RESERVED_USERS = ("admin", "root", "local")  # admin: Grafana's own server admin (its auth proxy would log in as it); local: mask-api's "no login"
+RESERVED_USERS = ("admin", "root", "local")  # admin / root: read as a role or a system account; local: mask-api's "no login"
 PASSWORD_MIN = 12
 # Authelia's identity verification (TOTP registration) needs an e-mail address per user even with the filesystem notifier;
 # nothing is ever sent (the code goes to notification.txt): a placeholder in the reserved .invalid domain by default
@@ -202,7 +202,7 @@ def check_name(name):
     if not USER_RE.fullmatch(name or ""):
         raise AuthError(f"利用者名 {name!r}: 英小文字・数字で始まる 1〜32 文字 (英小文字・数字・. _ -) にしてください")
     if name in RESERVED_USERS:
-        raise AuthError(f"利用者名 {name} は予約語です (Grafana の管理者 / ログインなしの表示名と重なるため)。別の名前にしてください")
+        raise AuthError(f"利用者名 {name} は予約語です (役割の名前・システムの利用者・ログインなしの表示名と紛らわしいため)。別の名前にしてください")
 
 
 def load_users(path):

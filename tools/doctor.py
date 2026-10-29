@@ -9,7 +9,7 @@ import time
 
 OK, WARN, NG = "OK", "WARN", "NG"
 ENGINE_MIN = (25, 0)  # healthcheck start_interval
-COMPOSE_MIN = (2, 20)  # depends_on required: false (optional setup steps, OBS_GRAFANA=0)
+COMPOSE_MIN = (2, 20)  # depends_on required: false (optional setup steps)
 MEM_OK, MEM_MIN = 3.5 * 2**30, 1.8 * 2**30  # Raspberry Pi 4 4 GB defaults (docs/operations.md); below MEM_MIN the limits cannot fit
 DISK_MIN = 2 * 2**30
 CLOCK_SLACK_S = 3600
@@ -53,7 +53,7 @@ def memory(total):
     if total >= MEM_OK:
         return OK, gib, ""
     if total >= MEM_MIN:
-        return WARN, f"{gib} (既定の上限は 4 GB 向け)", ".env に OBS_GRAFANA=0、PROM_MEM / LOKI_MEM などを小さく"
+        return WARN, f"{gib} (既定の上限は 4 GB 向け)", ".env の PROM_MEM / LOKI_MEM などを小さく"
     return NG, f"{gib} (足りません)", "4 GB 以上のホストにしてください"
 
 
@@ -79,7 +79,7 @@ def disk_need(values):
     """Bytes the bounded stores may grow to: capture ring + uploads + Prometheus' size cap (or 4 GiB when unbounded)."""
     num = lambda k, d: int(values.get(k) or d) if str(values.get(k) or d).isdigit() else int(d)
     need = size_bytes(values.get("PROM_RETENTION_SIZE")) or 4 * 2**30
-    need += 2**30  # Loki 30 d of a few devices' syslog, Grafana, images' scratch
+    need += 2**30  # Loki 30 d of a few devices' syslog, images' scratch
     if values.get("OBS_CAPTURE") == "1":
         need += num("CAPTURE_FILES", 20) * num("CAPTURE_FILE_MB", 20) * 2**20
     return need + num("PCAP_UPLOADS_TOTAL_MB", 200) * 2**20
@@ -145,7 +145,7 @@ def ports(wanted, busy, measured, own=frozenset()):
     clash = sorted({f"{p}/{a}:{n}" for p, a, n in wanted if (p, a, n) not in own for bp, ba, bn in busy
                     if bp == p and bn == n and (ba == a or ba in WILDCARD or a in WILDCARD)})
     if clash:
-        return NG, f"使用中: {', '.join(clash)}", "そのポートを使うものを止めるか、.env の OBS_PORT / SYSLOG_PORT / PROM_LOCAL_PORT / GRAFANA_LOCAL_PORT を変える"
+        return NG, f"使用中: {', '.join(clash)}", "そのポートを使うものを止めるか、.env の OBS_PORT / SYSLOG_PORT / PROM_LOCAL_PORT を変える"
     mine = sum(w in own for w in wanted)
     return OK, ", ".join(f"{p}/{a}:{n}" for p, a, n in wanted) + (f" は空き (うち {mine} 個はこのスタックが使用中)" if mine else " は空き"), ""
 

@@ -284,6 +284,10 @@
   [data-theme="film"] #topbar:has(#back-live:not([hidden])) .title { font-size: 0; column-gap: 0; }
   [data-theme="film"] #topbar:has(#back-live:not([hidden])) .title::after { display: none; }
 }
+/* tablet: the headings that also carry 推移 / 検索 drop their code ID (no room for it next to the extra button) */
+@media (max-width: 1279px) {
+  [data-theme="film"] :is(#p-wan, #p-if, #p-logs) > h2::before { display: none; }
+}
 @media (max-width: 767px) {
   [data-theme="film"] .title { font-size: 0; column-gap: 0; }
   [data-theme="film"] .title::after { display: none; }

@@ -36,14 +36,14 @@ doctor.sh は次の項目を調べます。機器には接続しません。
 ./geofront run --rm tools backup --include-captures   # キャプチャとアップロードした pcap も含める
 ```
 
-バックアップにはメトリクス・syslog・Grafana・抑止と ACK・ログインの利用者・認証局の証明書と鍵・機器台帳・通知先が入ります。
+バックアップにはメトリクス・syslog・抑止と ACK・ログインの利用者・認証局の証明書と鍵・機器台帳・通知先が入ります。
 動かしたままでも取れます。鍵と秘密値が入るので、アーカイブの扱いに注意してください。
 別のホストに戻すときは `--include-env` を付けて `.env` も含めてください。TOTP の鍵は `.env` の `OBS_AUTH_STORAGE_KEY` がないと読めません。
 
 restore は各ボリュームの今の中身を消して、アーカイブの内容に置き換えます。
 
 ```sh
-./geofront stop prometheus loki grafana alertmanager authelia proxy
+./geofront stop prometheus loki alertmanager authelia proxy
 ./geofront run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz                  # --yes で確認を省く
 ./geofront run --rm tools restore backups/obs-backup-XXXXXXXX-XXXXXX.tar.gz --with-config    # 台帳・通知先・.env も戻す
 ./geofront up -d
@@ -78,6 +78,13 @@ scripts/verify.sh e2e-auth backup-restore  # 名前を並べて一部だけ
 ```
 
 verify.sh を動かすには、ホストに bash・docker・python3 が要ります。検証は別のプロジェクト (`obs-e2e-*`) で行い、終わると消します。運用中のプロジェクトには触れません。
+ほかの検証と同時に動かすときは、`E2E_TAG=<名前>` と `E2E_SLOT=1`〜`5` で、プロジェクト名とポートを分けてください。
+
+推移とログ検索の画面は `scripts/ui-check.js` でブラウザから確かめられます (Node.js と playwright-core が要ります。e2e-open を `KEEP=1` で残したプロジェクトに使います)。
+
+```sh
+PW_CORE=<playwright-core のディレクトリ> CHROME=<Chromium の実行ファイル> node scripts/ui-check.js http://127.0.0.1:28080
+```
 
 | 検査 | 内容 |
 |---|---|
@@ -112,7 +119,7 @@ git config core.hooksPath scripts/git-hooks   # コミットのたびに検査�
 ## 疑似実機での試験
 
 testbed は実機の代わりに疑似の機器 (SNMP シミュレータと syslog の送信器) で prod の構成を動かします。
-`.env` には触れず、別のプロジェクトと別のポート (画面 18080、Prometheus 19090、Grafana 13000、syslog 10514) で動きます。
+`.env` には触れず、別のプロジェクトと別のポート (画面 18080、Prometheus 19090、syslog 10514) で動きます。
 
 ```sh
 docker compose --env-file testbed/testbed.env up -d --build
@@ -147,14 +154,12 @@ curl "http://127.0.0.1:9116/fault/status"
 | `tools check` で SNMP が NG | 表示された原因の目安を確かめる ([devices.md](devices.md)) |
 | syslog が届かない | `SYSLOG_BIND` が LAN 側の IP か、台帳の `address` が送信元と一致するかを確かめる。DNS 名で書いた機器の IP が変わったら `./geofront restart alloy` |
 | 検索で「期限切れ」と出る | ページを読み込み直す |
-| `/grafana/` が 502 を返す | `OBS_GRAFANA=0` になっていないか確かめる |
 | パケット取込が動かない | [capture.md](capture.md) の確認の順に調べる |
 
 ## Raspberry Pi での推奨設定
 
 既定値は Raspberry Pi 4 (4 GB) に合わせてあります。
 
-- Grafana は必須ではありません。コマンドセンターは Grafana を使いません。Pi では `.env` に `OBS_GRAFANA=0` を書くことを勧めます (約 100 MB の節約)。
 - SD カードの容量が少ないときは、`PROM_RETENTION_SIZE` (例 `8GB`) で容量の上限を決めてください。
 
 ## 表示端末の描画モード

@@ -43,7 +43,6 @@ P = None  # pcap_api: IPv6 masking
 _REV = os.environ.get("OBS_COMMIT") or ""
 # a git revision only (it is written into every manifest unmasked, like the digests); anything else is not trusted
 COMMIT = _REV if re.fullmatch(r"[0-9a-f]{7,40}", _REV) else "unknown" if not _REV else "unknown (OBS_COMMIT is not a git revision)"
-GRAFANA = os.environ.get("GRAFANA_URL", "http://grafana:3000")
 LOKI_RETENTION = os.environ.get("LOKI_RETENTION", "720h")
 MAX_RANGE_S = 7 * 86400 + 3600  # the longest playback preset (7 d) plus slack
 POINTS = 2000  # per series: the step grows with the window
@@ -342,7 +341,6 @@ def versions(budget):
             return None
     v = {"prometheus": get(M.PROM + "/api/v1/status/buildinfo", "version") or "unknown",
          "loki": get(M.LOKI + "/loki/api/v1/status/buildinfo", "version") or "unknown",
-         "grafana": get(GRAFANA + "/api/health", "version") or get(GRAFANA + "/grafana/api/health", "version") or "unknown",
          "observatory": COMMIT}
     _versions.update(at=time.time(), v=v)
     return v
@@ -783,7 +781,7 @@ def selftest():
         return {"conv": {"ip": [["192.0.2.x~" + tok[-12:], "2001:db8::x~" + tok[-12:]]]}}
     keep = (_get, _pcap_stats, dict(_versions), MAX_BYTES, BUDGET_S)
     _get, _pcap_stats = fake, stats
-    _versions.update(at=time.time(), v={"prometheus": "t", "loki": "t", "grafana": "t", "observatory": "0123abcd9"})  # a revision masking would eat
+    _versions.update(at=time.time(), v={"prometheus": "t", "loki": "t", "observatory": "0123abcd9"})  # a revision masking would eat
     try:
         r = parse(f"from={now - 3600}&to={now}&scope=alert&alertname=LinkDown&instance=rtx1300&ifName=lan1&pcap=demo:demo-home.pcap&max_rows=100&max_lines=12000", now)
         data = build(r, {}, now)

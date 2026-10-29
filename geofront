@@ -7,7 +7,7 @@
 #                    ($XDG_CONFIG_HOME/geofront). Created (mode 700) when missing. Use an absolute path.
 #   --env-file F     given explicitly (e.g. testbed/testbed.env): that file decides, project name included; no config
 #                    directory is chosen for it unless OBS_CONFIG_DIR is set
-#   <NAME>_FILE      a secret read from a file instead of .env (in the environment or in .env), for GF_ADMIN_PASSWORD,
+#   <NAME>_FILE      a secret read from a file instead of .env (in the environment or in .env), for
 #                    SNMP_V3_AUTH_PASS, SNMP_V3_PRIV_PASS, SNMP_COMMUNITY, SMTP_PASSWORD, SLACK_WEBHOOK_URL,
 #                    DISCORD_WEBHOOK_URL, LINE_CHANNEL_ACCESS_TOKEN, WEBHOOK_URL, WEBHOOK_BEARER_TOKEN,
 #                    OBS_AUTH_SESSION_SECRET, OBS_AUTH_STORAGE_KEY, OBS_AUTH_PROXY_KEY (tools init keeps them out of .env)
@@ -17,7 +17,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })"
 legacy_project=yamaha-observatory-trial
-secrets="GF_ADMIN_PASSWORD SNMP_V3_AUTH_PASS SNMP_V3_PRIV_PASS SNMP_COMMUNITY SMTP_PASSWORD SLACK_WEBHOOK_URL DISCORD_WEBHOOK_URL
+secrets="SNMP_V3_AUTH_PASS SNMP_V3_PRIV_PASS SNMP_COMMUNITY SMTP_PASSWORD SLACK_WEBHOOK_URL DISCORD_WEBHOOK_URL
 LINE_CHANNEL_ACCESS_TOKEN WEBHOOK_URL WEBHOOK_BEARER_TOKEN OBS_AUTH_SESSION_SECRET OBS_AUTH_STORAGE_KEY OBS_AUTH_PROXY_KEY"
 
 explicit_env=0 given_env=/nonexistent/.env prev=

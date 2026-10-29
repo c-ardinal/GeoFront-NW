@@ -60,9 +60,9 @@ HTTPS には proxy が持つ独自の認証局の証明書を使い、HTTP で�
 
 | 役割 | できること |
 |---|---|
-| viewer | 読み取りだけ (画面、詳細、履歴再生、解析、原因候補、画面の画像なしの証跡出力)。操作のボタンは理由付きで無効になります。Grafana は開けません |
+| viewer | 読み取りだけ (画面、詳細、履歴再生、解析、原因候補、画面の画像なしの証跡出力)。操作のボタンは理由付きで無効になります |
 | operator | viewer の操作に加えて、抑止・ACK、pcap のアップロードと削除、画面の画像付きの証跡出力 |
-| admin | operator の操作に加えて、Grafana (`/grafana/`)。⋯ メニューに利用者の管理の案内が出ます (管理は `tools user` で行います) |
+| admin | operator の操作に加えて、⋯ メニューに利用者の管理の案内が出ます (管理は `tools user` で行います) |
 
 ACK・証跡・通知の記録にはログインした利用者の名前が残ります。ログインなしの構成では `local` になります。
 
@@ -109,18 +109,6 @@ TOTP は任意で、既定では無効です。有効にするには `.env` に 
 ./geofront exec authelia cat /config/notification.txt
 ```
 
-## Grafana
-
-Grafana は IP / MAC を伏せずに表示するので、ログインありの構成で `/grafana/` を開けるのは admin だけです。
-Grafana の管理者 `admin` のパスワードを既定の値のままにしないでください。変えるには次を実行します。
-
-```sh
-./geofront exec grafana grafana cli admin reset-admin-password '<値>'
-```
-
-Grafana は proxy の固定アドレスから来た利用者の情報だけを受け付けます。
-このホストで `172.31.253.0/29` がすでに使われているときは、`OBS_GRAFANA_NET` `OBS_GRAFANA_NET_DYNAMIC` `OBS_GRAFANA_PROXY_IP` の 3 つを変えてください。
-
 ## 伏せ字
 
 コマンドセンターと通知と証跡では IP / MAC の末尾を伏せて表示します (例 `192.168.100.x`、`00:a0:de:xx:xx:xx`)。どの役割でも伏せ字は外れません。
@@ -128,6 +116,5 @@ Grafana は proxy の固定アドレスから来た利用者の情報だけを�
 
 次の画面は管理用で、元の値をそのまま表示します。
 
-- Grafana (`/grafana/`)。ログインありの構成では admin だけが開けます
 - Prometheus (http://127.0.0.1:9090、読み取り専用)。このホストからだけ開けます
 - `tools capture status` と `tools check` の出力

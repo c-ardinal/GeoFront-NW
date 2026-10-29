@@ -30,6 +30,10 @@ key (mask_line), so the screens match the record to the same device.
 
 原因候補 (/correlate/, from the proxy, GET only): correlate.py lists what happened around a moment, read the same way.
 
+推移 (/trend/) and ログ検索 (/logsearch/), from the proxy, GET only (F1): trend_api.py builds PromQL from its own templates
+(the client names a family and scope values only), logsearch.py builds the LogQL selector from checked label values and
+matches the keyword / restricted regex on the masked lines here. Both read through the paths above.
+
 Run: python mask_api.py            (listens on :8000)
      python mask_api.py --selftest
 """
@@ -57,7 +61,9 @@ from typing import NamedTuple
 
 import correlate
 import evidence
+import logsearch
 import pcap_api
+import trend_api
 
 PROM = os.environ.get("PROM_URL", "http://prometheus:9090")
 LOKI = os.environ.get("LOKI_URL", "http://loki:3100")
@@ -1280,6 +1286,10 @@ def respond(method, raw_path, headers, read_body, gone=None):
             return evidence.handle(method, raw_path, headers, gone, read_body)
         if raw_path.startswith("/correlate/"):
             return correlate.handle(method, raw_path)
+        if raw_path.startswith("/trend/"):
+            return trend_api.handle(method, raw_path)
+        if raw_path.startswith("/logsearch/"):
+            return logsearch.handle(method, raw_path)
         url, post, err = route(method, raw_path)
         if err:
             return err[0], error_body(*err), "application/json"
@@ -2067,12 +2077,16 @@ def selftest():
     pcap_api.selftest()
     evidence.selftest()
     correlate.selftest()
+    trend_api.selftest()
+    logsearch.selftest()
     print(f"selftest ok ({len(LOKI_PROBES) + len(PROM_PROBES) + 2} adversarial probes rejected)")
 
 
 pcap_api.setup(sys.modules[__name__])
 evidence.setup(sys.modules[__name__], pcap_api)
 correlate.setup(sys.modules[__name__])
+trend_api.setup(sys.modules[__name__])
+logsearch.setup(sys.modules[__name__], evidence.duration_s(evidence.LOKI_RETENTION))
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:

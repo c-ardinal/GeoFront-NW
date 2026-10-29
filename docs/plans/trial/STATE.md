@@ -7,6 +7,41 @@
 - Open: command-center/app.js dead stub (owner to decide deletion); masking is client-side only (needs auth layer, SEC-03); real-GPU kiosk perf unchecked.
 - Open: RFC3164 parser eats YAMAHA leading token (TC-003, decide after real log capture); map tiles fetched from Esri online.
 - Branch: none (not a git repo)
+- Workflow (owner, 2026-10-28): 作業ブランチは develop から切り、develop へ merge する。main への PR はリリースのときだけ
+
+## F2 (docs/plans/v2/F2-SPEC.md) - implemented on branch feat/f2-drop-grafana (worktree geofront-wt-f2), awaiting PM acceptance
+- Owner: the command-center alone must satisfy (no Grafana). Grafana removed from the product entirely; owner
+  correction 2026-10-29: nobody runs Grafana yet -> no legacy / backward-compat handling (no doctor warnings, no restore
+  skip, no migration docs).
+- Gap table in F2-SPEC (13 wallboard panels + device variable + time range + Explore): only "Last seen" (per device) and
+  "Data freshness (worst)" were missing -> devices modal column / card field / tile + device drawer tile (main.js
+  Q.lastOk through /prom/ = mask-api, PLAYBACK-aware; panels.js lastSeen / fmtSeen / seenKind). Explore not replaced.
+- Removed: compose grafana service / profile / grafana-front network / grafana-data volume / port 3000 / GF_* env,
+  grafana/ + dashboards/, Caddy /grafana routes + 404 page + :3000 site, X-Obs-Grafana-Role, tools init --grafana*,
+  grafana-reset-admin, check / doctor / backup Grafana parts, obs_wan:* records (wallboard only), evidence version
+  field, e2e E2E_GRAFANA, probe --grafana, state.py grafana_*, docs (README diagram, architecture, configuration,
+  operations, security, ui), THIRD_PARTY_NOTICES (grafana/grafana, Esri tiles).
+- Also: style.css .v-sub overflow-x (devices modal per-device IF tables overflowed at 390 px, pre-existing, found by the
+  new ui-check step); lib.sh down_project also removes volumes / networks by project label (upgrade test's old Grafana
+  volume); upgrade.sh checks no container of a removed service is left.
+- Checks: verify selftests / compose / leak-scan OK, e2e-open OK + ui-check.js 136 OK, e2e-auth OK, backup-restore OK,
+  upgrade 325ced8 (DEMO_AUTO_FAULTS=0) OK (data kept, migrate-config too, no orphan left). Evidence: session scratchpad f2/.
+
+## F1 (docs/plans/v2/F1-SPEC.md) - implemented on branch feat/f1-standalone-ui (worktree geofront-wt-f1), awaiting PM acceptance
+- mask-api trend_api.py (/trend/families, /trend/series: 12 template families, scope values checked + check_literal,
+  step <= 600 points, grid ends at `to`, top 8 + その他 for flows, 4 slots) and logsearch.py (/logsearch/lines|hist|facets:
+  selector from checked labels, keyword / restricted regex matched on masked lines, per-line budget, continuation from
+  the first unprocessed line, histogram 60 buckets with a short last bucket, 2 slots). Caddy GET/HEAD routes.
+- command-center views-trend.js / views-logsearch.js (modals), heading buttons on WAN / INTERFACES / SYSLOG FEED,
+  drawer deep links (device, iface, dest, src, logline). Static SVG, both themes, 390-2560 px, 44 px.
+- Grafana: compose profile grafana (scale removed), proxy 404 page when unreachable, tools check / doctor / init
+  (--grafana) / backup handle both; OBS_GRAFANA=1 left in .env -> warning. Data volume kept; re-enabling brings it back.
+- Measured (testbed prod + login, Docker Desktop): Grafana 13.2.4 at rest 308 MiB (docker stats; anon 190 MiB), stack
+  842 -> 559 MiB with it removed.
+- Dependency: Loki 3.7.9 on main has no wget (healthcheck always unhealthy); the fix is on fix/deps-verify. F1's runs
+  used that branch's hunk as an uncommitted local patch; tools check right after up can see Loki 503 without a
+  healthcheck to wait for (seen once, passed on rerun).
+- scripts: probe.py F1 checks + --grafana on|off, e2e-fresh.sh E2E_GRAFANA / E2E_TAG / E2E_SLOT + mem.txt, ui-check.js.
 
 ## R1 (docs/plans/v2/R1-SPEC.md, GeoFront-NW) - items 1-6 implemented, uncommitted on main (HEAD faa7ba6), awaiting PM acceptance
 - Item 7 (history scan -> push) is NOT done: `scripts/leak-scan.sh --history` finds 2 NG IPv4 in commit 5e0e6ef
