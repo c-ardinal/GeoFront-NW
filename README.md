@@ -153,7 +153,7 @@ git pull && scripts/doctor.sh
 OBS_COMMIT=$(git rev-parse --short HEAD) ./geofront up -d --build --remove-orphans && ./geofront run --rm tools check
 ```
 
-以前のバージョンから更新すると、Grafana は動かなくなります。データ (grafana-data) は残るので、引き続き使うときは `.env` の `COMPOSE_PROFILES` に `grafana` を加えてください。
+更新すると Grafana は既定で動かない構成になりますが、すでに動いているコンテナは動き続けます。使い続けるときは `.env` の `COMPOSE_PROFILES` に `grafana` を加え (データの grafana-data は残ります)、使わないときは `./geofront rm -s -f grafana` で止めてください。
 イメージの取得を含む詳しい手順は [docs/operations.md](docs/operations.md#更新) にあります。
 
 ## バックアップと復元

@@ -187,9 +187,10 @@ Grafana は任意の追加機能です。既定では動かさず、コマンド
 
 動いていない間、`/grafana/` は「有効になっていません」というページ (404) を返します。`tools doctor` と `tools check` は Grafana を求めません。
 
-以前のバージョンから更新すると、Grafana は動かなくなります。ダッシュボードや利用者のデータ (grafana-data) は残っているので、
-`COMPOSE_PROFILES` に `grafana` を加えれば元のまま使えます。`tools doctor` が、データが残っていることと、`.env` に残った `OBS_GRAFANA=1` を知らせます。
-更新の前から動いていた Grafana のコンテナは、`up -d` では止まりません。止めるときは上の `rm -s -f grafana` を実行してください。
+以前のバージョンから更新すると、Grafana は既定で動かない構成になります。ただし、更新の前から動いていた Grafana のコンテナは、
+`up -d` でも `--remove-orphans` でも止まらず、そのまま動き続けます (compose に定義が残っているためです)。
+使い続けるときは、`.env` の `COMPOSE_PROFILES` に `grafana` を加えてください。ダッシュボードや利用者のデータ (grafana-data) は残っています。
+使わないときは、上の `./geofront rm -s -f grafana` で止めてください。`tools doctor` が、データが残っていることと、`.env` に残った `OBS_GRAFANA=1` を知らせます。
 
 ## 表示端末の描画モード
 
