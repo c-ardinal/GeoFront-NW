@@ -270,7 +270,7 @@ services:
   snmp-exporter:
     <<: *ops
     profiles: [prod]
-    image: prom/snmp-exporter:v0.30.1@sha256:e5fd5e8b43ace6c088fe9bf0b37b7fff0e04380bee352be7ec41b853a4dd5859
+    image: prom/snmp-exporter:v0.31.0@sha256:e5f1aba929145cea2a3bad89c29959efaec0dc26fb87e3761414616a1a392c1c
     command:
       - --config.file=/etc/snmp_exporter/snmp.yml
       - --config.file=/etc/obs-generated/snmp/auths.yml
@@ -407,7 +407,7 @@ services:
   testbed-traffic:
     <<: *ops
     profiles: [testbed]
-    image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+    image: python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913
     command: [python, -u, /demo/traffic.py]
     user: nobody
     read_only: true
@@ -482,7 +482,7 @@ services:
 
   alloy:
     <<: *ops
-    image: grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18
+    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -655,7 +655,7 @@ services:
 
   command-center:
     <<: *ops
-    image: nginx:1.31.0-alpine@sha256:2f07d83bf561b506400dc183b1b2003803e39efbd22451f848adaba14d28c7c7
+    image: nginx:1.31.8-alpine@sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606
     volumes:
       - ./command-center:/usr/share/nginx/html:ro
       - ./command-center/nginx.conf:/etc/nginx/conf.d/default.conf:ro
