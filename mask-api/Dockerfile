@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.15-slim
 WORKDIR /app
 COPY mask_api.py pcap_api.py pcap_filter.py evidence.py correlate.py trend_api.py logsearch.py ./
 # the evidence export's time budget for this selftest only (not kept in the image): a QEMU-emulated release build

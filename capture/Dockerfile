@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.15-slim
 # dumpcap (wireshark-common, Debian trixie, held to the 4.4 series): writes packets only, never dissects them
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireshark-common=4.4.* \

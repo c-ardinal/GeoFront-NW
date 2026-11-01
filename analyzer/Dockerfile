@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.15-slim
 # tshark from Debian trixie, held to the 4.4 series (security updates come in on rebuild; the version is shown
 # by `ping` and in the analysis screen). --no-install-recommends: no GUI, no extcap helpers.
 RUN apt-get update \
