@@ -99,6 +99,12 @@ jobs:
       - name: disk and memory
         if: always()
         run: df -h / && free -m && docker system df
+      - name: logs of the failed checks
+        if: failure()
+        run: |
+          for f in $(grep -l -E '^\[NG\]|NG:' "$LOGS"/*/*.log "$LOGS"/*.log 2>/dev/null); do
+            echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"
+          done
       - name: logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -132,6 +138,12 @@ jobs:
       - name: disk and memory
         if: always()
         run: df -h / && free -m && docker system df
+      - name: logs of the failed checks
+        if: failure()
+        run: |
+          for f in $(grep -l -E '^\[NG\]|NG:' "$LOGS"/*/*.log "$LOGS"/*.log 2>/dev/null); do
+            echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"
+          done
       - name: logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
