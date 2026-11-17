@@ -1,4 +1,4 @@
-# The long checks that ci.yml does not run on every push (about an hour): by hand (workflow_dispatch) and on the release
+# The long checks that ci.yml does not run on every push (about 20 minutes on the runners): by hand (workflow_dispatch) and on the release
 # pull request develop -> main.
 #   amd64 (ubuntu-24.04):   e2e-open (kept running) -> ui-check.js (Chromium) on it -> e2e-auth -> resilience ->
 #                           backup-restore -> upgrade
