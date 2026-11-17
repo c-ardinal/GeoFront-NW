@@ -9,8 +9,6 @@ name: full-verify
 
 on:
   workflow_dispatch:
-  push:  # TEMP: first runs from the work branch
-    branches: [claude/project-thread-8ukzg8]
   pull_request:
     branches: [main]
 
