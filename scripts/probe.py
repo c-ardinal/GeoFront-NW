@@ -191,7 +191,9 @@ def main():
     ap.add_argument("--url", required=True)
     ap.add_argument("--ca", default=None)
     ap.add_argument("paths", nargs="*")
-    a = ap.parse_args()
+    # intermixed: `status --url U --ca C PATH...` (Python <= 3.12 leaves PATH unparsed with parse_args: what + paths
+    # are matched together before the options, paths empty)
+    a = ap.parse_intermixed_args()
     c = Client(a.url, a.ca)
     if a.what == "status":
         if c.tls:
