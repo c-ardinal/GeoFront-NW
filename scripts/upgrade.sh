@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update from an older version's data volumes (docs/operations.md): the old version (default bb2f21d = P6) runs on the demo
+# Update from an older version's data volumes (docs/operations.md): the old version (default db9132a = P6) runs on the demo
 # profile in a throwaway project until it has data and a silence; then this tree takes over the same volumes with
 # `up -d --build --remove-orphans` and the old .env. Checks: tools check all OK, the old metrics / syslog / silence
 # unchanged at the same time, no container of a removed service left, new services (Authelia) up.
@@ -7,7 +7,7 @@
 #   UPGRADE_MIGRATE=1 (default): then `tools migrate-config` to a config directory outside the tree, up with it, same data
 set -u
 . "$(dirname "$0")/lib.sh"
-OLD="${1:-bb2f21d}"
+OLD="${1:-db9132a}"
 export COMPOSE_PROJECT_NAME="obs-e2e-upgrade"
 BASE="${E2E_DIR:-${TMPDIR:-/tmp}/obs-e2e}"
 OLD_DIR="$BASE/upgrade-old"; NEW_DIR="$BASE/upgrade-new"

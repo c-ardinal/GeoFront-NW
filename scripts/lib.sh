@@ -65,12 +65,22 @@ wait_healthy() {
     bad="$(printf '%s\n' "$states" | awk -F'|' 'NF && !(($2 == "running" && ($3 == "healthy" || $3 == "")) || ($2 == "exited" && $4 == "0"))')"
     # loki has no healthcheck (distroless image): its /ready, asked from prometheus (busybox wget)
     [ -n "$states" ] && [ -z "$bad" ] && { ! printf '%s\n' "$states" | grep -q '^loki|running|' ||
-      dc exec -T prometheus wget -qO /dev/null http://loki:3100/ready >/dev/null 2>&1; } && return 0
+      dc exec -T prometheus wget -qO /dev/null http://loki:3100/ready >/dev/null 2>&1; } &&
+      { ! printf '%s\n' "$states" | grep -q '^prometheus|running|' || snmp_scraped; } && return 0
     if [ $(( $(date +%s) - t0 )) -ge "$timeout" ]; then
       log "not healthy after ${timeout}s:"; printf '%s\n' "$bad" >&2; return 1
     fi
     sleep 5
   done
+}
+
+# every SNMP target of Prometheus scraped at least once (its `up` exists): `tools check` reads `up{job="snmp"}`, and a
+# fast host is healthy before the first scrape (scrape_interval 30 s, per-target offset)
+snmp_scraped() {
+  dc exec -T prometheus wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' 2>/dev/null | "$PY" -c '
+import json, sys
+t = [x for x in json.load(sys.stdin)["data"]["activeTargets"] if x.get("scrapePool") == "snmp"]
+sys.exit(0 if t and all(x.get("health") != "unknown" for x in t) else 1)' 2>/dev/null
 }
 
 # JSON state of the data (Prometheus / Loki / Alertmanager / Authelia / CA) at time $1, from inside the tools

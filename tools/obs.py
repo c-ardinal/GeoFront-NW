@@ -1722,12 +1722,14 @@ def cmd_restore(args):
         if args.with_config:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             for name, dst in config:
+                bak = dst.with_name(f"{dst.name}.bak-{stamp}")
                 if dst.exists():
-                    shutil.copy2(dst, dst.with_name(f"{dst.name}.bak-{stamp}"))
+                    shutil.copy2(dst, bak)
+                    fix_owner(bak)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 with tar.extractfile("config/" + name) as f:
                     write_atomic(dst, f.read().decode("utf-8"), mode=0o600 if name == ".env" else 0o644)
-                fix_owner(dst)
+                fix_owner(dst, dst.parent)  # a directory created here (inventory/ on a new host) too, not root's
                 print(f"[OK] {name} を戻しました (元のファイルは .bak-{stamp})")
     print("次: docker compose up -d   (台帳・通知先を戻したなら docker compose run --rm tools targets も)")
     return 0

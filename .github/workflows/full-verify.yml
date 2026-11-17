@@ -1,0 +1,154 @@
+# The long checks that ci.yml does not run on every push (about 20 minutes on the runners): by hand (workflow_dispatch) and on the release
+# pull request develop -> main.
+#   amd64 (ubuntu-24.04):   e2e-open (kept running) -> ui-check.js (Chromium) on it -> e2e-auth -> resilience ->
+#                           backup-restore -> upgrade
+#   arm64 (ubuntu-24.04-arm, the Raspberry Pi's architecture, natively): selftests -> e2e-open
+# Each step prints scripts/verify.sh's result table into the run's summary; the logs (and ui-check's screenshots) are
+# uploaded as artifacts. A failed check does not stop the next ones, the job fails at the end when any did.
+name: full-verify
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # -eo pipefail: a check's NG is not hidden by `| tee`
+
+concurrency:
+  group: full-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  amd64:
+    if: github.event_name != 'pull_request' || github.head_ref == 'develop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: paths  # (runner.temp is not available in a job's env)
+        run: printf 'LOGS=%s\nE2E_DIR=%s\n' "$RUNNER_TEMP/verify" "$RUNNER_TEMP/obs-e2e" >> "$GITHUB_ENV"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0  # upgrade: `git archive` of the old version (P6)
+      - name: free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/share/swift
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: e2e-open (kept running for ui-check)
+        id: open
+        env:
+          KEEP: "1"
+          VERIFY_LOGS: ${{ env.LOGS }}/e2e-open
+        run: bash scripts/verify.sh e2e-open | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Chromium (playwright-core)
+        id: chromium
+        if: steps.open.outcome == 'success'
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p pw && cd pw
+          npm init -y >/dev/null
+          npm install --no-save --no-audit --no-fund playwright-core@1.63.0
+          npx --no-install playwright-core install --with-deps chromium-headless-shell
+      - name: ui-check
+        if: steps.chromium.outcome == 'success'
+        env:
+          PW_CORE: ${{ runner.temp }}/pw/node_modules/playwright-core
+        run: |
+          mkdir -p "$LOGS/ui-check"
+          set +e
+          node scripts/ui-check.js http://127.0.0.1:28080 "$LOGS/ui-check" > "$LOGS/ui-check.log" 2>&1
+          rc=$?
+          set -e
+          cat "$LOGS/ui-check.log"
+          {
+            printf '\nui-check: %s OK, %s NG (rc=%s)\n\n' "$(grep -c '^\[OK\]' "$LOGS/ui-check.log")" \
+              "$(grep -c '^\[NG\]' "$LOGS/ui-check.log")" "$rc"
+            grep '^\[NG\]' "$LOGS/ui-check.log" | head -20 | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+      - name: remove the e2e-open project
+        if: always()
+        run: |
+          . scripts/lib.sh
+          down_project obs-e2e-open
+          docker system df
+
+      - name: e2e-auth resilience backup-restore
+        if: '!cancelled()'
+        env:
+          VERIFY_LOGS: ${{ env.LOGS }}/auth
+        run: bash scripts/verify.sh e2e-auth resilience backup-restore | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: upgrade
+        if: '!cancelled()'
+        env:
+          VERIFY_LOGS: ${{ env.LOGS }}/upgrade
+        run: |
+          df -h /
+          bash scripts/verify.sh upgrade | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: disk and memory
+        if: always()
+        run: df -h / && free -m && docker system df
+      - name: logs of the failed checks
+        if: failure()
+        run: |
+          for f in $(grep -l -E '^\[NG\]|NG:' "$LOGS"/*/*.log "$LOGS"/*.log 2>/dev/null); do
+            echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"
+          done
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: full-verify-amd64
+          path: |
+            ${{ env.LOGS }}
+            ${{ env.E2E_DIR }}/*/up.log
+            ${{ env.E2E_DIR }}/*/mem.txt
+          retention-days: 14
+
+  arm64:
+    if: github.event_name != 'pull_request' || github.head_ref == 'develop'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: paths  # (runner.temp is not available in a job's env)
+        run: printf 'LOGS=%s\nE2E_DIR=%s\n' "$RUNNER_TEMP/verify" "$RUNNER_TEMP/obs-e2e" >> "$GITHUB_ENV"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: environment
+        run: uname -m && df -h / && free -m && docker version --format '{{.Server.Version}} {{.Server.Arch}}'
+      - name: selftests (arm64, native)
+        env:
+          VERIFY_LOGS: ${{ env.LOGS }}/selftests
+        run: bash scripts/verify.sh selftests | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: e2e-open (arm64)
+        if: '!cancelled()'
+        env:
+          VERIFY_LOGS: ${{ env.LOGS }}/e2e-open
+        run: bash scripts/verify.sh e2e-open | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: disk and memory
+        if: always()
+        run: df -h / && free -m && docker system df
+      - name: logs of the failed checks
+        if: failure()
+        run: |
+          for f in $(grep -l -E '^\[NG\]|NG:' "$LOGS"/*/*.log "$LOGS"/*.log 2>/dev/null); do
+            echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"
+          done
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: full-verify-arm64
+          path: |
+            ${{ env.LOGS }}
+            ${{ env.E2E_DIR }}/*/up.log
+            ${{ env.E2E_DIR }}/*/mem.txt
+          retention-days: 14

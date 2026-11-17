@@ -77,6 +77,8 @@ scripts/verify.sh full                     # selftests compose leak-scan e2e-ope
 scripts/verify.sh e2e-auth backup-restore  # 名前を並べて一部だけ
 ```
 
+GitHub Actions の `full-verify` ワークフローでも同じ検証を実行できます (手動の実行と、develop から main へのリリース PR で動きます)。amd64 のランナーで e2e-open・ui-check・e2e-auth・resilience・backup-restore・upgrade を、arm64 のランナー (Raspberry Pi と同じアーキテクチャ) で selftests と e2e-open を実行し、結果の表を実行のサマリーに出します。
+
 verify.sh を動かすには、ホストに bash・docker・python3 が要ります。検証は別のプロジェクト (`obs-e2e-*`) で行い、終わると消します。運用中のプロジェクトには触れません。
 ほかの検証と同時に動かすときは、`E2E_TAG=<名前>` と `E2E_SLOT=1`〜`5` で、プロジェクト名とポートを分けてください。
 

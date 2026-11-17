@@ -13,7 +13,7 @@
 #   e2e-auth        scripts/e2e-fresh.sh auth   (with login; E2E_LAN_IP=<LAN IP> for a real LAN bind)
 #   resilience      scripts/resilience.sh on the e2e-auth project (REBOOT_CMD for the host-restart equivalent)
 #   backup-restore  scripts/backup-restore.sh from the e2e-auth project into a new one
-#   upgrade         scripts/upgrade.sh (data volumes of bb2f21d = P6 -> this tree)
+#   upgrade         scripts/upgrade.sh (data volumes of db9132a = P6 -> this tree)
 #   arm64           scripts/arm64.sh (pulled images' arm64 digests, arm64 builds of tools / flowd / analyzer)
 # Throwaway projects are obs-e2e-*, removed with `down -v` at the end; the main project is never touched (only built).
 # Env: VERIFY_LOGS (default ${TMPDIR:-/tmp}/obs-verify-<time>), E2E_DIR, E2E_LAN_IP, E2E_TAG / E2E_SLOT
