@@ -15,6 +15,7 @@ import time
 import urllib.parse
 
 RESULTS = []
+TREND_WAIT = int(os.environ.get("E2E_TREND_WAIT", "300"))  # s: the first points of the rate series (see trend_and_search)
 # the devices modal's "Last seen" (F2, command-center/js/main.js Q.lastOk): accepted by mask-api's /prom/ path
 UP_TS = 'timestamp(up{job="snmp"}) and up{job="snmp"} == 1'
 LAST_OK = f"time() - max by (instance) ({UP_TS} or max_over_time(({UP_TS})[900s:30s]))"
@@ -102,11 +103,19 @@ def trend_and_search(c):
     for fam, scope, want in (("if_bps", {"instance": "rtx1300", "ifName": "lan2"}, True), ("dev_up", {}, True),
                              ("wan_util", {"instance": "rtx1300", "ifName": "lan2"}, True), ("if_drops", {"instance": "rtx1300"}, None),
                              ("flow_country", {}, None), ("capture_ring", {}, None)):
-        st, _, b = c.req("GET", "/trend/series?" + urllib.parse.urlencode({"family": fam, **scope, **win}))
-        d = (js(b) or {}).get("data") or {}
-        ser = d.get("series", [])
-        pts = max((len(x["points"]) for x in ser), default=0)
-        ok = st == 200 and d.get("step") and pts <= 600 and (want is None or (ser and pts > 1))
+        # a rate over 2 min needs a few scrapes (30 s): right after `up` (fast host) the series may not have 2 points yet
+        t_end = time.time() + (TREND_WAIT if want else 0)
+        while True:
+            st, _, b = c.req("GET", "/trend/series?" + urllib.parse.urlencode({"family": fam, **scope, **win}))
+            d = (js(b) or {}).get("data") or {}
+            ser = d.get("series", [])
+            pts = max((len(x["points"]) for x in ser), default=0)
+            ok = st == 200 and d.get("step") and pts <= 600 and (want is None or (ser and pts > 1))
+            if ok or time.time() >= t_end:
+                break
+            time.sleep(10)
+            now = time.time()
+            win = {"from": f"{now - 3600:.0f}", "to": f"{now:.0f}"}
         check(f"推移: {fam} {scope or ''}".rstrip(), ok, f"{st} {len(ser)} 系列 {pts} 点 step {d.get('step')}")
     for bad in ({"family": "if_bps", "instance": 'rtx1300"} or vector(1) #', **win}, {"family": "if_bps", "instance": "192.0.2.10", **win},
                 {"family": "up", **win}, {"family": "dev_up", "query": "up", **win}):
