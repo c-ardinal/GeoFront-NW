@@ -81,7 +81,7 @@ def common(c):
     check("Loki (mask-api 経由): syslog の行", st == 200 and (js(b) or {}).get("data", {}).get("result"), st)
     st, _, b = c.req("GET", "/prom/api/v1/query?query=" + urllib.parse.quote(LAST_OK))
     res = (js(b) or {}).get("data", {}).get("result", [])
-    check("機器ごとの Last seen (mask-api 経由)", st == 200 and res and all(0 <= float(r["value"][1]) <= 900 for r in res),
+    check("機器単位の Last seen (mask-api 経由)", st == 200 and res and all(0 <= float(r["value"][1]) <= 900 for r in res),
           f"{st} {[(r['metric'].get('instance'), round(float(r['value'][1]))) for r in res]}")
     trend_and_search(c)
     st, _, _ = c.req("GET", "/", host="evil.example:%d" % c.port)
@@ -128,19 +128,19 @@ def trend_and_search(c):
     st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({"limit": 20, **win}))
     d = (js(b) or {}).get("data") or {}
     ents = d.get("entries", [])
-    check("ログ検索: 新しい順の行", st == 200 and ents and all(int(ents[i]["ts"]) >= int(ents[i + 1]["ts"]) for i in range(len(ents) - 1)),
+    check("ログ検索: 新着順の行", st == 200 and ents and all(int(ents[i]["ts"]) >= int(ents[i + 1]["ts"]) for i in range(len(ents) - 1)),
           f"{st} {len(ents)} 行")
     word = next((w for e in ents for t, _ in e["parts"] for w in t.split() if len(w) >= 4 and w.isalpha()), "LAN")
     st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({"q": word.lower(), "limit": 20, **win}))
     d = (js(b) or {}).get("data") or {}
     hit = [e for e in d.get("entries", []) if any(h for _, h in e["parts"])]
-    check(f"ログ検索: 語句 {word.lower()} (大小文字を区別しない、印付き)", st == 200 and hit and len(hit) == len(d["entries"]), f"{st} {len(hit)} 行")
+    check(f"ログ検索: 語句 {word.lower()} (大文字・小文字を区別せず、マーク付与)", st == 200 and hit and len(hit) == len(d["entries"]), f"{st} {len(hit)} 行")
     st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"q": word, **win}))
     h = (js(b) or {}).get("data") or {}
     check("ログ検索: 件数の棒グラフ", st == 200 and len(h.get("counts", [])) == 60 and sum(h["counts"]) > 0, f"{st} {sum(h.get('counts', []))} 件")
     st, _, b = c.req("GET", "/logsearch/hist?" + urllib.parse.urlencode({"from": f"{now - 930.5:.1f}", "to": f"{now:.0f}"}))
     h = (js(b) or {}).get("data") or {}
-    check("ログ検索: 棒グラフ (端数の最後の棒も数える)", st == 200 and len(h.get("counts", [])) == 16 and sum(h["counts"]) > 0, f"{st} {h.get('counts', [])[-3:]}")
+    check("ログ検索: 棒グラフ (端数の最終バーも集計)", st == 200 and len(h.get("counts", [])) == 16 and sum(h["counts"]) > 0, f"{st} {h.get('counts', [])[-3:]}")
     for bad in ({"q": "(a+)+$", "regex": "1"}, {"q": "192.0.2.10"}, {"host": 'rtx1300"} |= "x'}, {"q": "a", "regex": "1", "query": "x"}):
         st, _, b = c.req("GET", "/logsearch/lines?" + urllib.parse.urlencode({**bad, **win}))
         check(f"ログ検索: 拒否 {str(bad)[:50]}", st == 400, st)
@@ -152,16 +152,16 @@ def screens_open(c):
     common(c)
     unknown_path(c, "open")
     st, _, b = c.req("GET", "/am/ops")
-    check("書き込み可 (127.0.0.1、ログインなし)", st == 200 and (js(b) or {}).get("writable") is True, b[:100])
+    check("書込可能 (127.0.0.1、ログインなし)", st == 200 and (js(b) or {}).get("writable") is True, b[:100])
 
 
 def screens_auth(c):
     st, hd, _ = c.req("GET", "/am/ops", tls=False)
     check("HTTP -> HTTPS", st in (301, 302, 307, 308) and hd.get("location", "").startswith("https://"), f"{st} {hd.get('location')}")
     st, hd, _ = c.req("GET", "/")
-    check("ログインなしでは開かない", st in (302, 303, 401) and st != 200, f"{st} {hd.get('location', '')}")
+    check("ログインなしでは表示不可", st in (302, 303, 401) and st != 200, f"{st} {hd.get('location', '')}")
     st, _, b = c.req("GET", "/obs/exposure.json")
-    check("exposure: auth (ログイン前に読めない)", st != 200, st)
+    check("exposure: auth (ログイン前は参照不可)", st != 200, st)
     st, ok = c.login(os.environ.get("E2E_ADMIN", ""))
     check("admin ログイン (Authelia)", ok, st)
     if not ok:
@@ -172,7 +172,7 @@ def screens_auth(c):
     common(c)
     st, _, b = c.req("GET", "/am/ops")
     o = js(b) or {}
-    check("admin: 役割と書き込み", st == 200 and o.get("role") == "admin" and o.get("writable") is True and o.get("auth") is True, b[:120])
+    check("admin: 役割と書込権限", st == 200 and o.get("role") == "admin" and o.get("writable") is True and o.get("auth") is True, b[:120])
     unknown_path(c, "admin")
     if os.environ.get("E2E_VIEWER"):
         v = Client(c.base, c.ca)
@@ -180,7 +180,7 @@ def screens_auth(c):
         check("viewer ログイン", ok, st)
         st, _, b = v.req("GET", "/am/ops")
         o = js(b) or {}
-        check("viewer: 読み取りだけ", st == 200 and o.get("role") == "viewer" and o.get("writable") is False, b[:120])
+        check("viewer: 読取専用", st == 200 and o.get("role") == "viewer" and o.get("writable") is False, b[:120])
         unknown_path(v, "viewer")
     c.cookie = sc
 

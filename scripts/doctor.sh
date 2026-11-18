@@ -35,7 +35,7 @@ esac
 tree="${DC_DIR:-$ROOT}"
 if [ -n "$PY" ] && [ -e "$tree/.git" ] && command -v git >/dev/null; then
   if out="$("$PY" "$tree/scripts/leak_scan.py" 2>&1)"; then leak=OK
-  else leak="NG $(printf '%s\n' "$out" | grep -c '^  NG') 件 (値は scripts/leak-scan.sh で)"; fi
+  else leak="NG $(printf '%s\n' "$out" | grep -c '^  NG') 件 (詳細は scripts/leak-scan.sh で確認)"; fi
 else
   leak="省略 (git の作業ツリーではない、または python3 なし)"
 fi

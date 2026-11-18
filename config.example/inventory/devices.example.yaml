@@ -1,22 +1,22 @@
-# 機器台帳の例。実際の台帳は設定ディレクトリ (OBS_CONFIG_DIR) の inventory/devices.yaml に置く (リポジトリには置かない):
-#   docker compose run --rm tools init        (対話で作る)
-#   または cp config.example/inventory/devices.example.yaml "$OBS_CONFIG_DIR/inventory/devices.yaml" して編集 (従来の配置ならリポジトリの inventory/)
-# 編集後: docker compose run --rm tools targets   (scrape 対象と syslog の送信元対応表を作り直す)
+# 機器台帳の例。実際の台帳は設定ディレクトリ (OBS_CONFIG_DIR) の inventory/devices.yaml に配置 (リポジトリには配置しない):
+#   docker compose run --rm tools init        (対話形式で作成)
+#   または cp config.example/inventory/devices.example.yaml "$OBS_CONFIG_DIR/inventory/devices.yaml" して編集 (従来の配置の場合はリポジトリの inventory/)
+# 編集後: docker compose run --rm tools targets   (scrape 対象と syslog の送信元対応表を再生成)
 #
-#   name:      表示名。Prometheus の instance、Loki の host になる (英小文字・数字・- _)
+#   name:      表示名。Prometheus の instance、Loki の host に使用 (英小文字・数字・- _)
 #   kind:      rtx | wlx | other (drivers/ のドライバ: drivers/yamaha-rtx・drivers/yamaha-wlx・drivers/generic)
-#   address:   管理 IP (IPv4) か DNS 名。SNMP の宛先 (host:port でポート指定可、既定 161)。
-#              syslog の送信元もこれで照合する (IP は送信元 IP と、DNS 名は送信元の逆引き名と一致させる)
+#   address:   管理 IP (IPv4) か DNS 名。SNMP の送信先 (host:port でポート指定可、既定 161)。
+#              syslog の送信元も本項目で照合 (IP は送信元 IP と、DNS 名は送信元の逆引き名と一致が必要)
 #   snmp_auth: snmp/auths.yml の auth 名。yamaha_v3 (SNMPv3 authPriv、推奨) / yamaha_v2c
-#   syslog:    この機器から syslog を受けるか (check の受信待ちの対象)
-#   wan_interface: (任意、1 台だけ) WAN 側インターフェースの ifName (例 lan2)。command-center の WAN 表示と
-#              アラート WanHighUtilization に使う。書かなければ WAN 表示は「WAN interface not configured」
-#              ネットワーク図ではこの機器の先に「インターネット」を描く
-#   parent:    (任意) この機器がつながっている上位の機器の name。ネットワーク図の線になる (書かなければ「接続先未設定」)
-#   parent_if: (任意) 上位の機器側のインターフェースの ifName (例 lan1)。線の利用率・エラーはこの IF の値
-#   uplink_if: (任意) この機器側の上位につながるインターフェースの ifName (parent_if が無いときはこちらの値を線に使う)
-#              LLDP (LLDP-MIB) が取れる機器では、取れた隣接も線として足す (図で「LLDP」と区別)
-# 秘密値 (SNMP のパスワード・コミュニティ) はここに書かない。.env に置く。
+#   syslog:    本機器からの syslog 受信の有無 (check の受信待機の対象)
+#   wan_interface: (任意、1 台のみ) WAN 側インターフェースの ifName (例 lan2)。command-center の WAN 表示と
+#              アラート WanHighUtilization に使用。未記載の場合は WAN 表示が「WAN interface not configured」
+#              ネットワーク図では本機器の先に「インターネット」を描画
+#   parent:    (任意) 本機器の接続先である上位機器の name。ネットワーク図の線に反映 (未記載の場合は「接続先未設定」)
+#   parent_if: (任意) 上位機器側インターフェースの ifName (例 lan1)。線の利用率・エラーは本 IF の数値
+#   uplink_if: (任意) 本機器側で上位に接続するインターフェースの ifName (parent_if の未記載時は本設定値を線に使用)
+#              LLDP (LLDP-MIB) 対応の機器では、取得した隣接も線として追加 (図で「LLDP」と区別)
+# 秘密値 (SNMP のパスワード・コミュニティ) は本ファイルに記載禁止。.env に配置。
 devices:
   - name: rtx1300
     kind: rtx

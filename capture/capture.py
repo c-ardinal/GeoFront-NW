@@ -67,8 +67,8 @@ def check_config():
 def platform_problem(osrelease, net_names):
     """Docker Desktop / WSL / a VM: the 'host' network is the VM's, not the LAN."""
     if re.search(r"microsoft|wsl|linuxkit", osrelease, re.I) or "services1" in net_names:
-        return ("Docker Desktop (Windows / macOS) または WSL 上ではキャプチャできません: コンテナの host network は VM の中のもので、"
-                "LAN のパケットは見えません。Linux ホスト (Raspberry Pi / 小型 PC) の Docker Engine で動かしてください。"
+        return ("Docker Desktop (Windows / macOS) または WSL 上ではキャプチャできません: コンテナの host network は VM 内部のネットワークのため、"
+                "LAN のパケットは参照不可です。Linux ホスト (Raspberry Pi / 小型 PC) の Docker Engine で稼働させてください。"
                 " / Packet capture needs a Linux host with Docker Engine; under Docker Desktop / WSL the host network is a VM's"
                 " (CAPTURE_ALLOW_VM=1 only to test the pipeline inside the VM).")
     return None
@@ -83,10 +83,10 @@ def interfaces():
 
 def check_iface(names):
     if not IFACE:
-        raise ConfigError(f"CAPTURE_IFACE を .env に設定してください (このホストのインターフェース: {', '.join(names) or 'なし'})")
+        raise ConfigError(f"CAPTURE_IFACE を .env に設定してください (本ホストのインターフェース: {', '.join(names) or 'なし'})")
     if not re.fullmatch(r"[A-Za-z0-9._@:-]{1,15}", IFACE) or IFACE not in names:
-        raise ConfigError(f"インターフェース {IFACE!r} がありません (ある: {', '.join(names) or 'なし'})。"
-                          " host network で動いているか (compose の network_mode: host) も確認してください")
+        raise ConfigError(f"インターフェース {IFACE!r} が存在しません (存在: {', '.join(names) or 'なし'})。"
+                          " host network での稼働 (compose の network_mode: host) も確認してください")
 
 
 def check_bpf():

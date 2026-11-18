@@ -76,7 +76,7 @@ def geoip_update(directory, now=None, force=False, opener=urllib.request.urlopen
     for db, fname in GEOIP_DBS.items():
         cands = months(now)
         if not force and ver.get(db) == cands[0] and (directory / fname).exists():
-            log(f"[OK] {db}: {ver[db]} (最新。--force で取り直し)")
+            log(f"[OK] {db}: {ver[db]} (最新版。--force で再取得)")
             continue
         got = None
         for month in cands:
@@ -94,7 +94,7 @@ def geoip_update(directory, now=None, force=False, opener=urllib.request.urlopen
             log(f"[OK] {db}: {got} ({(directory / fname).stat().st_size / 2**20:.0f} MiB)")
         else:
             ok = False
-            log(f"[NG] {db}: ダウンロードできませんでした (前の版があればそのまま使います)")
+            log(f"[NG] {db}: ダウンロード失敗 (旧版が存在すれば継続使用)")
     ver.update({"updated": int(now), "source": "DB-IP Lite", "license": "CC BY 4.0", "attribution": ATTRIBUTION})
     tmp = directory / ".version.json.tmp"
     tmp.write_text(json.dumps(ver, indent=1))
@@ -110,14 +110,14 @@ def geoip_rows(directory, now=None):
     for db, fname in GEOIP_DBS.items():
         p = Path(directory) / fname
         if not p.exists():
-            rows.append((db, "—", "—", None, "なし (国は Unknown になります: tools geoip update)"))
+            rows.append((db, "—", "—", None, "なし (国は Unknown 表示: tools geoip update)"))
             continue
         month = ver.get(db, "?")
         try:  # age from the month the file is for (DB-IP builds it at the start of that month)
             age = (now - time.mktime(time.strptime(month + "-01", "%Y-%m-%d"))) / 86400
         except ValueError:
             age = (now - p.stat().st_mtime) / 86400
-        state = f"古い ({GEOIP_STALE_DAYS} 日超): tools geoip update" if age > GEOIP_STALE_DAYS else "OK"
+        state = f"旧版 ({GEOIP_STALE_DAYS} 日超過): tools geoip update" if age > GEOIP_STALE_DAYS else "OK"
         rows.append((db, month, f"{p.stat().st_size / 2**20:.0f}", round(age), state))
     return rows
 
@@ -242,7 +242,7 @@ def selftest():
         assert ok and ver["city"] == ver["asn"] == "2026-01" and len(calls) == 4, (ok, ver, calls)
         assert is_mmdb(Path(tmp, "dbip-city-lite.mmdb")) and not list(Path(tmp).glob(".*part"))
         rows = geoip_rows(tmp, now=now + 50 * 86400)
-        assert rows[0][4].startswith("古い") and rows[0][1] == "2026-01"
+        assert rows[0][4].startswith("旧版") and rows[0][1] == "2026-01"
         bad = lambda req, timeout=0: Resp(gzip.compress(b"not a database"))
         ok, ver = geoip_update(tmp, now=now, opener=bad, force=True, log=lambda *_: None)
         assert not ok and is_mmdb(Path(tmp, "dbip-city-lite.mmdb")), "a bad download keeps the previous file"

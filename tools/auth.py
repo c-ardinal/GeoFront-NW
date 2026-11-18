@@ -104,27 +104,27 @@ def check(values):
     for key, n in SECRETS.items():
         v = values.get(key, "")
         if len(v) < n or not re.fullmatch(r"[A-Za-z0-9_-]+", v):
-            errs.append(f"{key} がありません (または短すぎます)。docker compose run --rm tools user secrets で .env に作ってください")
+            errs.append(f"{key} が存在しません (または文字数不足)。docker compose run --rm tools user secrets で .env に生成してください")
     hs = hosts(values)
     if not hs:
-        errs.append("認証を使うには OBS_PUBLIC_URL (例 https://192.168.100.10:8080) が必要です")
+        errs.append("認証の利用には OBS_PUBLIC_URL (例 https://192.168.100.10:8080) が必要です")
     for h, _ in hs:
         if not cookie_host_ok(h):
-            errs.append(f"{h}: ログインの cookie を置けない名前です。IPv4 アドレスか、ドットを含む名前 (例 obs.home.arpa) で開いてください")
+            errs.append(f"{h}: ログイン cookie の格納不可の名称です。IPv4 アドレス、またはドット付きの名称 (例 obs.home.arpa) でアクセスしてください")
     scheme, _, _ = url_host_port(values.get("OBS_PUBLIC_URL", ""))
     if scheme == "http":
-        warns.append("OBS_PUBLIC_URL が http:// です。認証ありの画面は https:// です (http は https に転送します)。https:// にしてください")
+        warns.append("OBS_PUBLIC_URL が http:// です。認証有効時の画面は https:// です (http は https へ転送)。https:// に変更してください")
     for key in ("OBS_AUTH_INACTIVITY", "OBS_AUTH_EXPIRATION", "OBS_AUTH_FIND_TIME", "OBS_AUTH_BAN_TIME"):
         if not DURATION_RE.fullmatch(setting(values, key)):
-            errs.append(f"{key}={values.get(key)}: 30m / 12h / 7d のような期間にしてください")
+            errs.append(f"{key}={values.get(key)}: 30m / 12h / 7d 形式の期間を指定してください")
     rm = setting(values, "OBS_AUTH_REMEMBER_ME")
     if rm != "0" and not DURATION_RE.fullmatch(rm):
-        errs.append(f"OBS_AUTH_REMEMBER_ME={rm}: 0 (使わない) か 7d のような期間にしてください")
+        errs.append(f"OBS_AUTH_REMEMBER_ME={rm}: 0 (不使用) または 7d 形式の期間を指定してください")
     mr = setting(values, "OBS_AUTH_MAX_RETRIES")
     if not (mr.isdigit() and 1 <= int(mr) <= 20):
-        errs.append(f"OBS_AUTH_MAX_RETRIES={mr}: 1〜20 にしてください (0 = 締め出しなし は使えません)")
+        errs.append(f"OBS_AUTH_MAX_RETRIES={mr}: 1〜20 を指定してください (0 = ロックアウトなし は使用不可)")
     if setting(values, "OBS_AUTH_TOTP") not in ("0", "1"):
-        errs.append("OBS_AUTH_TOTP は 0 か 1 にしてください")
+        errs.append("OBS_AUTH_TOTP は 0 または 1 を指定してください")
     return errs, warns
 
 
@@ -193,16 +193,16 @@ def check_password(pw, name=""):
     if len(pw) < PASSWORD_MIN:
         raise AuthError(f"パスワードは {PASSWORD_MIN} 文字以上にしてください")
     if name and name.lower() in pw.lower():
-        raise AuthError("パスワードに利用者名を含めないでください")
+        raise AuthError("パスワードへの利用者名の包含は不可です")
     if any(ord(c) < 32 for c in pw):
-        raise AuthError("パスワードに制御文字は使えません")
+        raise AuthError("パスワードに制御文字は使用不可です")
 
 
 def check_name(name):
     if not USER_RE.fullmatch(name or ""):
-        raise AuthError(f"利用者名 {name!r}: 英小文字・数字で始まる 1〜32 文字 (英小文字・数字・. _ -) にしてください")
+        raise AuthError(f"利用者名 {name!r}: 英小文字・数字で開始する 1〜32 文字 (英小文字・数字・. _ -) で指定してください")
     if name in RESERVED_USERS:
-        raise AuthError(f"利用者名 {name} は予約語です (役割の名前・システムの利用者・ログインなしの表示名と紛らわしいため)。別の名前にしてください")
+        raise AuthError(f"利用者名 {name} は予約語です (役割名・システム利用者・ログインなし時の表示名との混同防止のため)。別名称を指定してください")
 
 
 def load_users(path):
@@ -211,7 +211,7 @@ def load_users(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     users = data.get("users") or {}
     if not isinstance(users, dict):
-        raise AuthError(f"{path.name} の形式が違います (users: の下に利用者)")
+        raise AuthError(f"{path.name} の形式が不正です (users: 配下に利用者を記述)")
     return users
 
 
@@ -251,16 +251,16 @@ def role_of(user):
 def email_of(name, email=""):
     email = email or f"{name}@{EMAIL_DOMAIN}"
     if not EMAIL_RE.fullmatch(email):
-        raise AuthError(f"メールアドレス {email!r} の形が違います")
+        raise AuthError(f"メールアドレス {email!r} の形式が不正です")
     return email
 
 
 def add(users, name, role, pw, display="", email=""):
     check_name(name)
     if name in users:
-        raise AuthError(f"利用者 {name} は既にいます (パスワードの変更は tools user passwd {name})")
+        raise AuthError(f"利用者 {name} は既存です (パスワード変更は tools user passwd {name})")
     if role not in ROLES:
-        raise AuthError(f"役割は {' / '.join(ROLES)} のどれかです")
+        raise AuthError(f"役割は {' / '.join(ROLES)} のいずれかです")
     check_password(pw, name)
     return {**users, name: {"displayname": display or name, "password": hash_password(pw), "email": email_of(name, email),
                             "groups": [role], "disabled": False}}
@@ -268,21 +268,21 @@ def add(users, name, role, pw, display="", email=""):
 
 def passwd(users, name, pw, role=None):
     if name not in users:
-        raise AuthError(f"利用者 {name} はいません")
+        raise AuthError(f"利用者 {name} は未登録です")
     u = {"email": email_of(name), **users[name]}  # (users made before the e-mail was recorded get the placeholder)
     if pw is not None:
         check_password(pw, name)
         u["password"] = hash_password(pw)
     if role is not None:
         if role not in ROLES:
-            raise AuthError(f"役割は {' / '.join(ROLES)} のどれかです")
+            raise AuthError(f"役割は {' / '.join(ROLES)} のいずれかです")
         u["groups"] = [role]
     return {**users, name: u}
 
 
 def remove(users, name):
     if name not in users:
-        raise AuthError(f"利用者 {name} はいません")
+        raise AuthError(f"利用者 {name} は未登録です")
     return {k: v for k, v in users.items() if k != name}
 
 
@@ -291,9 +291,9 @@ def read_password(env_value, name):
     if env_value:
         return env_value
     if not sys.stdin.isatty():
-        raise AuthError("パスワードを入力できません (TTY なし)。-e OBS_USER_PASSWORD=... で渡してください")
-    pw = getpass.getpass(f"{name} の新しいパスワード ({PASSWORD_MIN} 文字以上): ")
-    if getpass.getpass("もう一度: ") != pw:
+        raise AuthError("パスワード入力不可 (TTY なし)。-e OBS_USER_PASSWORD=... で指定してください")
+    pw = getpass.getpass(f"{name} の新規パスワード ({PASSWORD_MIN} 文字以上): ")
+    if getpass.getpass("再入力: ") != pw:
         raise AuthError("2 回の入力が一致しません")
     return pw
 

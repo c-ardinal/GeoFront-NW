@@ -45,34 +45,34 @@ def duration_s(v):
 def secret_url(values, key, where, errs, warns):
     v = values.get(key, "")
     if not v:
-        errs.append(f"{where}: .env の {key} が空です")
+        errs.append(f"{where}: .env の {key} が空欄です")
     elif not URL_RE.fullmatch(v):
-        errs.append(f"{where}: .env の {key} は http(s):// で始まる URL にしてください")
+        errs.append(f"{where}: .env の {key} は http(s):// で開始する URL を指定してください")
     elif v.startswith("http://"):
-        warns.append(f"{where}: {key} が http:// です (暗号化されません。通常は https://)")
+        warns.append(f"{where}: {key} が http:// です (非暗号化通信。通常は https://)")
     return v
 
 
 def smtp_settings(values, where, errs, warns):
     tls = values.get("SMTP_TLS") or "starttls"
     if tls not in SMTP_PORTS:
-        errs.append(f"{where}: SMTP_TLS は starttls / tls / none のどれかにしてください")
+        errs.append(f"{where}: SMTP_TLS は starttls / tls / none のいずれかを指定してください")
         tls = "starttls"
     port = values.get("SMTP_PORT") or SMTP_PORTS[tls]
     host, frm, user, pw = (values.get(k, "") for k in ("SMTP_HOST", "SMTP_FROM", "SMTP_USER", "SMTP_PASSWORD"))
     if not SMTP_HOST_RE.fullmatch(host):
         errs.append(f"{where}: .env の SMTP_HOST (SMTP サーバーのホスト名) を設定してください")
     if not (port.isdigit() and 0 < int(port) < 65536):
-        errs.append(f"{where}: SMTP_PORT={port}: 1〜65535 のポート番号にしてください")
+        errs.append(f"{where}: SMTP_PORT={port}: 1〜65535 のポート番号を指定してください")
     if not EMAIL_RE.fullmatch(frm):
         errs.append(f"{where}: .env の SMTP_FROM (送信元メールアドレス) を設定してください")
     if bool(user) != bool(pw):
-        errs.append(f"{where}: SMTP_USER と SMTP_PASSWORD は両方設定するか、両方空にしてください")
+        errs.append(f"{where}: SMTP_USER と SMTP_PASSWORD は双方を設定、または双方を空欄にしてください")
     if tls == "none":
-        warns.append(f"{where}: SMTP_TLS=none: メールは暗号化されずに送られます" + (" (パスワードも)" if user else ""))
+        warns.append(f"{where}: SMTP_TLS=none: メールは暗号化されずに送信されます" + (" (パスワードも同様)" if user else ""))
     verify = values.get("SMTP_TLS_VERIFY", "1") != "0"
     if not verify:
-        warns.append(f"{where}: SMTP_TLS_VERIFY=0: SMTP サーバーの証明書を検証しません (testbed のモック用。本番では使わない)")
+        warns.append(f"{where}: SMTP_TLS_VERIFY=0: SMTP サーバーの証明書を検証しません (testbed のモック用。本番環境では不使用)")
     return {"host": host, "port": int(port) if port.isdigit() else 0, "from": frm, "user": user, "password": pw, "tls": tls, "verify": verify}
 
 
@@ -86,17 +86,17 @@ def receiver_entry(r, values, errs, warns):
     if rtype == "email":
         to = [r["to"]] if isinstance(r.get("to"), str) else r.get("to")
         if not (isinstance(to, list) and 0 < len(to) <= 10 and all(isinstance(x, str) and EMAIL_RE.fullmatch(x) for x in to)):
-            errs.append(f"{where}: to は宛先メールアドレス (1〜10 件) にしてください")
+            errs.append(f"{where}: to は送信先メールアドレス (1〜10 件) を指定してください")
         return {"type": "email", "to": to if isinstance(to, list) else [], "smtp": smtp_settings(values, where, errs, warns)}
     if rtype == "line":
         token, to = values.get("LINE_CHANNEL_ACCESS_TOKEN", ""), str(r.get("to", ""))
         if not token:
-            errs.append(f"{where}: .env の LINE_CHANNEL_ACCESS_TOKEN (Messaging API のチャネルアクセストークン) が空です")
+            errs.append(f"{where}: .env の LINE_CHANNEL_ACCESS_TOKEN (Messaging API のチャネルアクセストークン) が空欄です")
         if not LINE_TO_RE.fullmatch(to):
-            errs.append(f"{where}: to は送り先のユーザー ID / グループ ID (U / C / R + 英数字 32 文字) にしてください")
+            errs.append(f"{where}: to は送信先のユーザー ID / グループ ID (U / C / R + 英数字 32 文字) を指定してください")
         api = values.get("LINE_API_URL") or LINE_API
         if not URL_RE.fullmatch(api):
-            errs.append(f"{where}: LINE_API_URL は URL にしてください (通常は空のまま)")
+            errs.append(f"{where}: LINE_API_URL は URL を指定してください (通常は空欄)")
         return {"type": "line", "to": to, "token": token, "api": api}
     entry = {"type": rtype, "url": secret_url(values, URL_SECRETS[rtype], where, errs, warns)}
     if rtype == "webhook" and values.get("WEBHOOK_BEARER_TOKEN"):
@@ -107,20 +107,20 @@ def receiver_entry(r, values, errs, warns):
 def check_timing(doc, errs):
     timing = doc.get("timing") or {}
     if not isinstance(timing, dict) or set(timing) - set(DEFAULT_TIMING):
-        errs.append("timing: group_wait / group_interval だけを書いてください")
+        errs.append("timing: group_wait / group_interval のみを記述してください")
         timing = {}
     gw, gi = (duration_s(timing.get(k, DEFAULT_TIMING[k])) for k in ("group_wait", "group_interval"))
     if gw is None or gw > 600:
-        errs.append("timing.group_wait は 0s〜10m (例 30s) にしてください")
+        errs.append("timing.group_wait は 0s〜10m (例 30s) で指定してください")
     if gi is None or not 10 <= gi <= 3600:
-        errs.append("timing.group_interval は 10s〜1h (例 5m) にしてください")
+        errs.append("timing.group_interval は 10s〜1h (例 5m) で指定してください")
     return gw or 0, gi or 300
 
 
 def check_routes(doc, names, gi, errs):
     routes_doc = doc.get("routes") or {}
     if not isinstance(routes_doc, dict) or set(routes_doc) - set(SEVERITIES):
-        errs.append(f"routes: 重大度 ({' / '.join(SEVERITIES)}) ごとに書いてください")
+        errs.append(f"routes: 重大度 ({' / '.join(SEVERITIES)}) 単位で記述してください")
         routes_doc = {}
     routes = {}
     for sev in SEVERITIES:
@@ -128,16 +128,16 @@ def check_routes(doc, names, gi, errs):
         if rd is None:  # default: critical / warning to every receiver, info to none
             rd = {"receivers": [] if sev == "info" else list(names)}
         if not isinstance(rd, dict) or set(rd) - {"receivers", "repeat"} or not isinstance(rd.get("receivers", []), list):
-            errs.append(f"routes.{sev}: receivers: [名前, ...] と repeat: (再通知の間隔) だけを書いてください")
+            errs.append(f"routes.{sev}: receivers: [名前, ...] と repeat: (再通知の間隔) のみを記述してください")
             rd = {}
         to = [str(n) for n in rd.get("receivers") or []]
         for n in sorted(set(to) - set(names)):
-            errs.append(f"routes.{sev}: 通知先 {n} は receivers にありません")
+            errs.append(f"routes.{sev}: 通知先 {n} は receivers に未定義です")
         rs = duration_s(rd.get("repeat", DEFAULT_REPEAT[sev]))
         if rs is None or not 60 <= rs <= 7 * 86400:
-            errs.append(f"routes.{sev}.repeat は 1m〜7d (例 1h) にしてください")
+            errs.append(f"routes.{sev}.repeat は 1m〜7d (例 1h) で指定してください")
         elif rs < gi:
-            errs.append(f"routes.{sev}.repeat ({rd.get('repeat')}) は timing.group_interval 以上にしてください")
+            errs.append(f"routes.{sev}.repeat ({rd.get('repeat')}) は timing.group_interval 以上を指定してください")
         routes[sev] = {"receivers": list(dict.fromkeys(to)), "repeat_s": rs or 3600}
     return routes
 
@@ -147,22 +147,22 @@ def check_receivers(doc, values, where="alerting/receivers.yaml"):
     routes per severity (receiver names, repeat seconds), group_wait_s / group_interval_s."""
     errs, warns = [], []
     if doc is None:
-        warns.append(f"通知先がありません ({where})。アラートは画面に出ますが、どこにも通知されません"
+        warns.append(f"通知先がありません ({where})。アラートは画面表示のみで、外部通知は未実施です"
                      " (例: config.example/alerting/receivers.example.yaml をコピーして編集)")
         doc = {}
     if not isinstance(doc, dict) or set(doc) - {"receivers", "routes", "timing"}:
-        return ["通知先の設定は receivers: / routes: / timing: だけを持つ形にしてください"], warns, None
+        return ["通知先の設定は receivers: / routes: / timing: のみの構成にしてください"], warns, None
     receivers = {}
     rlist = doc.get("receivers") or []
     if not isinstance(rlist, list):
-        return ["receivers: は一覧にしてください"], warns, None
+        return ["receivers: は一覧形式にしてください"], warns, None
     for i, r in enumerate(rlist, 1):
         name = str(r.get("name", "")).strip() if isinstance(r, dict) else ""
-        where = f"通知先の {i} 件目 ({name or '名前なし'})"
+        where = f"通知先の {i} 件目 ({name or '名称なし'})"
         if not isinstance(r, dict) or r.get("type") not in RECEIVER_TYPES:
-            errs.append(f"{where}: type は {' / '.join(RECEIVER_TYPES)} のどれかにしてください")
+            errs.append(f"{where}: type は {' / '.join(RECEIVER_TYPES)} のいずれかを指定してください")
         elif not RECEIVER_NAME_RE.fullmatch(name) or name in RESERVED_RECEIVERS:
-            errs.append(f"{where}: name は英小文字・数字・- _ の 1〜32 文字にしてください ({' / '.join(RESERVED_RECEIVERS)} は予約語)")
+            errs.append(f"{where}: name は英小文字・数字・- _ による 1〜32 文字で指定してください ({' / '.join(RESERVED_RECEIVERS)} は予約語)")
         elif name in receivers:
             errs.append(f"{where}: name が重複しています")
         else:
@@ -171,9 +171,9 @@ def check_receivers(doc, values, where="alerting/receivers.yaml"):
     routes = check_routes(doc, list(receivers), gi, errs)
     used = {n for r in routes.values() for n in r["receivers"]}
     if receivers and not used:
-        warns.append("どの重大度にも通知先が割り当てられていません (routes)")
+        warns.append("全重大度で通知先が未割当です (routes)")
     for n in sorted(set(receivers) - used):
-        warns.append(f"通知先 {n} はどの重大度にも使われていません (notify-test では送れます)")
+        warns.append(f"通知先 {n} は全重大度で未使用です (notify-test での送信は可能)")
     errs, warns = list(dict.fromkeys(errs)), list(dict.fromkeys(warns))
     return errs, warns, None if errs else {"receivers": receivers, "routes": routes, "group_wait_s": gw, "group_interval_s": gi}
 
@@ -205,7 +205,7 @@ def relay_config(plan, public):
 def receiver_where(r):
     """Where a receiver sends, without secrets (for tables)."""
     if r["type"] == "email":
-        return f"{len(r['to'])} 宛先 / {r['smtp']['host']}:{r['smtp']['port']} {r['smtp']['tls']}"
+        return f"{len(r['to'])} 送信先 / {r['smtp']['host']}:{r['smtp']['port']} {r['smtp']['tls']}"
     if r["type"] == "line":
         return f"to {r['to'][:5]}…"
     if r["type"] == "sink":
@@ -219,8 +219,8 @@ def notify_summary(plan):
 
 
 def render_receivers(doc):
-    return ("# 通知先 (tools init が生成。手で編集してよい。変更後は `docker compose run --rm tools targets`)\n"
-            "# 秘密値 (Webhook URL・トークン・SMTP パスワード) はここに書かず .env に置く。書式: config.example/alerting/receivers.example.yaml\n"
+    return ("# 通知先 (tools init が生成。手動編集も可。変更後は `docker compose run --rm tools targets`)\n"
+            "# 秘密値 (Webhook URL・トークン・SMTP パスワード) は本ファイルに記述せず .env に配置。書式: config.example/alerting/receivers.example.yaml\n"
             + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 
 
@@ -267,7 +267,7 @@ def selftest(good):
                              {"name": "s2", "type": "slack", "channel": "#x"}],
                "routes": {"critical": {"receivers": ["ghost"], "repeat": "10s"}, "urgent": {}}, "timing": {"group_interval": "1s"}}
     errs, _, plan = check_receivers(bad_doc, {**good, "SMTP_TLS": "ssl"})
-    want = ["to は宛先メールアドレス", "name が重複", "予約語", "type は", "ユーザー ID", "不明な項目 channel", "routes: 重大度",
+    want = ["to は送信先メールアドレス", "name が重複", "予約語", "type は", "ユーザー ID", "不明な項目 channel", "routes: 重大度",
             "SMTP_HOST", "SMTP_FROM", "SMTP_TLS は", "LINE_CHANNEL_ACCESS_TOKEN", "SLACK_WEBHOOK_URL が空", "group_interval は"]
     assert plan is None and all(any(w in e for e in errs) for w in want), [w for w in want if not any(w in e for e in errs)]
     errs, _, _ = check_receivers({"receivers": [], "routes": {"critical": {"receivers": ["ghost"], "repeat": "10s"}}}, good)

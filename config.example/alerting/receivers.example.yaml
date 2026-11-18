@@ -1,12 +1,12 @@
-# 通知先の設定例。alerting/receivers.yaml にコピーして編集する (実ファイルは git 管理外)。
-#   cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/receivers.yaml"  (従来の配置ならリポジトリの alerting/)
-#   docker compose run --rm tools targets       (設定を生成し Alertmanager に読み込ませる)
-#   docker compose run --rm tools notify-test   (各通知先にテスト送信して応答を表で確認)
+# 送信先の設定例。alerting/receivers.yaml にコピーして編集 (実ファイルは git 管理外)。
+#   cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/receivers.yaml"  (従来の配置の場合はリポジトリの alerting/)
+#   docker compose run --rm tools targets       (設定を生成し Alertmanager に反映)
+#   docker compose run --rm tools notify-test   (各送信先にテスト送信して応答を表で確認)
 #
-# 秘密値 (Webhook URL・トークン・SMTP パスワード) はここに書かず .env に置く (.env.example の「通知」の節)。
-# 秘密値は種類ごとに 1 組: メール受信者を複数作る場合は同じ SMTP サーバーを使い、宛先 (to) だけ変える。
-# 通知文は日本語。機器名・対象・値・開始時刻 (JST)・画面へのリンク (OBS_PUBLIC_URL) を含み、IP / MAC は伏せ字。
-# 復旧 (resolved) も通知する。demo profile ではこのファイルは使わず、外部へ送らないデモ用受信先に記録するだけ。
+# 秘密値 (Webhook URL・トークン・SMTP パスワード) は本ファイルに記載せず .env に配置 (.env.example の「通知」の節)。
+# 秘密値は種類単位で 1 組: メール受信者の複数作成時は同一の SMTP サーバーを使用し、送信先 (to) のみ変更。
+# 通知文は日本語。機器名・対象・数値・開始時刻 (JST)・画面へのリンク (OBS_PUBLIC_URL) を含み、IP / MAC はマスク表示。
+# 復旧 (resolved) も通知。demo profile では本ファイルは不使用で、外部送信なしのデモ用受信先への記録のみ。
 
 receivers:
   # メール (SMTP)。.env: SMTP_HOST / SMTP_PORT / SMTP_FROM / SMTP_USER / SMTP_PASSWORD / SMTP_TLS (starttls | tls | none)
@@ -23,8 +23,8 @@ receivers:
     type: discord
 
   # LINE (Messaging API の push メッセージ。LINE Notify は 2025 年に終了済み)。
-  # .env: LINE_CHANNEL_ACCESS_TOKEN (チャネルアクセストークン・長期)。to: 送り先のユーザー ID / グループ ID
-  # (公式アカウントを友だち追加 / グループに招待してから。ID は LINE Developers コンソールか webhook で確認)
+  # .env: LINE_CHANNEL_ACCESS_TOKEN (チャネルアクセストークン・長期)。to: 送信先のユーザー ID / グループ ID
+  # (公式アカウントの友だち追加 / グループへの招待後に設定。ID は LINE Developers コンソールか webhook で確認)
   - name: line
     type: line
     to: U00000000000000000000000000000000
@@ -33,14 +33,14 @@ receivers:
   - name: hook
     type: webhook
 
-# 重大度ごとの送り先と再通知の間隔 (解消するまで、この間隔で同じ通知を繰り返す)。
-# 書かない重大度は既定: critical / warning はすべての通知先、info は通知しない。
+# 重大度別の送信先と再通知の間隔 (解消まで、本間隔で同一通知を反復)。
+# 未記載の重大度は既定: critical / warning は全送信先、info は通知対象外。
 routes:
   critical: {receivers: [mail, line], repeat: 1h}
   warning: {receivers: [slack, discord], repeat: 4h}
   info: {receivers: [], repeat: 24h}
 
-# まとめ方 (任意): 最初の通知まで待つ時間 / 同じまとまりに新しいアラートが加わったときの間隔
+# 集約方法 (任意): 初回通知までの待機時間 / 同一グループへの新規アラート追加時の間隔
 timing:
   group_wait: 30s
   group_interval: 5m
