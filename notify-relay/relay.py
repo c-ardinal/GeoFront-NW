@@ -3,7 +3,7 @@
 Alertmanager does the grouping, the routing by severity, the repeats, resolved notifications and silences; each of its
 receivers posts to /notify/<receiver name> here. The relay turns a notification into one Japanese message (IPv4 / MAC
 masked with the same rules as mask-api), sends it to that receiver's destination and records every attempt in Loki
-({job="notify"}): that record is how the command-center shows 通知済み and the next repeat time, and how
+({job="notify"}): that record is how the command-center shows 通知完了 and the next repeat time, and how
 `tools notify-test` reads each destination's answer (HTTP status / SMTP reply).
 
 Why not Alertmanager's own integrations: it has none for the LINE Messaging API, and its results (the HTTP / SMTP answer
@@ -80,8 +80,8 @@ IPV4 = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b")
 MAC = re.compile(r"\b([0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2})\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\2[0-9A-Fa-f]{2}\b")
 
 SEV_JA = {"critical": "重大", "warning": "警告", "info": "情報"}
-NAME_JA = {"DeviceDown": "機器が応答しません", "WanHighUtilization": "WAN の使用率が高い", "InterfaceErrors": "インターフェースのエラーが増加",
-           "DeviceRebooted": "機器が再起動しました", TEST_ALERT: "通知テスト"}
+NAME_JA = {"DeviceDown": "機器応答なし", "WanHighUtilization": "WAN 使用率超過", "InterfaceErrors": "インターフェースのエラーが増加",
+           "DeviceRebooted": "機器再起動", TEST_ALERT: "通知テスト"}
 
 RESULTS = deque(maxlen=1000)  # recent attempts, for GET /results?test=<id>
 _cfg_lock = threading.Lock()
@@ -174,7 +174,7 @@ def alert_block(a):
     if labels.get("ifName"):
         lines.append(f"対象: {labels['ifName']}")
     if ann.get("value"):
-        lines.append(f"値: {ann['value']}")
+        lines.append(f"数値: {ann['value']}")
     lines.append(f"開始: {jst(a.get('startsAt'))}")
     if resolved:
         lines.append(f"復旧: {jst(a.get('endsAt'))}")
@@ -198,7 +198,7 @@ def message(payload, public_url):
     subject = f"[宅内網監視] {head}: {' / '.join(names)}" + (f" ({', '.join(where)})" if where else "")
     body = [f"[宅内網監視] {head}", *(alert_block(a) for a in alerts)]
     if payload.get("truncatedAlerts"):
-        body.append(f"(ほか {payload['truncatedAlerts']} 件は省略)")
+        body.append(f"(他 {payload['truncatedAlerts']} 件は省略)")
     text = mask("\n\n".join(body))
     if public_url:  # the screens' own address (OBS_PUBLIC_URL, set by the operator): not masked, or the link breaks
         text += f"{LINK_PREFIX}{public_url.rstrip('/')}/?open=alerts"
@@ -242,7 +242,7 @@ def http_post(url, body, headers=None, sleep=time.sleep):
             answer = mask(e.read(300).decode("utf-8", "replace")).strip().replace("\n", " ")[:120]
             return False, e.code, f"HTTP {e.code}" + (f" {answer}" if answer else "")
         except (OSError, ValueError) as e:  # timeouts included; no URL in the text: it may carry a token
-            return False, None, f"接続できません ({type(e).__name__})"
+            return False, None, f"接続不可 ({type(e).__name__})"
 
 
 def send_slack(r, subject, text, payload):
@@ -287,7 +287,7 @@ def send_line(r, subject, text, payload, now=None):
     ok, code, detail = http_post(r["api"], {"to": r["to"], "messages": [{"type": "text", "text": clip(text, TEXT_LIMIT["line"])}]},
                                  {"Authorization": f"Bearer {r['token']}", "X-Line-Retry-Key": key})
     if code == 409:  # LINE already accepted this key: delivered only if it was our own earlier attempt of this very push
-        return (True, code, "HTTP 409 (送信済み: 再送の重複を LINE が除外)") if retry else (False, code, "HTTP 409 (再送キーの衝突: 送られていない可能性)")
+        return (True, code, "HTTP 409 (送信完了: 再送重複を LINE 側で除外)") if retry else (False, code, "HTTP 409 (再送キーの衝突: 未送信の可能性)")
     return ok, code, detail
 
 
@@ -328,7 +328,7 @@ def send_email(r, subject, text, payload):
                     refused.append((to, code, answer.decode("utf-8", "replace")[:60]))
             if len(refused) == len(r["to"]):
                 to, code, why = refused[0]
-                return False, code, f"SMTP {code} {why} (宛先 {', '.join(t for t, _, _ in refused)} をすべて拒否)"
+                return False, code, f"SMTP {code} {why} (送信先 {', '.join(t for t, _, _ in refused)} を全件拒否)"
             code, answer = smtp.data(msg.as_bytes(policy=email.policy.SMTP))  # CRLF line ends (RFC 5321)
             detail = f"SMTP {code} {answer.decode('utf-8', 'replace')[:80]}"
             if code == 250 and refused:  # sent, but not to everyone: a failure to report, not to retry (no duplicates)
@@ -338,11 +338,11 @@ def send_email(r, subject, text, payload):
         code = getattr(e, "smtp_code", None)
         return False, code, f"SMTP エラー ({type(e).__name__}{f' {code}' if code else ''})"
     except (OSError, ValueError) as e:
-        return False, None, f"接続できません ({type(e).__name__})"
+        return False, None, f"接続不可 ({type(e).__name__})"
 
 
 def send_sink(r, subject, text, payload):
-    return True, 200, "記録のみ (デモ用の受信先。外部へは送りません)"
+    return True, 200, "記録のみ (デモ用受信先。外部送信なし)"
 
 
 SENDERS = {"email": send_email, "slack": send_slack, "discord": send_discord, "line": send_line, "webhook": send_webhook, "sink": send_sink}
@@ -559,11 +559,11 @@ def selftest():
            "endsAt": "2026-10-26T05:13:04Z", "fingerprint": "fedcba9876543210"}
     subj, body = message({"alerts": [fire, res], "truncatedAlerts": 2}, "http://192.168.100.10:8080")
     assert "192.0.2.10" not in subj + body and "192.0.2.x" in body and "aa:bb:cc:xx:xx:xx" in body, body
-    assert subj == "[宅内網監視] 障害 1 件 / 復旧 1 件: 機器が応答しません (192.0.2.x)", subj
-    for part in ("【重大】 機器が応答しません (DeviceDown)", "開始: 2026-10-26 14:03:04 JST", "値: 0", "【復旧】", "対象: lan2",
-                 "復旧: 2026-10-26 14:13:04 JST", "(ほか 2 件は省略)", "画面: http://192.168.100.10:8080/?open=alerts"):
+    assert subj == "[宅内網監視] 障害 1 件 / 復旧 1 件: 機器応答なし (192.0.2.x)", subj
+    for part in ("【重大】 機器応答なし (DeviceDown)", "開始: 2026-10-26 14:03:04 JST", "数値: 0", "【復旧】", "対象: lan2",
+                 "復旧: 2026-10-26 14:13:04 JST", "(他 2 件は省略)", "画面: http://192.168.100.10:8080/?open=alerts"):
         assert part in body, (part, body)
-    assert message({"alerts": [res]}, "")[0].startswith("[宅内網監視] 復旧 1 件: WAN の使用率が高い")
+    assert message({"alerts": [res]}, "")[0].startswith("[宅内網監視] 復旧 1 件: WAN 使用率超過")
     assert len(clip("x" * 3000, 2000)) == 2000 and clip("abc", 10) == "abc"
     # notify: result per alert, recorded with the repeat interval of its severity; status code for Alertmanager's retry
     cfg = {"receivers": {"s": {"type": "slack", "url": "http://x"}, "m": {"type": "email"}, "d": {"type": "sink"}},

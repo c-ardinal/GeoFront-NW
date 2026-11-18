@@ -59,8 +59,8 @@ TOK = {"v4": re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3})\.x~([0-9a-f]{12})"), "v6":
 V4 = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 MAC = re.compile(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}")
 HOST_VALUE = re.compile(r"[A-Za-z0-9._\-]{1,100}")
-HELP = ("表示フィルタは許可リスト方式です: プロトコル名 (dns など)、ポート・フラグ・長さなどの数値、名前 (dns.qry.name など)、"
-        "アドレスは一覧・詳細から選んだ値 (伏せ字+トークン) との == / != / in {…}。それ以外の書き方は使えません")
+HELP = ("表示フィルタは許可リスト方式です: プロトコル名 (dns 等)、ポート・フラグ・長さ等の数値、名称 (dns.qry.name 等)、"
+        "アドレスは一覧・詳細から選択した値 (マスク+トークン) との == / != / in {…}。その他の構文は使用不可です")
 
 
 class Refused(ValueError):
@@ -72,12 +72,12 @@ def str_value(v, shown=lambda v: True):
     text - every part between . _ - must hold a letter beyond a-f (so "cafe", "ff", "5", "a.b", "abcd)" are refused),
     and no digit next to a dot."""
     if not shown(v):  # content the screens would mask: never searchable
-        raise Refused(f"画面で伏せ字になる値では絞り込めません: {v[:3]}…")
+        raise Refused(f"画面でマスク表示になる値ではフィルタ不可: {v[:3]}…")
     if not HOST_VALUE.fullmatch(v) or re.search(r"\d\.|\.\d", v):
-        raise Refused(f"名前の値はホスト名の形 (英字・数字・. - _) だけです: {v[:40]}")
+        raise Refused(f"名称の値はホスト名形式 (英字・数字・. - _) のみです: {v[:40]}")
     for part in re.split(r"[._\-]+", v):
         if part and not re.search(r"[g-zG-Z]", part):
-            raise Refused(f"16 進数字や数字だけの部分 ({part[:20]}) を含む値は使えません (伏せ字の部分を試せてしまうため)")
+            raise Refused(f"16 進数字・数字のみの部分 ({part[:20]}) を含む値は使用不可です (マスク部分の推測防止のため)")
     return '"' + v + '"'
 
 
@@ -86,13 +86,13 @@ def lex(text):
     while pos < len(text):
         m = LEX.match(text, pos)
         if not m:
-            raise Refused(f"使えない文字・書き方があります (位置 {pos + 1})。{HELP}")
+            raise Refused(f"使用不可の文字・構文があります (位置 {pos + 1})。{HELP}")
         t = m.group(0)
         if not t.isspace():
             out.append(WORD_OPS.get(t.lower(), t) if t.lower() in WORD_OPS else t)
         pos = m.end()
     if len(out) > MAX_TOKENS:
-        raise Refused("表示フィルタが長すぎます (要素が多すぎます)")
+        raise Refused("表示フィルタが長大です (要素数の超過)")
     return out
 
 
@@ -108,7 +108,7 @@ class Parser:
     def take(self, want=None):
         t = self.peek()
         if t is None or (want is not None and t != want):
-            raise Refused(f"表示フィルタの書き方が違います ({'終わり' if t is None else t[:20]} の位置)。{HELP}")
+            raise Refused(f"表示フィルタの構文が不正です ({'末尾' if t is None else t[:20]} の位置)。{HELP}")
         self.i += 1
         return t
 
@@ -144,16 +144,16 @@ class Parser:
             raise Refused(f"フィールド名ではありません: {f[:30]}。{HELP}")
         self.fields.add(f)
         if len(self.fields) > MAX_FIELDS:
-            raise Refused(f"フィールドは {MAX_FIELDS} 種類まで")
+            raise Refused(f"フィールドは {MAX_FIELDS} 種類が上限")
         kind = self.kind_of(f)
         if kind is None:
-            raise Refused(f"{f}: このフィールドは絞り込みに使えません (許可リスト外。チェックサム・バイト列・内容そのものは不可)")
+            raise Refused(f"{f}: 本フィールドはフィルタに使用不可です (許可リスト外。チェックサム・バイト列・内容自体は不可)")
         op = self.peek()
         negate = op == "!" and self.peek(1) == "in"
         if op not in NUM_OPS | {"contains", "in"} and not negate:
             return f  # presence
         if kind in ("protocol", "flag"):
-            raise Refused(f"{f}: プロトコル・フラグは有無 ({f} / !{f}) だけで絞り込めます")
+            raise Refused(f"{f}: プロトコル・フラグは有無 ({f} / !{f}) のみでフィルタ可能です")
         if negate:
             self.take()
         if self.peek() == "in":
@@ -167,7 +167,7 @@ class Parser:
             return f"{f} {'not in' if negate else 'in'} {{{', '.join(vals)}}}"
         self.take()
         if (kind == "num" and op == "contains") or (kind != "num" and op not in EQ_OPS and not (kind == "str" and op == "contains")):
-            raise Refused(f"{f}: この比較 ({op}) は使えません (== / != {'/ contains ' if kind == 'str' else ''}だけ)")
+            raise Refused(f"{f}: 本比較 ({op}) は使用不可です (== / != {'/ contains ' if kind == 'str' else ''}のみ)")
         return f"{f} {op} {self.value(f, kind)}"
 
     def value(self, f, kind, in_set=False):
@@ -183,7 +183,7 @@ class Parser:
             return str_value(v[1:-1] if v.startswith('"') else v, self.shown)
         m = TOK[kind].fullmatch(v)
         if not m:
-            raise Refused(f"{f}: アドレスは一覧・詳細から選んだ値 (伏せ字+トークン) で指定してください")
+            raise Refused(f"{f}: アドレスは一覧・詳細から選択した値 (マスク+トークン) で指定してください")
         real = self.tokens.get(m.group(2))
         fam = None if not real else "v4" if V4.fullmatch(real) else "mac" if MAC.fullmatch(real) else "v6"
         if fam != kind or (kind == "v4" and not real.startswith(m.group(1) + ".")):
@@ -196,20 +196,20 @@ def check(text, protocols_of, tokens, shown=lambda v: True):
     tokens: token -> real address. Raises Refused."""
     text = (text or "").strip()
     if len(text) > FILTER_MAX:
-        raise Refused(f"表示フィルタは {FILTER_MAX} 文字まで")
+        raise Refused(f"表示フィルタの上限は {FILTER_MAX} 文字")
     if not text:
         return ""
     toks = lex(text)
     toks = [{"contains": "contains", "in": "in"}.get(t.lower(), t) if t.lower() in ("contains", "in") else t for t in toks]
     unknown = sorted({t for t in toks if FIELD_RE.fullmatch(t) and t not in FIELDS and t not in ("in", "contains")})
     if len(unknown) > MAX_FIELDS:
-        raise Refused(f"フィールドは {MAX_FIELDS} 種類まで")
+        raise Refused(f"フィールドは {MAX_FIELDS} 種類が上限")
     protos = protocols_of(unknown) if unknown else set()
     kind_of = lambda f: FIELDS.get(f) or ("protocol" if f in protos else None)
     p = Parser(toks, kind_of, tokens, shown)
     out = p.expr()
     if p.peek() is not None:
-        raise Refused(f"表示フィルタの書き方が違います ({p.peek()[:20]} の位置)。{HELP}")
+        raise Refused(f"表示フィルタの構文が不正です ({p.peek()[:20]} の位置)。{HELP}")
     return out
 
 

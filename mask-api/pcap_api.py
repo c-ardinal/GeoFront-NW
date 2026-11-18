@@ -393,7 +393,7 @@ def read_budget():
             _reads.clear()
         times = [t for t in _reads.get(who, []) if now - t < 60]
         if len(times) >= READS_PER_MIN:
-            raise Busy("解析の要求が多すぎます。1 分待ってください")
+            raise Busy("解析リクエストが過多です。1 分間待機してください")
         _reads[who] = times + [now]
 
 
@@ -595,9 +595,9 @@ def file_ref(fid):
     try:
         st = os.stat(path, follow_symlinks=False)
     except OSError:
-        raise Refused("ファイルがありません (保存期間を過ぎて削除されたかもしれません)") from None
+        raise Refused("ファイルが存在しません (保存期間超過による削除の可能性)") from None
     if kind == "ring" and name == ring_current():
-        raise Refused("このリングファイルは記録中です。閉じてから (次のファイルに切り替わってから) 開いてください")
+        raise Refused("本リングファイルは記録中です。クローズ後 (次ファイルへの切替後) に表示してください")
     return {"root": kind, "name": name}, (fid, st.st_size, st.st_mtime)
 
 
@@ -625,7 +625,7 @@ class Lru:
                     return self.d[key]
             if getattr(ev, "error", None) is not None:
                 raise ev.error  # the same refusal / timeout the computing request got
-            raise Busy("同じ解析が進行中です。もう一度試してください")
+            raise Busy("同一解析が進行中です。再試行してください")
         try:
             val = make()
             with self.lock:
@@ -766,7 +766,7 @@ def safe_name(name):
     base = os.path.basename(name or "")
     ext = next((s for s in SUFFIXES if base.lower().endswith(s)), None)
     if not ext:
-        raise Refused("拡張子は .pcap / .pcapng / .cap だけです")
+        raise Refused("対応拡張子は .pcap / .pcapng / .cap のみです")
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", base[: -len(ext)]).strip("._-")[:48] or "capture"
     return stem + ext
 
@@ -778,12 +778,12 @@ def upload(params, headers, read_body):
         raise Refused("Content-Length required")
     size = int(length)
     if size > UPLOAD_MAX:
-        return err(413, f"ファイルが大きすぎます (上限 {UPLOAD_MAX // 2**20} MB)")
+        return err(413, f"ファイルサイズ超過 (上限 {UPLOAD_MAX // 2**20} MB)")
     if size > UPLOADS_TOTAL_MAX:
-        return err(413, f"アップロードの合計上限 ({UPLOADS_TOTAL_MAX // 2**20} MB) を超えます")
+        return err(413, f"アップロードの合計上限 ({UPLOADS_TOTAL_MAX // 2**20} MB) を超過します")
     head = read_body(min(size, 12))
     if head[:4] not in MAGIC or (head[:4] == b"\x0a\x0d\x0d\x0a" and head[8:12] not in (b"\x4d\x3c\x2b\x1a", b"\x1a\x2b\x3c\x4d")):
-        return err(400, "pcap / pcapng ではありません (先頭のマジックバイトが違います)")
+        return err(400, "pcap / pcapng 形式ではありません (先頭のマジックバイトが不一致)")
     part = UPLOADS / f".part-{secrets.token_hex(8)}"
     stored = f"u{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{secrets.token_hex(6)}{os.path.splitext(name)[1].lower()}"
     try:
@@ -802,15 +802,15 @@ def upload(params, headers, read_body):
         try:
             analyzer({"op": "validate", "file": {"root": "upload", "name": stage.name}}, timeout=VALIDATE_TIMEOUT_S + 30)  # every record, to the end
         except (Busy, AnalyzerDown):
-            return err(503, "解析器が混雑しているか止まっています。後で再試行してください (既存のアップロードはそのままです)", "busy")
+            return err(503, "解析器が混雑中または停止中です。後刻再試行してください (既存のアップロードは保持)", "busy")
         except Refused as e:
             if str(e).startswith("timeout"):
-                return err(413, f"ファイルが大きすぎて {VALIDATE_TIMEOUT_S} 秒以内に最後まで確かめられませんでした (既存のアップロードはそのままです)", "too_large")
-            return err(400, f"tshark で読めないファイルです: {mask_message(str(e))[:200]}")
+                return err(413, f"ファイルサイズが大きく、{VALIDATE_TIMEOUT_S} 秒以内に全体の検証が未完了です (既存のアップロードは保持)", "too_large")
+            return err(400, f"tshark で読込不可のファイルです: {mask_message(str(e))[:200]}")
         with UPLOAD_LOCK:  # two uploads at once cannot both pass the quota
             removed, total = prune_uploads(need=size)
             if total + size > UPLOADS_TOTAL_MAX:
-                return err(413, f"アップロードの合計上限 ({UPLOADS_TOTAL_MAX // 2**20} MB) を超えます")
+                return err(413, f"アップロードの合計上限 ({UPLOADS_TOTAL_MAX // 2**20} MB) を超過します")
             (UPLOADS / f".{stored}.json").write_text(json.dumps({"name": mask_free(name)}))
             os.replace(stage, UPLOADS / stored)
     finally:

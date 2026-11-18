@@ -3,7 +3,7 @@
 // Optional BROWSER_LOCK=<dir>: created while the browser runs (one browser at a time), removed at the end.
 // Both themes x 390 / 768 / 1280 / 1920 / 2560 px: the views open from the panel headings (no new top-bar item), draw
 // (SVG or "—"), at most 600 points per series, no horizontal overflow, >= 44 px targets below 1280 px; then once:
-// legend toggle, keyboard readout, drag-to-zoom + 拡大を戻す, presets, log search (marks, histogram, refused regex,
+// legend toggle, keyboard readout, drag-to-zoom + 拡大解除, presets, log search (marks, histogram, refused regex,
 // selected line -> 原因候補), drawer deep links, LITE mode and PLAYBACK (the window ends at the cursor). F2: the devices
 // modal / device drawer freshness ("Last seen" per device, "Data freshness (worst)").
 // One line per check (OK / NG); exit 1 when any is NG. Read-only: nothing is written to the stack.
@@ -94,8 +94,8 @@ async function trendDeep(page) {
   await page.mouse.up();
   await page.waitForFunction(() => !document.querySelector('#modal .tr-acts .link-btn').disabled, null, { timeout: 15000 });
   const zoomed = await page.textContent('#modal .tr-note');
-  check('drag zooms into the span (拡大を戻す enabled)', /分|時間/.test(zoomed), zoomed.split('·')[0]);
-  await page.locator('#modal .tr-acts .link-btn', { hasText: '拡大を戻す' }).click();
+  check('drag zooms into the span (拡大解除 enabled)', /分|時間/.test(zoomed), zoomed.split('·')[0]);
+  await page.locator('#modal .tr-acts .link-btn', { hasText: '拡大解除' }).click();
   await page.locator('#modal .seg-btn', { hasText: '7d' }).click();
   await page.waitForFunction(() => /^7 日/.test(document.querySelector('#modal .tr-note')?.textContent || ''), null, { timeout: 30000 });
   const n7 = await page.textContent('#modal .tr-note');
@@ -103,11 +103,11 @@ async function trendDeep(page) {
   check('preset 7d: step sized for <= 600 points, the newest values included', p7 > 0 && p7 <= 600, n7.split('·').slice(0, 3).join('·'));
   // another family / scope: interface drops (the testbed may not answer them: "—" is the right answer then)
   await page.selectOption('#modal .tr-bar select', 'if_drops');
-  await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash') && !/読み込み中/.test(document.querySelector('#modal .tr-status').textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash') && !/読込中/.test(document.querySelector('#modal .tr-status').textContent), null, { timeout: 30000 });
   const d = await modalInfo(page);
   check('family switch: IF の破棄 draws or says "—"', d.svg || d.dash, d.dash ? '—' : `${d.paths} lines`);
   await page.selectOption('#modal .tr-bar select', 'flow_country');
-  await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash') && !/読み込み中/.test(document.querySelector('#modal .tr-status').textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash') && !/読込中/.test(document.querySelector('#modal .tr-status').textContent), null, { timeout: 30000 });
   const fl = await page.evaluate(() => document.querySelectorAll('#modal .tr-area').length);
   check('flows by country are stacked areas', fl > 0 || (await modalInfo(page)).dash, `${fl} areas`);
   await shot(page, 'trend-flows');
@@ -120,7 +120,7 @@ async function searchDeep(page) {
   const word = await page.evaluate(() => (document.querySelector('#modal .ls-row .log-m').textContent.match(/[A-Za-z]{4,}/) || ['LAN'])[0]);
   await page.fill('#modal .ls-q input', word.toLowerCase());
   await page.click('#modal .ls-go');
-  await page.waitForFunction(() => /行 \(新しい順\)|一致する行はありません/.test(document.querySelector('#modal .v-meta-line').textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => /行 \(最新順\)|一致行なし/.test(document.querySelector('#modal .v-meta-line').textContent), null, { timeout: 30000 });
   const m = await page.evaluate(() => { const rows = [...document.querySelectorAll('#modal .ls-row')]; return { n: rows.length, marked: rows.filter((r) => r.querySelector('mark')).length }; });
   check(`keyword "${word.toLowerCase()}": every line marked (case-insensitive)`, m.n > 0 && m.marked === m.n, `${m.marked}/${m.n}`);
   const bars = await page.evaluate(() => document.querySelectorAll('#modal .ls-col').length);
@@ -131,7 +131,7 @@ async function searchDeep(page) {
   await page.fill('#modal .ls-q input', '(a+)+$');
   await page.check('#modal .ls-bar input[type="checkbox"]');
   await page.click('#modal .ls-go');
-  await page.waitForFunction(() => /検索できません/.test(document.querySelector('#modal .v-meta-line').textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => /検索不可/.test(document.querySelector('#modal .v-meta-line').textContent), null, { timeout: 30000 });
   check('unsafe regex refused with the reason', true, (await page.textContent('#modal .v-meta-line')).slice(0, 60));
   await page.uncheck('#modal .ls-bar input[type="checkbox"]');
   await page.fill('#modal .ls-q input', '');
@@ -151,10 +151,10 @@ async function drawerLinks(page) {
   if (await page.evaluate(() => getComputedStyle(document.getElementById('tabs')).display !== 'none')) await page.click('#tabs button[data-tab="sum"]');
   await page.locator('#devices .row.clickable').first().click();
   await page.waitForSelector('#drawer:not([hidden])');
-  await page.locator('#drawer .link-btn', { hasText: '推移を見る' }).click();
+  await page.locator('#drawer .link-btn', { hasText: '推移を表示' }).click();
   await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash'), null, { timeout: 30000 });
   const sel = await page.evaluate(() => [...document.querySelectorAll('#modal .tr-scope select')].map((s) => s.value));
-  check('device drawer -> 推移を見る (the device kept)', sel[0] && sel[0] !== '', sel.join(','));
+  check('device drawer -> 推移を表示 (the device kept)', sel[0] && sel[0] !== '', sel.join(','));
   await page.keyboard.press('Escape');
   await page.locator('#devices .row.clickable').first().click();
   await page.waitForSelector('#drawer:not([hidden])');
@@ -196,7 +196,7 @@ async function drawerFreshness(page) {
 }
 
 // destination drawers (needs flows, e.g. the demo profile): a country and an address-level (UNKNOWN GEO) destination
-// both offer 推移を見る with the destination's country kept
+// both offer 推移を表示 with the destination's country kept
 async function destLinks(page) {
   for (const [list, what] of [['#dest', 'country'], ['#unknown', 'address']]) {
     const row = page.locator(`${list} .row.clickable`).first();
@@ -204,8 +204,8 @@ async function destLinks(page) {
     if (await page.evaluate(() => getComputedStyle(document.getElementById('tabs')).display !== 'none')) await page.click('#tabs button[data-tab="net"]');
     await row.click();
     await page.waitForSelector('#drawer:not([hidden])');
-    const link = page.locator('#drawer .link-btn', { hasText: '推移を見る' }).first();
-    check(`destination drawer (${what}) offers 推移を見る`, (await link.count()) > 0);
+    const link = page.locator('#drawer .link-btn', { hasText: '推移を表示' }).first();
+    check(`destination drawer (${what}) offers 推移を表示`, (await link.count()) > 0);
     if (!(await link.count())) { await page.keyboard.press('Escape'); continue; }
     await link.click();
     await page.waitForFunction(() => document.querySelector('#modal .tr-svg, #modal .tr-dash'), null, { timeout: 30000 });

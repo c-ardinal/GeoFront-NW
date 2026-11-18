@@ -303,7 +303,7 @@ def wan_rules(wan):
          "expr": f"rate(ifHCInOctets{{{sel}}}[2m]) * 8\n  / (ifHighSpeed{{{sel}}} * 1e6) * 100 > 80\n",
          "for": "30s", "labels": {"severity": "warning"},
          "annotations": {"summary": f'WAN ({where}) download utilization {{{{ $value | printf "%.0f" }}}}%',
-                         "summary_ja": f'WAN ({where}) の下り使用率が {{{{ $value | printf "%.0f" }}}}% です (80% 超)',
+                         "summary_ja": f'WAN ({where}) の受信方向使用率が {{{{ $value | printf "%.0f" }}}}% です (80% 超過)',
                          "value": '{{ $value | printf "%.0f" }}%'}}]}]}
 
 
@@ -2026,7 +2026,7 @@ def selftest():
     wrules = wan_rules(wan_of(wrows, demo=False))["groups"][0]["rules"]
     rule = next(r for r in wrules if r.get("alert") == "WanHighUtilization")
     assert 'ifHighSpeed{job="snmp",instance="rtx1300",ifName="lan2"}' in rule["expr"] and rule["annotations"]["summary"].startswith("WAN (rtx1300 lan2)")
-    assert rule["annotations"]["summary_ja"].startswith("WAN (rtx1300 lan2) の下り使用率") and rule["annotations"]["value"]
+    assert rule["annotations"]["summary_ja"].startswith("WAN (rtx1300 lan2) の受信方向使用率") and rule["annotations"]["value"]
     assert not [r for r in wrules if "record" in r]
     notify.selftest(good)
     cap.selftest()

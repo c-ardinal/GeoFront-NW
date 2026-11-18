@@ -52,7 +52,7 @@
   <section id="playback" class="pb" aria-label="履歴再生の操作" lang="ja" hidden>
     <span class="pb-tag" aria-hidden="true">履歴再生</span>
     <div class="pb-range">
-      <button id="pb-range-btn" type="button" class="pb-btn pb-range-btn" aria-expanded="false" aria-controls="pb-pop" title="再生する期間を変える">—</button>
+      <button id="pb-range-btn" type="button" class="pb-btn pb-range-btn" aria-expanded="false" aria-controls="pb-pop" title="再生期間の変更">—</button>
       <div id="pb-pop" class="pb-pop" role="group" aria-label="再生する期間" hidden>
         <div id="pb-presets" class="pb-presets" role="group" aria-label="直近"></div>
         <label class="pb-fld">開始 (JST)<input id="pb-from" type="datetime-local"></label>
@@ -62,13 +62,13 @@
       </div>
     </div>
     <button id="pb-play" type="button" class="pb-btn pb-play">▶ 再生</button>
-    <button id="pb-step" type="button" class="pb-btn" title="15 秒進める (1 ステップ)">▶| コマ送り</button>
+    <button id="pb-step" type="button" class="pb-btn" title="15 秒前進 (1 ステップ)">▶| 1 ステップ</button>
     <label class="pb-fld pb-speed-l"><span class="sr-only">再生速度</span><select id="pb-speed" aria-label="再生速度"></select></label>
     <input id="pb-slider" class="pb-slider" type="range" aria-label="再生位置">
-    <button id="pb-export" type="button" class="pb-btn" title="この期間の証跡 (伏せ字済みの zip) を出力">証跡を出力</button>
-    <label class="pb-fld pb-snap" title="画面のスナップショット (PNG) を証跡に含める: このブラウザで今の画面 (伏せ字済み) を画像にします"><input id="pb-snap" type="checkbox"> 画像</label>
-    <button id="pb-corr" type="button" class="pb-btn" title="再生位置の前後に起きたこと (原因候補、相関の候補)">原因候補</button>
-    <button id="pb-live" type="button" class="pb-btn pb-live" title="WALLBOARD・直近 15 分・自動更新に戻る">● LIVE に戻る</button>
+    <button id="pb-export" type="button" class="pb-btn" title="本期間の証跡 (マスク処理済の zip) を出力">証跡を出力</button>
+    <label class="pb-fld pb-snap" title="画面スナップショット (PNG) の証跡同梱: 本ブラウザで現在の画面 (マスク処理済) を画像化"><input id="pb-snap" type="checkbox"> 画像</label>
+    <button id="pb-corr" type="button" class="pb-btn" title="再生位置前後の発生事象 (原因候補・相関候補)">原因候補</button>
+    <button id="pb-live" type="button" class="pb-btn pb-live" title="WALLBOARD・直近 15 分・自動更新へ復帰">● LIVE へ復帰</button>
     <p id="pb-status" class="pb-status" role="status"></p>
   </section>
 
@@ -116,8 +116,8 @@
       <div class="caption"><span class="cap-globe">Arcs = logical relation to GeoIP estimate, not physical routes.
         Origin = coarse home region (logical origin, not exact address).
         <span class="legend"><i class="lg-out"></i>OUTBOUND <i class="lg-in"></i>INBOUND</span>
-        <span class="geo-note" id="geo-note"></span></span><span class="cap-topo" lang="ja">線の出所: <span class="lg-src lg-inv">台帳</span> 実線 = 機器台帳 · <span class="lg-src lg-lldp">LLDP</span> 破線 = LLDP-MIB で取れた隣接 · 台帳+LLDP = 両方。
-        線の % = その IF の利用率 (rate 2 min、in / out の大きい方)、ERR = エラーの有無。矢印キーで機器を移動、Enter で詳細。</span></div>
+        <span class="geo-note" id="geo-note"></span></span><span class="cap-topo" lang="ja">線の出所: <span class="lg-src lg-inv">台帳</span> 実線 = 機器台帳 · <span class="lg-src lg-lldp">LLDP</span> 破線 = LLDP-MIB で取得した隣接 · 台帳+LLDP = 双方。
+        線の % = 当該 IF の利用率 (rate 2 min、in / out の最大値)、ERR = エラーの有無。方向キーで機器間を移動、Enter で詳細表示。</span></div>
     </section>
 
     <div class="col" id="col-right">

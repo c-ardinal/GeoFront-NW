@@ -447,7 +447,7 @@ export function alertsModal() {
         extra: r.summary ? el('p', 'card-note', r.summary) : null,
       }), (r) => maskText(alertKey(r.raw.labels)));
       sil = silenceSection({ devices: () => DEVICES, alertNames });
-      body.append(sum, s1.wrap, listSection('Firing and pending alerts', 'notification: 通知済 · 抑止中 · 確認済 (ACK) · 未通知', dv).wrap, sil.wrap);
+      body.append(sum, s1.wrap, listSection('Firing and pending alerts', 'notification: 通知完了 · 抑止中 · 確認完了 (ACK) · 未通知', dv).wrap, sil.wrap);
     },
     async update(ctx) {
       last = ctx;
@@ -488,7 +488,7 @@ export function alertsModal() {
 
 // ---- syslog viewer ---------------------------------------------------------------------------------
 const PAGE = 200;
-const REJECTED = 'この条件は検索できません: 完全なアドレス / 部分アドレス (例 113.50) は指定できません。伏せた形 (例 203.0.113.x) で指定してください。';
+const REJECTED = 'この条件は検索不可: 完全なアドレス / 部分アドレス (例 113.50) は指定不可です。マスク形式 (例 203.0.113.x) で指定してください。';
 export function logsModal(init = {}) {
   const f = { host: init.host || '', sev: init.sev || '', text: init.text || '', win: init.win || 900, follow: true };
   let list, count, more, scanNote, sum, chartBox, cs, staleTag, chartNote, entries = [], cursorEnd = null, partial = false, ctxRef, seq = 0, shown = null, chartShown = null;

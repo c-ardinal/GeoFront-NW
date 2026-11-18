@@ -9,7 +9,7 @@ import { $, el, isPlayback, jstFull } from './util.js';
 import { evidenceInfo } from './api.js';
 import * as UI from './ui.js';
 
-const STEP_S = 15; // the "コマ送り" step, the slider resolution and the 1x pacing (kept at 15 s with the 30 s scrape interval)
+const STEP_S = 15; // the "1 ステップ" step, the slider resolution and the 1x pacing (kept at 15 s with the 30 s scrape interval)
 const MIN_BATCH_MS = 1000;
 const MAX_RANGE_S = 7 * 86400; // mask-api's evidence window cap, and the longest preset
 const SPEEDS = [0.5, 1, 2, 4, 8];
@@ -36,20 +36,20 @@ async function loadRetention() {
   try {
     const i = await evidenceInfo();
     const r = [i.retention_s?.prometheus, i.retention_s?.loki].filter((x) => Number.isFinite(x) && x > 0);
-    retention = { loaded: true, s: r.length ? Math.min(...r) : null, why: r.length ? '' : '保持期間を確認できません (範囲外の時刻は「—」になります)' };
+    retention = { loaded: true, s: r.length ? Math.min(...r) : null, why: r.length ? '' : '保持期間の確認不能 (範囲外の時刻は「—」表示)' };
   } catch {
-    retention = { loaded: false, s: null, why: '保持期間を確認できません (mask-api に接続できない)' };
+    retention = { loaded: false, s: null, why: '保持期間の確認不能 (mask-api 接続不可)' };
   }
   return retention;
 }
 // -> '' when [from, to] can be played, else the reason it cannot
 function rangeProblem(from, to) {
   const nowMs = Date.now();
-  if (!Number.isFinite(from) || !Number.isFinite(to)) return '開始と終了の時刻を入れてください';
-  if (to <= from) return '終了は開始より後にしてください';
-  if (to - from > MAX_RANGE_S * 1000) return '期間は 7 日以内にしてください (証跡出力の上限と同じ)';
-  if (to > nowMs + 60e3) return '未来の時刻は再生できません';
-  if (retention.s && from < nowMs - retention.s * 1000) return `保持期間外です (保存は直近 ${durText(retention.s)} まで: Prometheus / Loki の保持期間)`;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return '開始時刻と終了時刻を入力してください';
+  if (to <= from) return '終了時刻は開始時刻以降に設定してください';
+  if (to - from > MAX_RANGE_S * 1000) return '期間は 7 日以内に設定してください (証跡出力の上限と同一)';
+  if (to > nowMs + 60e3) return '未来時刻の再生は不可';
+  if (retention.s && from < nowMs - retention.s * 1000) return `保持期間外です (保存範囲は直近 ${durText(retention.s)}: Prometheus / Loki の保持期間)`;
   return '';
 }
 
@@ -127,7 +127,7 @@ function validate() {
   for (const b of $('pb-presets').querySelectorAll('button')) {
     const s = Number(b.dataset.s);
     b.disabled = !!(retention.s && s > retention.s);
-    b.title = b.disabled ? `保持期間外 (直近 ${durText(retention.s)} まで)` : `直近 ${b.textContent} を再生`;
+    b.title = b.disabled ? `保持期間外 (保存範囲は直近 ${durText(retention.s)})` : `直近 ${b.textContent} を再生`;
   }
   const why = rangeProblem(fromInput($('pb-from').value), fromInput($('pb-to').value));
   $('pb-apply').disabled = !!why;

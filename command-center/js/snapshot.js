@@ -27,7 +27,7 @@ function canvasPictures() {
   return [...document.querySelectorAll('canvas')].map((c) => {
     const r = c.getBoundingClientRect();
     if (!r.width || !r.height || !c.width || !c.height) return null;
-    try { return c.toDataURL('image/png'); } catch (e) { throw new Error(`画面の一部 (canvas) を読めません: ${e.name || e}`); }
+    try { return c.toDataURL('image/png'); } catch (e) { throw new Error(`画面の一部 (canvas) の読取不可: ${e.name || e}`); }
   });
 }
 
@@ -106,7 +106,7 @@ export async function snapshotPng() {
   const h = window.innerHeight;
   const img = new Image();
   img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgOf(w, h))}`;
-  try { await img.decode(); } catch { throw new Error('画面を画像にできません (このブラウザは画面の描き出しに対応していません)'); }
+  try { await img.decode(); } catch { throw new Error('画面の画像化に失敗 (本ブラウザは画面の描画出力に非対応)'); }
   const scale = Math.min(window.devicePixelRatio || 1, 2, MAX_SIDE / w, MAX_SIDE / h);
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.round(w * scale));
@@ -117,9 +117,9 @@ export async function snapshotPng() {
   g.drawImage(img, 0, 0, out.width, out.height);
   return new Promise((resolve, reject) => {
     try {
-      out.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG を作れません'))), 'image/png');
+      out.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG の生成に失敗'))), 'image/png');
     } catch (e) { // a tainted canvas (browsers that treat <foreignObject> pictures as cross-origin)
-      reject(new Error(`このブラウザでは画面を PNG にできません (${e.name || e})`));
+      reject(new Error(`本ブラウザでは画面の PNG 化が不可 (${e.name || e})`));
     }
   });
 }

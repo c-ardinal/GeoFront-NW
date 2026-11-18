@@ -33,7 +33,7 @@ const exportReq = (q, png) => fetch(`/evidence/export?${q}`, png
 async function takeSnapshot() {
   try {
     const png = await snapshotPng();
-    return png.size > SNAP_MAX ? { png: null, why: `画像が大きすぎます (${fmtBytes(png.size)})` } : { png, why: '' };
+    return png.size > SNAP_MAX ? { png: null, why: `画像サイズ超過 (${fmtBytes(png.size)})` } : { png, why: '' };
   } catch (e) {
     return { png: null, why: String(e.message || e) };
   }
@@ -43,7 +43,7 @@ export async function downloadEvidence(params, button, status, { snapshot = fals
   const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ''));
   const shot = snapshot ? takeSnapshot() : null;
   button.disabled = true;
-  status.textContent = '証跡を作成中… (サーバ側で伏せ字済みのデータを集めています)';
+  status.textContent = '証跡を作成中… (サーバ側でマスク処理済データを収集中)';
   try {
     let { png, why } = shot ? await shot : { png: null, why: '' };
     let r = await exportReq(q, png);
@@ -69,12 +69,12 @@ export async function downloadEvidence(params, button, status, { snapshot = fals
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
     const sent = png ? r.headers.get('X-Obs-Snapshot') || '' : ''; // what the server put in the zip
-    if (png && sent !== 'included') why = sent ? `サーバが入れませんでした (${sent})` : 'サーバの応答に記録がありません';
+    if (png && sent !== 'included') why = sent ? `サーバ側で同梱失敗 (${sent})` : 'サーバ応答に記録なし';
     const snapNote = !snapshot ? '' : sent === 'included' ? ' · スナップショットあり' : ` · スナップショットなし: ${maskText(why)}`;
-    status.textContent = `出力しました: ${name} (${fmtBytes(blob.size)})${snapNote}`;
+    status.textContent = `出力完了: ${name} (${fmtBytes(blob.size)})${snapNote}`;
     status.title = status.textContent;
   } catch (e) {
-    status.textContent = `出力できません: ${maskText(String(e.message || e))}`;
+    status.textContent = `出力不可: ${maskText(String(e.message || e))}`;
     status.title = status.textContent;
   } finally {
     button.disabled = false;
@@ -88,7 +88,7 @@ export function snapshotGate(input, label) {
     input.checked = false;
     input.disabled = true;
     label.classList.add('is-off');
-    label.title = `画面の画像は入れられません: ${o?.reason || '操作の可否を確認できません'}`;
+    label.title = `画面画像の同梱不可: ${o?.reason || '操作可否の確認不能'}`;
   }).catch(() => {});
 }
 
@@ -112,20 +112,20 @@ export function evidenceSection(scopeOf, sinceOf = () => undefined) {
   b.setAttribute('aria-label', 'Export evidence: download a zip of the masked metrics, logs and alert history of this item');
   const l = el('label', 'fld', 'パケット統計');
   const sel = el('select');
-  const none = el('option', '', '含めない');
+  const none = el('option', '', '同梱なし');
   none.value = '';
   sel.append(none);
   l.append(sel);
   const sl = el('label', 'fld chk');
   const snap = el('input');
   snap.type = 'checkbox'; // off by default, not remembered
-  sl.title = '画面のスナップショット (PNG) を含める: このブラウザで今の画面 (伏せ字済み) を画像にします';
+  sl.title = '画面スナップショット (PNG) の同梱: 本ブラウザで現在の画面 (マスク処理済) を画像化';
   sl.append(snap, document.createTextNode(' 画面の画像'));
   snapshotGate(snap, sl);
   row.append(b, l, sl);
   const status = el('p', 'ops-note ops-status');
   status.setAttribute('role', 'status');
-  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip にします。期間は履歴再生中はその範囲、ライブでは直近 1 時間です。生アドレス・生 pcap は含みません。「画面の画像」で今の画面の PNG (snapshot.png) も入れます (ログインありでは operator 以上)。');
+  const note = el('p', 'v-p', 'メトリクス (CSV)・syslog・アラート履歴と通知記録・版情報を zip 化します。期間は履歴再生中は再生範囲、ライブ時は直近 1 時間です。生アドレス・生 pcap は対象外です。「画面の画像」選択時は現在画面の PNG (snapshot.png) も同梱します (ログイン有効時は operator 以上)。');
   s.body.append(row, status, note);
   pcapOptions(sel); // listed when the drawer opens
   b.addEventListener('click', () => {

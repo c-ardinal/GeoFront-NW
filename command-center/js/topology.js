@@ -171,7 +171,7 @@ function setOn(on, persist) {
   const b = $('g-view');
   b.textContent = on ? '地球儀' : 'ネットワーク図';
   b.setAttribute('aria-pressed', String(on));
-  b.title = on ? '地球儀 (通信先) に切り替える' : 'ネットワーク図 (機器のつながり) に切り替える';
+  b.title = on ? '地球儀 (通信先) へ切替' : 'ネットワーク図 (機器の接続関係) へ切替';
   st.hooks.setGlobe(!on);
   st.hooks.onChange(on);
   if (on) render();
@@ -219,7 +219,7 @@ function build() {
   canvas.append(svg);
   if (g.orphans.length && lay.orphanDepth >= 0) {
     const y = PAD + lay.orphanDepth * (NODE_H + V_GAP) - 22;
-    const t = el('div', 'topo-row-note', '接続先未設定 (台帳に parent が無い機器)');
+    const t = el('div', 'topo-row-note', '接続先未設定 (台帳に parent 未指定の機器)');
     t.style.top = `${y}px`;
     canvas.append(t);
   }

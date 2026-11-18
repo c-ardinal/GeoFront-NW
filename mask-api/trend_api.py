@@ -84,7 +84,7 @@ def flows_by(label):
 
 def capture_pps(scope, w):
     return [("rx", "受信 packets/s", f"sum(rate(obs_capture_packets_received_total[{w}]))"),
-            ("drop", "NIC の取りこぼし packets/s", f"sum(rate(obs_capture_nic_rx_dropped_total[{w}]))")]
+            ("drop", "NIC の受信欠落 packets/s", f"sum(rate(obs_capture_nic_rx_dropped_total[{w}]))")]
 
 
 # name -> (title, unit, scope keys allowed, scope keys required, stacked, builder(scope, rate window) -> [(key, label, query)])
@@ -96,13 +96,13 @@ FAMILIES = {
     "dev_up": ("機器の UP (1 = UP、0 = DOWN)", "", ("instance",), (), False, per_device(lambda s, w: f"up{s}")),
     "dev_uptime": ("機器の稼働時間", "日", ("instance",), (), False, per_device(lambda s, w: f"(sysUpTime{s} / 100 / 86400) {SNMP_UP}")),
     "wan_util": ("WAN の利用率", "%", ("instance", "ifName"), ("instance", "ifName"), False, wan_util),
-    "flow_country": ("通信先の国ごとの量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("dst_country")),
-    "flow_asn": ("通信先の ASN ごとの量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("asn")),
-    "flow_host": ("LAN の端末ごとの量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("src_host")),
-    "wlan_clients": ("無線の端末数", "台", ("instance",), (), False,
+    "flow_country": ("通信先の国別通信量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("dst_country")),
+    "flow_asn": ("通信先の ASN 別通信量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("asn")),
+    "flow_host": ("LAN 端末別の通信量", "bps", ("dst_country", "asn", "src_host"), (), True, flows_by("src_host")),
+    "wlan_clients": ("無線端末数", "台", ("instance",), (), False,
                      lambda scope, w: [("instance", None, f"(sum by (instance) (demo_wlan_clients{sel(scope, ('instance',), base='')})) {SNMP_UP}")]),
-    "capture_pps": ("パケット取込の量", "packets/s", (), (), False, capture_pps),
-    "capture_ring": ("取込リングの使用率", "%", (), (), False,
+    "capture_pps": ("パケットキャプチャ量", "packets/s", (), (), False, capture_pps),
+    "capture_ring": ("キャプチャリングの使用率", "%", (), (), False,
                      lambda scope, w: [("ring", "リング使用率", "max(obs_capture_ring_bytes / obs_capture_ring_limit_bytes) * 100")]),
 }
 SCOPE_KEYS = ("instance", "ifName", "dst_country", "asn", "src_host")
@@ -221,7 +221,7 @@ def handle(method, raw_path):
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "masked_query", "error": str(e)})
     if not SLOTS.acquire(blocking=False):
-        return js(429, {"status": "error", "errorType": "busy", "error": "推移の問い合わせが混んでいます。少し待ってからもう一度"})
+        return js(429, {"status": "error", "errorType": "busy", "error": "推移の照会が混雑中です。しばらく待機後に再試行してください"})
     try:
         return js(200, {"status": "success", "data": answer(*req)})
     except RuntimeError as e:

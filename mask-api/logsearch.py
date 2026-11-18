@@ -66,40 +66,40 @@ FORBIDDEN_OPS = {RC.GROUPREF, RC.GROUPREF_EXISTS, RC.ASSERT, RC.ASSERT_NOT} | ({
 def check_regex(pattern):
     """-> compiled pattern (case-insensitive) or Refused with the reason (Japanese, shown on the screen)."""
     if not pattern or len(pattern) > REGEX_MAX:
-        raise Refused(f"正規表現は 1〜{REGEX_MAX} 文字にしてください")
+        raise Refused(f"正規表現は 1〜{REGEX_MAX} 文字で指定してください")
     if "(?" in pattern or re.search(r"\\[0-9]", pattern):
-        raise Refused("正規表現に (? で始まる書き方 (先読み・後読み・フラグ・名前付き) と後方参照は使えません")
+        raise Refused("正規表現では (? で始まる構文 (先読み・後読み・フラグ・名前付きグループ) と後方参照は使用不可です")
     try:
         tree = RP.parse(pattern)
     except re.error as e:
-        raise Refused(f"正規表現の書き方が正しくありません ({e.msg})") from None
+        raise Refused(f"正規表現の構文が不正です ({e.msg})") from None
     count = {"var": 0, "opt": 0}
 
     def walk(items, in_repeat):
         for op, av in items:
             if op in FORBIDDEN_OPS:
-                raise Refused("正規表現に後方参照・先読み・後読みは使えません")
+                raise Refused("正規表現では後方参照・先読み・後読みは使用不可です")
             if op in VARIABLE:
                 lo, hi, sub = av
                 if in_repeat:
-                    raise Refused("繰り返しの中に繰り返しは書けません")
+                    raise Refused("反復のネストは使用不可です")
                 if hi is RC.MAXREPEAT or hi - lo > 1 or lo > 64:
                     count["var"] += 1
                 elif hi != lo:
                     count["opt"] += 1
                 if hi is not RC.MAXREPEAT and hi > 64:
-                    raise Refused("{m,n} の n は 64 までです")
+                    raise Refused("{m,n} の n の上限は 64 です")
                 walk(sub, True)
             elif op == RC.SUBPATTERN:
                 walk(av[-1], in_repeat)
             elif op == RC.BRANCH:
                 if in_repeat:
-                    raise Refused("繰り返しの中に | は書けません")
+                    raise Refused("反復内での | は使用不可です")
                 for b in av[1]:
                     walk(b, in_repeat)
     walk(tree, False)
     if count["var"] > 1 or count["opt"] > (1 if count["var"] else 4):
-        raise Refused("長さの決まらない繰り返し (* + {m,n}) は 1 か所までです。? はそれと一緒なら 1 か所、なければ 4 か所までです")
+        raise Refused("長さ不定の反復 (* + {m,n}) は 1 箇所までです。? は前述の反復と併用時 1 箇所、単独時 4 箇所までです")
     return re.compile(pattern, re.IGNORECASE)
 
 
@@ -107,7 +107,7 @@ def matcher(q, is_regex):
     if not q:
         return None
     if len(q) > KEYWORD_MAX or any(ord(c) < 32 for c in q):
-        raise Refused(f"語句は 1 行、{KEYWORD_MAX} 文字までです")
+        raise Refused(f"語句は 1 行・{KEYWORD_MAX} 文字以内です")
     M.check_literal(q)  # the lines are masked: an address could never match anyway; refused like every other filter
     return check_regex(q) if is_regex else re.compile(re.escape(q), re.IGNORECASE)
 
@@ -355,7 +355,7 @@ def handle(method, raw_path):
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "masked_query", "error": str(e)})
     if not SLOTS.acquire(blocking=False):
-        return js(429, {"status": "error", "errorType": "busy", "error": "ログ検索が混んでいます。少し待ってからもう一度"})
+        return js(429, {"status": "error", "errorType": "busy", "error": "ログ検索が混雑中です。しばらく待機後に再試行してください"})
     try:
         data = lines(req) if parts.path.endswith("/lines") else hist(req)
         return js(200, {"status": "success", "data": data})

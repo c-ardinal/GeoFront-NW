@@ -41,11 +41,11 @@ function logList(host, entries, nav, markTs, res) {
 }
 const sevChart = (r, label, mark) => stackCols(r.cols, SEV_KEYS, r.t0, r.t1, label, mark, r.warnings, r.edge);
 
-// "推移を見る" / "ログを検索" (F1): the same item over a longer window, in the 推移 / ログ検索 views
+// "推移を表示" / "ログを検索" (F1): the same item over a longer window, in the 推移 / ログ検索 views
 let lastNav = null;
 const nav = () => lastNav;
 function deepSection(items) {
-  const s = section('長い期間で見る', '推移 · ログ検索 · 伏せ字のまま');
+  const s = section('長期間の表示', '推移 · ログ検索 · マスク状態を維持');
   const row = el('div', 'filters ops');
   for (const [text, open] of items) {
     const b = el('button', 'link-btn ops-btn', text);
@@ -71,7 +71,7 @@ export function deviceView(name) {
       s.ifBox = el('div');
       s.ifs.body.append(s.ifBox, keyLegend(IO_KEYS));
       body.append(s.sum, s.chart.wrap, s.ifs.wrap, s.alerts.wrap, s.sev.wrap, s.logs.wrap,
-        deepSection([['推移を見る', (n) => n.trend({ family: 'if_bps', instance: name })], ['ログを検索', (n) => n.logsearch({ host: name })]]).wrap,
+        deepSection([['推移を表示', (n) => n.trend({ family: 'if_bps', instance: name })], ['ログを検索', (n) => n.logsearch({ host: name })]]).wrap,
         evidenceSection(() => ({ scope: 'device', instance: name })).wrap);
     },
     async update(ctx) {
@@ -130,7 +130,7 @@ export function ifaceView(key) {
       s.t.body.append(traffic.wrap);
       s.e.body.append(errs.wrap);
       body.append(s.sum, s.t.wrap, s.e.wrap, s.info.wrap,
-        deepSection([['推移を見る', (n) => n.trend({ family: 'if_bps', instance: inst, ifName })], ['エラーの推移', (n) => n.trend({ family: 'if_errors', instance: inst, ifName })],
+        deepSection([['推移を表示', (n) => n.trend({ family: 'if_bps', instance: inst, ifName })], ['エラーの推移', (n) => n.trend({ family: 'if_errors', instance: inst, ifName })],
           ['ログを検索', (n) => n.logsearch({ host: inst, q: ifName })]]).wrap,
         evidenceSection(() => ({ scope: 'iface', instance: inst, ifName })).wrap);
     },
@@ -164,10 +164,10 @@ export function ifaceView(key) {
   };
 }
 
-// "この通信のパケット": opens packet analysis narrowed to this destination / host (filter + last 15 min of the ring)
+// "本通信のパケット": opens packet analysis narrowed to this destination / host (filter + last 15 min of the ring)
 function packetsSection(open) {
   const s = section('Packets', 'stored captures · masked');
-  const b = el('button', 'link-btn ops-btn', 'この通信のパケット');
+  const b = el('button', 'link-btn ops-btn', '本通信のパケット');
   b.type = 'button';
   b.lang = 'ja';
   b.setAttribute('aria-label', 'Packets of this traffic: open packet analysis with a filter for it');
@@ -192,8 +192,8 @@ export function destView(d) {
       s.src.body.append(s.srcBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
       body.append(s.sum, s.src.wrap, s.t.wrap, s.ips.wrap, s.note.wrap, s.pk.wrap,
-        ...(!d.cc ? [] : [deepSection([['推移を見る (ASN ごと)', (n) => n.trend({ family: 'flow_asn', dst_country: d.cc })],
-          ['推移を見る (端末ごと)', (n) => n.trend({ family: 'flow_host', dst_country: d.cc })]]).wrap]),
+        ...(!d.cc ? [] : [deepSection([['推移を表示 (ASN 別)', (n) => n.trend({ family: 'flow_asn', dst_country: d.cc })],
+          ['推移を表示 (端末別)', (n) => n.trend({ family: 'flow_host', dst_country: d.cc })]]).wrap]),
         evidenceSection(() => (d.ip ? { scope: 'dest', ip: d.ip } : { scope: 'dest', cc: d.cc, city: d.city })).wrap);
     },
     async update(ctx) {
@@ -244,7 +244,7 @@ export function srcView(host) {
       s.cc.body.append(s.ccBox, keyLegend(DIR_KEYS));
       s.t.body.append(chart.wrap);
       body.append(s.sum, s.cc.wrap, s.t.wrap, s.dst.wrap, s.pk.wrap,
-        deepSection([['推移を見る (国ごと)', (n) => n.trend({ family: 'flow_country', src_host: host })]]).wrap,
+        deepSection([['推移を表示 (国別)', (n) => n.trend({ family: 'flow_country', src_host: host })]]).wrap,
         evidenceSection(() => ({ scope: 'src', host })).wrap);
     },
     async update(ctx) {
@@ -279,13 +279,13 @@ export function srcView(host) {
 // ---- alert --------------------------------------------------------------------------------
 // "原因候補" (P5): what else happened around this moment, opened as the next drawer view
 function correlateSection(anchorOf, what) {
-  const s = section('原因候補', '相関の候補 · 前後 10 分 · 因果は断定しません');
-  const b = el('button', 'link-btn ops-btn', `${what}の前後に起きたこと`);
+  const s = section('原因候補', '相関候補 · 前後 10 分 · 因果は断定せず');
+  const b = el('button', 'link-btn ops-btn', `${what}の前後の発生事象`);
   b.type = 'button';
   b.lang = 'ja';
   b.setAttribute('aria-label', `Correlation candidates: what else happened around ${what}`);
   b.addEventListener('click', () => { if (nav()) nav().correlate(anchorOf()); });
-  s.body.append(b, el('p', 'v-p', '同じ時間窓の警報・機器や IF の状態変化・エラー・急増・syslog・通知記録を、関連の近い順に並べます (相関の候補であり、原因とは限りません)。'));
+  s.body.append(b, el('p', 'v-p', '同一時間範囲の警報・機器や IF の状態変化・エラー・急増・syslog・通知記録を、関連度の高い順に表示します (相関候補であり、原因の断定ではありません)。'));
   return s;
 }
 
@@ -308,7 +308,7 @@ export function alertView(alert0) {
         const L = alert0.labels;
         return { at: Math.min(now(), Number.isFinite(t) ? t : now()), label: `警報 ${L.alertname}${L.instance ? ` ${L.instance}` : ''}`,
           ctx: { instance: L.instance, ifName: L.ifName, alertname: L.alertname } };
-      }, 'この警報');
+      }, '本警報');
       body.append(s.sum, s.ops.wrap, cr.wrap, ev.wrap, s.tl.wrap, s.labels.wrap, s.ann.wrap, s.rule.wrap, s.rel.wrap, s.logs.wrap);
     },
     async update(ctx) {

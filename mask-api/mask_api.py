@@ -1097,8 +1097,8 @@ def writable(headers):
     if not auth_required():
         return True, "127.0.0.1 only: silences / ACK allowed"
     if ident:
-        return False, f"役割 {ident.role} では抑止・確認の操作はできません (operator 以上が必要です)"
-    return False, "利用者を確認できないため抑止・確認の操作はできません (ログインが必要です)"
+        return False, f"役割 {ident.role} では抑止・確認の操作は不可です (operator 以上が必要)"
+    return False, "利用者の確認不能のため抑止・確認の操作は不可です (ログインが必要)"
 
 
 def same_origin(headers):

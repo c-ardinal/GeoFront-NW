@@ -132,9 +132,9 @@ function wirePanelTitles() {
     b.addEventListener('click', open);
     h.insertBefore(b, h.querySelector('.h-open'));
   };
-  headBtn('p-wan', '推移', '推移: WAN の利用率を長い期間で見る', () => nav.trend(P.WAN.instance ? { family: 'wan_util', instance: P.WAN.instance, ifName: P.WAN.ifName } : { family: 'if_bps' }));
-  headBtn('p-if', '推移', '推移: インターフェースの通信量・エラーを長い期間で見る', () => nav.trend({ family: 'if_bps', ...(P.WAN.instance ? { instance: P.WAN.instance, ifName: P.WAN.ifName } : {}) }));
-  headBtn('p-logs', '検索', 'ログ検索: syslog を語句・機器・重要度・期間で探す', () => nav.logsearch());
+  headBtn('p-wan', '推移', '推移: WAN 利用率の長期表示', () => nav.trend(P.WAN.instance ? { family: 'wan_util', instance: P.WAN.instance, ifName: P.WAN.ifName } : { family: 'if_bps' }));
+  headBtn('p-if', '推移', '推移: インターフェースの通信量・エラーの長期表示', () => nav.trend({ family: 'if_bps', ...(P.WAN.instance ? { instance: P.WAN.instance, ifName: P.WAN.ifName } : {}) }));
+  headBtn('p-logs', '検索', 'ログ検索: 語句・機器・重要度・期間による syslog 検索', () => nav.logsearch());
   // traffic surges (P5): the count in a fixed-width slot, opens the list
   const sb = el('button', 'h-act h-surge', '急増 —');
   sb.id = 'surge-btn';

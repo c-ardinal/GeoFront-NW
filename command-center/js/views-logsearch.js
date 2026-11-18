@@ -49,7 +49,7 @@ function histogram(h, onPick) {
   box.setAttribute('aria-valuemin', '0');
   box.setAttribute('aria-valuemax', String(n - 1));
   const total = h.counts.reduce((a, b) => a + b, 0);
-  box.setAttribute('aria-label', `時間ごとの件数 (${h.step / 60} 分ごと、${n} 本、合計 ${total} 件)。← → で棒を選び、Enter でその時間に絞ります`);
+  box.setAttribute('aria-label', `時間帯別の件数 (${h.step / 60} 分単位、${n} 本、合計 ${total} 件)。← → で棒を選択し、Enter で当該時間帯に限定します`);
   const tip = el('div', 'ls-tip', ' ');
   tip.setAttribute('aria-live', 'polite');
   let cur = -1;
@@ -59,7 +59,7 @@ function histogram(h, onPick) {
     bars.forEach((b, j) => b.classList.toggle('ls-cur', j === cur));
     box.setAttribute('aria-valuenow', String(cur));
     const a = t0Of(cur), b = Math.min(h.to, a + h.step);
-    tip.textContent = `${jstFull.format(new Date(a * 1000))} 〜 ${jstFull.format(new Date(b * 1000)).slice(-8)}  ${h.counts[cur]} 件 (押すかEnterでこの時間に絞る)`;
+    tip.textContent = `${jstFull.format(new Date(a * 1000))} 〜 ${jstFull.format(new Date(b * 1000)).slice(-8)}  ${h.counts[cur]} 件 (クリックまたは Enter で当該時間帯に限定)`;
     box.setAttribute('aria-valuetext', tip.textContent);
   };
   const narrow = () => { if (cur >= 0) onPick(t0Of(cur) * 1000, Math.min(h.to, t0Of(cur) + h.step) * 1000); };
@@ -103,15 +103,15 @@ export function logSearchView(init = {}) {
     s.count.textContent = '検索中…';
     s.more.hidden = true;
     s.list.replaceChildren();
-    s.hist.replaceChildren(el('div', 'ls-hwait', '件数を数えています…'));
+    s.hist.replaceChildren(el('div', 'ls-hwait', '件数を集計中…'));
     renderSel();
     const lines = getJson(`/logsearch/lines?${query({ limit: PAGE })}`).then((d) => { if (my === st.seq) addPage(d); })
       .catch((e) => { if (my === st.seq) failed(e); });
     const hist = getJson(`/logsearch/hist?${query()}`).then((h) => {
       if (my !== st.seq) return;
-      const note = h.partial.length ? el('p', 'ls-partial', `新しい側から数えた途中までの件数です (${h.counted_from ? `${jstFull.format(new Date(h.counted_from * 1000))} より前は少なく出ています` : '古い側は少なく出ています'})`) : null;
+      const note = h.partial.length ? el('p', 'ls-partial', `最新側からの集計途中の件数です (${h.counted_from ? `${jstFull.format(new Date(h.counted_from * 1000))} 以前は過少表示` : '過去側は過少表示'})`) : null;
       s.hist.replaceChildren(histogram(h, (a, b) => { st.zoom = []; Object.assign(st, { preset: 'custom', from: a, to: b }); range.mark('custom'); search(); }), ...(note ? [note] : []));
-    }).catch((e) => { if (my === st.seq) s.hist.replaceChildren(el('div', 'ls-hwait', `件数を数えられません: ${maskText(e.message)}`)); });
+    }).catch((e) => { if (my === st.seq) s.hist.replaceChildren(el('div', 'ls-hwait', `件数の集計不可: ${maskText(e.message)}`)); });
     await Promise.all([lines, hist]);
   }
   async function older() {
@@ -122,13 +122,13 @@ export function logSearchView(init = {}) {
       const d = await getJson(`/logsearch/lines?${query({ limit: PAGE, before: st.next })}`);
       if (my === st.seq) addPage(d);
     } catch (e) {
-      if (my === st.seq) s.count.textContent = `${s.count.textContent} · 続きを読めません: ${maskText(e.message)}`;
+      if (my === st.seq) s.count.textContent = `${s.count.textContent} · 続きの読込不可: ${maskText(e.message)}`;
     } finally {
       s.more.disabled = false;
     }
   }
   function failed(e) {
-    s.count.textContent = e.rejected ? `この条件では検索できません: ${maskText(e.message)}` : `検索できません: ${maskText(e.message)}`;
+    s.count.textContent = e.rejected ? `この条件では検索不可: ${maskText(e.message)}` : `検索不可: ${maskText(e.message)}`;
     s.list.replaceChildren(el('div', 'na', '—'));
   }
   function addPage(d) {
@@ -137,10 +137,10 @@ export function logSearchView(init = {}) {
     st.entries.push(...fresh);
     st.next = d.next_before;
     s.list.append(...fresh.map(row));
-    if (!st.entries.length) s.list.replaceChildren(el('div', 'na', st.next ? 'ここまでに一致する行はありません。続きを読むと、さらに古い側を探します' : '一致する行はありません'));
+    if (!st.entries.length) s.list.replaceChildren(el('div', 'na', st.next ? '現時点まで一致行なし。追加読込で、より過去の範囲を検索します' : '一致行なし'));
     const w = st.at;
-    s.count.textContent = `${st.entries.length} 行 (新しい順) · ${jstFull.format(new Date(w.from))} 〜 ${jstFull.format(new Date(w.to))}`
-      + (st.next ? '' : ' · 期間の最後まで読みました') + (d.partial.length ? ` · 途中で止めました (${d.partial.join(', ')})` : '');
+    s.count.textContent = `${st.entries.length} 行 (最新順) · ${jstFull.format(new Date(w.from))} 〜 ${jstFull.format(new Date(w.to))}`
+      + (st.next ? '' : ' · 期間末尾まで読込完了') + (d.partial.length ? ` · 途中で中断 (${d.partial.join(', ')})` : '');
     s.more.hidden = !st.next;
   }
   function row(e) {
@@ -151,7 +151,7 @@ export function logSearchView(init = {}) {
     const m = el('span', 'log-m');
     for (const [text, hit] of e.parts) m.append(hit ? el('mark', 'ls-hit', text) : document.createTextNode(text));
     r.append(el('span', 'ls-t', t), el('span', 'log-h', e.host), el('span', 'log-s', sevName(e.severity)), m);
-    r.setAttribute('aria-label', `${t} ${e.host} ${sevName(e.severity)} ${lineText(e)}。選ぶと原因候補と証跡に進めます`);
+    r.setAttribute('aria-label', `${t} ${e.host} ${sevName(e.severity)} ${lineText(e)}。選択で原因候補と証跡に移動可能`);
     const choose = () => { st.sel = e; for (const x of s.list.children) x.classList.toggle('ls-sel', x === r); renderSel(); };
     r.addEventListener('click', choose);
     r.addEventListener('keydown', (k) => { if (k.key === 'Enter' || k.key === ' ') { k.preventDefault(); choose(); } });
@@ -193,10 +193,10 @@ export function logSearchView(init = {}) {
       const form = el('form', 'filters ls-bar');
       form.addEventListener('submit', (e) => { e.preventDefault(); st.zoom = []; search().catch(() => {}); });
       const hosts = [...new Set([...DEVICES, ...(f.host ? [f.host] : [])])];
-      const dev = selectEl('機器', [['すべて', ''], ...hosts.map((d) => [d, d]), ['台帳にない送信元 (unknown)', 'unknown']], 'host');
-      const sev = selectEl('重要度', [['すべて', ''], ...['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'informational', 'debug'].map((v) => [sevName(v), v])], 'severity');
-      s.fac = selectEl('facility', [['すべて', '']], 'facility');
-      const ql = el('label', 'fld ls-q', '語句 (大文字と小文字は区別しません)');
+      const dev = selectEl('機器', [['全機器', ''], ...hosts.map((d) => [d, d]), ['台帳未登録の送信元 (unknown)', 'unknown']], 'host');
+      const sev = selectEl('重要度', [['全重要度', ''], ...['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'informational', 'debug'].map((v) => [sevName(v), v])], 'severity');
+      s.fac = selectEl('facility', [['全 facility', '']], 'facility');
+      const ql = el('label', 'fld ls-q', '語句 (大文字・小文字の区別なし)');
       const qi = el('input');
       qi.type = 'search';
       qi.value = f.q;
@@ -210,15 +210,15 @@ export function logSearchView(init = {}) {
       ri.checked = f.regex;
       ri.addEventListener('change', () => { f.regex = ri.checked; });
       rl.append(ri, document.createTextNode(' 正規表現'));
-      rl.title = '64 文字まで。繰り返しの入れ子、先読み・後読み、後方参照は使えません。長さの決まらない繰り返し (* + {m,n}) は 1 か所まで。? はそれと一緒なら 1 か所、なければ 4 か所まで';
+      rl.title = '上限 64 文字。反復のネスト、先読み・後読み、後方参照は使用不可。長さ不定の反復 (* + {m,n}) は 1 箇所まで。? は前述の反復と併用時 1 箇所、単独時 4 箇所まで';
       const go = el('button', 'link-btn ls-go', '検索');
       go.type = 'submit';
       form.append(dev.l, sev.l, s.fac.l, ql, rl, go);
       range = rangeControl(st, { presets: PRESETS, maxS: () => retention, onChange: () => { st.zoom = []; search().catch(() => {}); } });
-      const hs = section('時間ごとの件数', '同じ条件 · 棒を選ぶとその時間に絞ります');
+      const hs = section('時間帯別の件数', '同一条件 · 棒の選択で当該時間帯に限定');
       s.hist = el('div');
       hs.body.append(s.hist);
-      const ls = section('行', '新しい順 · 一致した部分に印 · IP/MAC は伏せ字');
+      const ls = section('行', '最新順 · 一致部分にマーク · IP/MAC はマスク');
       s.count = el('div', 'v-meta-line');
       s.count.setAttribute('role', 'status');
       s.selBar = el('div', 'filters ops ls-selbar');
@@ -226,10 +226,10 @@ export function logSearchView(init = {}) {
       s.evBtn = linkBtn('前後 10 分の証跡を出力', () => act('evidence'));
       s.evStatus = el('p', 'ops-note ops-status');
       s.evStatus.setAttribute('role', 'status');
-      s.selBar.append(s.selText, linkBtn('この行の詳細', () => act('detail')), linkBtn('この時刻の原因候補', () => act('corr')), s.evBtn);
+      s.selBar.append(s.selText, linkBtn('この行の詳細', () => act('detail')), linkBtn('当該時刻の原因候補', () => act('corr')), s.evBtn);
       s.selBar.hidden = true;
       s.list = el('div', 'v-logs tall ls-list');
-      s.more = linkBtn('さらに古い行を読む', () => older());
+      s.more = linkBtn('過去行の追加読込', () => older());
       s.more.hidden = true;
       ls.body.append(s.count, s.selBar, s.evStatus, s.list, s.more);
       body.append(form, range.wrap, hs.wrap, ls.wrap);
