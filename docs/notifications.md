@@ -1,11 +1,11 @@
 # アラートの通知
 
-Prometheus のアラートは Alertmanager に集められ、notify-relay が各通知先に送ります。
-通知文は日本語で、機器名・対象・値・開始時刻 (JST)・画面へのリンクが入り、IP / MAC は伏せ字です。アラートが解消したときも通知します。
+Prometheus のアラートは Alertmanager で集約し、notify-relay が各送信先に送信します。
+通知文は日本語で、機器名・対象・数値・開始時刻 (JST)・画面へのリンクを含み、IP / MAC はマスク表示です。アラートの解消時も通知します。
 
-既定ではどこにも送りません。通知先を設定したときだけ送ります。
+既定では送信しません。送信先の設定時のみ送信します。
 
-## 通知先の設定
+## 送信先の設定
 
 ```sh
 mkdir -p "$OBS_CONFIG_DIR/alerting"
@@ -15,11 +15,11 @@ cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/rece
 ./geofront run --rm tools check
 ```
 
-1. `receivers.yaml` を編集して、通知先と送り先のルールを書きます。秘密値 (Webhook の URL・トークン・SMTP のパスワード) は `.env` だけに書いてください ([configuration.md](configuration.md))。
-2. `tools targets` で設定を生成し、Alertmanager に読み込ませます。`./geofront up -d` でも生成されます。
-3. `tools notify-test` で各通知先にテストを送り、結果を表で確かめます。1 つだけ試すときは `--receiver mail` のように名前を付けます。
+1. `receivers.yaml` を編集して、送信先と振分ルールを記載します。秘密値 (Webhook の URL・トークン・SMTP のパスワード) は `.env` のみに記載してください ([configuration.md](configuration.md))。
+2. `tools targets` で設定を生成し、Alertmanager に反映します。`./geofront up -d` でも生成します。
+3. `tools notify-test` で各送信先にテストを送信し、結果を表で確認します。単独の試験には `--receiver mail` のように名称を指定します。
 
-| 種類 (`type`) | `.env` に書く値 | `receivers.yaml` に書く値 |
+| 種類 (`type`) | `.env` の記載項目 | `receivers.yaml` の記載項目 |
 |---|---|---|
 | `email` | `SMTP_HOST` `SMTP_PORT` `SMTP_FROM` `SMTP_USER` `SMTP_PASSWORD` `SMTP_TLS` (`starttls` / `tls` / `none`) | `to` |
 | `slack` | `SLACK_WEBHOOK_URL` (Incoming Webhook) | なし |
@@ -27,42 +27,42 @@ cp config.example/alerting/receivers.example.yaml "$OBS_CONFIG_DIR/alerting/rece
 | `line` | `LINE_CHANNEL_ACCESS_TOKEN` (Messaging API) | `to` (ユーザー ID かグループ ID) |
 | `webhook` | `WEBHOOK_URL`、任意で `WEBHOOK_BEARER_TOKEN` | なし |
 
-秘密値は通知先の種類ごとに 1 組です。メールの宛先 (`to`) は複数書けます。
+秘密値は送信先の種類単位で 1 組です。メールの送信先 (`to`) は複数指定可能です。
 
-`routes:` には重大度 (critical / warning / info) ごとの送り先と再通知の間隔を書きます。
-書かなかった重大度は、critical と warning がすべての通知先に送られ、info は通知されません。
+`routes:` には重大度 (critical / warning / info) 別の送信先と再通知の間隔を記載します。
+未記載の重大度は、critical と warning が全送信先に送信され、info は通知対象外です。
 
-demo profile では外部に送らず、デモ用の受信先に記録するだけです。
+demo profile では外部送信せず、デモ用の受信先への記録のみです。
 
 ## 通知の状態
 
-警報パネルの各行に通知の状態が出ます。
+警報パネルの各行に通知の状態を表示します。
 
 | 表示 | 意味 |
 |---|---|
 | `通知完了` | 今回の発報が現行経路の全送信先に到達 |
-| `一部未確認` | まだ記録のない送り先がある |
-| `通知失敗` | 失敗した送り先がある (メールの一部の宛先が拒否された場合を含む) |
-| `未通知` | まとめて送るのを待っている |
-| `通知なし` | その重大度は通知しない設定になっている |
+| `一部未確認` | 記録未着の送信先が存在 |
+| `通知失敗` | 送信失敗の送信先が存在 (メールの一部送信先の拒否を含む) |
+| `未通知` | 一括送信の待機中 |
+| `通知なし` | 該当の重大度は通知対象外の設定 |
 | `抑止中` / `確認完了` | 抑止中、または ACK 完了 |
-| `不明` | Alertmanager か通知の記録に接続できない |
-| `履歴上限` | 記録が 5000 件を超え、古い記録を読んでいない |
+| `不明` | Alertmanager か通知の記録に接続不可 |
+| `履歴上限` | 記録が 5000 件を超過し、旧記録は未読込 |
 
-警報の詳細を開くと、送り先ごとの結果と次の再通知の時刻を確かめられます。送った結果は Loki の `{job="notify"}` にも記録されます。
+警報の詳細画面で、送信先別の結果と次回の再通知時刻を確認可能です。送信結果は Loki の `{job="notify"}` にも記録します。
 
 ## 抑止と ACK
 
-警報の詳細では次の操作ができます。
+警報の詳細画面では以下の操作が可能です。
 
-- `確認 (ACK)` を押すと、その警報の再通知が解消まで止まります。期限は 24 時間で、延長しても最長 7 日です。警報が解消すると自動で解除されます。
-- `抑止する` では範囲 (この警報 / この機器のすべて / この警報名のすべて) と期間 (1h / 4h / 24h / 7d) を選びます。
-- `抑止を解除` を押すと抑止が終わります。
+- `確認 (ACK)` の押下で、該当警報の再通知を解消まで停止します。期限は 24 時間で、延長時も最長 7 日です。警報の解消時は自動解除します。
+- `抑止する` では範囲 (本警報 / 本機器の全警報 / 同一警報名の全件) と期間 (1h / 4h / 24h / 7d) を選択します。
+- `抑止を解除` の押下で抑止を終了します。
 
-警報一覧の「Silences & ACK」では抑止の一覧・延長 (+1 h / +24 h)・解除と、新しい抑止の作成ができます。
+警報一覧の「Silences & ACK」では抑止の一覧・延長 (+1 h / +24 h)・解除と、新規抑止の作成が可能です。
 
-ログインありの構成では、抑止と ACK を操作できるのは operator と admin だけです。ログインなしの構成 (127.0.0.1) では、このホストの誰でも操作できます。
+ログインありの構成では、抑止と ACK の操作は operator と admin のみ可能です。ログインなしの構成 (127.0.0.1) では、本ホストの全利用者が操作可能です。
 
 ## 送信の再試行
 
-送り先が 429・5xx を返したときや応答がないときは、Alertmanager が送り直します。3xx・ほかの 4xx・SMTP の 5xx は送り直しません。
+送信先が 429・5xx を応答した場合や無応答の場合は、Alertmanager が再送します。3xx・その他の 4xx・SMTP の 5xx は再送しません。

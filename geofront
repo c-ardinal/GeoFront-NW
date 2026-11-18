@@ -57,7 +57,7 @@ for k in $secrets; do
   f="$(printenv "${k}_FILE" || true)"
   [ -n "$f" ] || f="$(env_value "${k}_FILE")"
   [ -n "$f" ] || continue
-  if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "geofront: ${k}_FILE=$f を読めません (ファイルがない / 読めない)" >&2; exit 2; fi
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "geofront: ${k}_FILE=$f の読込不可 (ファイル不在 / 読込権限なし)" >&2; exit 2; fi
   v="$(cat "$f")"  # (trailing newlines dropped)
   export "$k=${v%$'\r'}"
   from_files+=("$k")
@@ -67,7 +67,7 @@ export OBS_SECRET_FILES="${from_files[*]:-}"
 if [ "$explicit_env" = 0 ] && [ -z "${COMPOSE_PROJECT_NAME:-}" ] && [ -z "$(env_value COMPOSE_PROJECT_NAME)" ]; then
   if docker volume inspect "${legacy_project}_generated" >/dev/null 2>&1; then
     export COMPOSE_PROJECT_NAME="$legacy_project"
-    echo "geofront: 既存のボリュームのプロジェクト名 $legacy_project で動かします (固定: ./geofront run --rm tools migrate-config)" >&2
+    echo "geofront: 既存のボリュームのプロジェクト名 $legacy_project で稼働します (固定: ./geofront run --rm tools migrate-config)" >&2
   else
     export COMPOSE_PROJECT_NAME=geofront-nw
   fi
