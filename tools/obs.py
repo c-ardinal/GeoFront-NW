@@ -1,17 +1,17 @@
 """GeoFront-NW setup / operations tool. Runs in the `tools` container: docker compose run --rm tools <command>.
 
-  init         .env と機器台帳 (inventory/devices.yaml) を対話または引数で作り、検証する
-  check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表で出す
-  targets      台帳から Prometheus の scrape 対象・Alloy の送信元対応表・snmp_exporter の auth を生成する
-  backup       設定と Prometheus スナップショット・Loki・抑止・利用者・認証局を 1 つのアーカイブにまとめる
-  restore      backup のアーカイブを戻す (prometheus / loki / alertmanager / authelia / proxy は止めてから)
-  notify-test  各通知先にテスト通知を送り (Alertmanager 経由)、応答 (HTTP / SMTP) を表で出す
-  test-syslog  fixtures を Alloy に送り、Loki に正しく解析されて入ったかを確かめる (回帰テスト)
-  capture      パケット取込の状態 (status) / リングとアップロードの一覧 (list) / 保存期間を過ぎたものの削除 (prune)
+  init         対話入力または引数による .env と機器台帳 (inventory/devices.yaml) の作成・検証
+  check        設定の検証・各機器への SNMP 疎通・syslog の受信待ち・各サービスの health を表形式で出力
+  targets      台帳から Prometheus の scrape 対象・Alloy の送信元対応表・snmp_exporter の auth を生成
+  backup       設定と Prometheus スナップショット・Loki・抑止・利用者・認証局を単一アーカイブに集約
+  restore      backup アーカイブの復元 (prometheus / loki / alertmanager / authelia / proxy の停止後に実行)
+  notify-test  各通知先へテスト通知を送信し (Alertmanager 経由)、応答 (HTTP / SMTP) を表形式で出力
+  test-syslog  fixtures を Alloy へ送信し、Loki での解析・格納の正常性を確認 (回帰テスト)
+  capture      パケットキャプチャの状態 (status) / リングとアップロードの一覧 (list) / 保存期間超過分の削除 (prune)
   geoip        DB-IP Lite (City + ASN) のダウンロード・更新 (update) / 版と鮮度 (status)
   user         ログインの利用者 (Authelia): add / passwd / role / remove / list、秘密値の生成 (secrets)
-  doctor       導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。scripts/doctor.sh から)
-  migrate-config  従来の配置 (リポジトリ内の .env・台帳・通知先・backups) を OBS_CONFIG_DIR へ写す / プロジェクト名を固定する
+  doctor       導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。scripts/doctor.sh 経由)
+  migrate-config  従来の配置 (リポジトリ内の .env・台帳・通知先・backups) を OBS_CONFIG_DIR へ複製 / プロジェクト名を固定
 
 Read-only towards devices: SNMP goes through snmp_exporter (GET/WALK only); nothing here changes a device.
 Paths: the repository is mounted at /work, the site configuration (OBS_CONFIG_DIR on the host; unset = the repository,
@@ -186,49 +186,49 @@ def check_devices(devices, known_auths):
     """-> list of Japanese error messages for an inventory's device list."""
     errs, names, addrs, wans = [], set(), set(), []
     if not isinstance(devices, list) or not devices:
-        return ["機器台帳に devices: の一覧がありません (1 台以上必要です)"]
+        return ["機器台帳に devices: の一覧なし (1 台以上が必要)"]
     for i, d in enumerate(devices, 1):
         where = f"台帳の {i} 台目"
         if not isinstance(d, dict):
-            errs.append(f"{where}: name / kind / address / snmp_auth を持つ項目にしてください")
+            errs.append(f"{where}: name / kind / address / snmp_auth の各項目を指定してください")
             continue
         name, kind, addr, auth = (str(d.get(k, "")).strip() for k in ("name", "kind", "address", "snmp_auth"))
-        where = f"{where} ({name or '名前なし'})"
+        where = f"{where} ({name or '名称なし'})"
         unknown = set(d) - {"name", "kind", "address", "snmp_auth", "syslog", "wan_interface", *TOPO_KEYS}
         if unknown:
             errs.append(f"{where}: 不明な項目 {', '.join(sorted(map(str, unknown)))}")
         if name in RESERVED_NAMES:
-            errs.append(f"{where}: name '{name}' は予約語です (台帳に無い syslog 送信元の host に使うため)。別の名前にしてください")
+            errs.append(f"{where}: name '{name}' は予約語です (台帳未登録の syslog 送信元の host 名として使用)。別名称を指定してください")
         elif not NAME_RE.fullmatch(name):
-            errs.append(f"{where}: name は英小文字・数字・- _ の 1〜32 文字にしてください (例 rtx1300)")
+            errs.append(f"{where}: name は英小文字・数字・- _ による 1〜32 文字で指定してください (例 rtx1300)")
         elif name in names:
             errs.append(f"{where}: name が重複しています")
         names.add(name)
         if kind not in kinds():
-            errs.append(f"{where}: kind は {' / '.join(kinds())} のどれかにしてください (drivers/ のドライバ)")
+            errs.append(f"{where}: kind は {' / '.join(kinds())} のいずれかを指定してください (drivers/ のドライバ)")
         host, port = split_address(addr)
         looks_ip = re.fullmatch(r"[\d.]+", host) is not None
         if not addr or not (is_ipv4(host) if looks_ip else HOST_RE.fullmatch(host)) or (port and not 0 < int(port) < 65536):
-            errs.append(f"{where}: address は管理 IP (IPv4) か DNS 名にしてください (ポート指定は host:1161 の形)")
+            errs.append(f"{where}: address は管理 IP (IPv4) または DNS 名を指定してください (ポート指定は host:1161 形式)")
         elif addr in addrs:
             errs.append(f"{where}: address が他の機器と重複しています")
         addrs.add(addr)
         if auth not in known_auths:
-            avail = " / ".join(sorted(known_auths)) or "なし (.env の SNMP 資格情報が空です)"
-            errs.append(f"{where}: snmp_auth '{auth}' は使えません。使える auth: {avail}")
+            avail = " / ".join(sorted(known_auths)) or "なし (.env の SNMP 資格情報が空欄)"
+            errs.append(f"{where}: snmp_auth '{auth}' は使用不可です。使用可能な auth: {avail}")
         if "syslog" in d and not isinstance(d["syslog"], bool):
-            errs.append(f"{where}: syslog は true / false にしてください")
+            errs.append(f"{where}: syslog は true / false で指定してください")
         if "wan_interface" in d:
             wans.append(name)
             if not IFNAME_RE.fullmatch(str(d["wan_interface"] or "")):
-                errs.append(f"{where}: wan_interface は ifName (英数字と _ / : - 、例 lan2) にしてください")
+                errs.append(f"{where}: wan_interface は ifName (英数字と _ / : - 、例 lan2) で指定してください")
         for k in ("parent_if", "uplink_if"):
             if k in d and not IFNAME_RE.fullmatch(str(d[k] or "")):
-                errs.append(f"{where}: {k} は ifName (英数字と _ / : - 、例 lan1) にしてください")
+                errs.append(f"{where}: {k} は ifName (英数字と _ / : - 、例 lan1) で指定してください")
         if "parent_if" in d and "parent" not in d:
-            errs.append(f"{where}: parent_if は parent (親機器の name) と一緒に書いてください")
+            errs.append(f"{where}: parent_if は parent (親機器の name) と併記してください")
     if len(wans) > 1:
-        errs.append(f"wan_interface は 1 台だけに書いてください (今は {', '.join(wans)})")
+        errs.append(f"wan_interface は 1 台のみに記述してください (現在は {', '.join(wans)})")
     errs += check_parents(devices, names)
     return errs
 
@@ -243,14 +243,14 @@ def check_parents(devices, names):
         if isinstance(d, dict) and "parent" in d:
             n, p = str(d.get("name", "")).strip(), str(d["parent"] or "").strip()
             if p == n or p not in names:
-                errs.append(f"機器 {n}: parent '{p}' は台帳にある別の機器の name にしてください")
+                errs.append(f"機器 {n}: parent '{p}' は台帳内の他機器の name を指定してください")
             else:
                 parent[n] = p
     for n in parent:
         seen, cur = {n}, parent.get(n)
         while cur in parent:
             if cur in seen:
-                errs.append(f"機器 {n}: parent をたどると元に戻ります (ループ)。親子関係を見直してください")
+                errs.append(f"機器 {n}: parent の参照が循環しています (ループ)。親子関係を再確認してください")
                 break
             seen.add(cur)
             cur = parent[cur]
@@ -260,13 +260,13 @@ def check_parents(devices, names):
 def load_inventory(path=None):
     path = path or inventory_path()
     if not path.exists():
-        raise Fail(f"機器台帳 {rel(path)} がありません。`docker compose run --rm tools init` で作成してください")
+        raise Fail(f"機器台帳 {rel(path)} が存在しません。`docker compose run --rm tools init` で作成してください")
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:
-        raise Fail(f"機器台帳 {rel(path)} の YAML が読めません: {e}") from None
+        raise Fail(f"機器台帳 {rel(path)} の YAML 読込に失敗: {e}") from None
     if not isinstance(doc, dict):
-        raise Fail(f"機器台帳 {rel(path)} は devices: から始まる形にしてください")
+        raise Fail(f"機器台帳 {rel(path)} は devices: で開始する形式にしてください")
     return doc.get("devices")
 
 
@@ -335,48 +335,48 @@ def check_env(values, used_auths=()):
     errs, warns = [], []
     for key, v in values.items():
         if key.startswith(("OBS_", "SNMP_", "SYSLOG_", "SMTP_", "SLACK_", "DISCORD_", "LINE_", "WEBHOOK_")) and ("'" in v or "\n" in v):
-            errs.append(f"{key}: ' (シングルクォート) と改行は使えません")
+            errs.append(f"{key}: ' (シングルクォート) と改行は使用不可です")
     for key in ("OBS_BIND", "SYSLOG_BIND"):
         v = values.get(key, "127.0.0.1")
         if not is_ipv4(v):
-            errs.append(f"{key}={v}: IPv4 アドレスにしてください (127.0.0.1 / LAN 側の IP / 0.0.0.0)")
+            errs.append(f"{key}={v}: IPv4 アドレスを指定してください (127.0.0.1 / LAN 側 IP / 0.0.0.0)")
         elif not ipaddress.IPv4Address(v).is_loopback:
             if key == "SYSLOG_BIND":
                 warns.append(f"{key}={v}: syslog 受信を LAN に公開します")
     pub = values.get("OBS_PUBLIC_URL", "")
     if pub and not PUBLIC_URL_RE.fullmatch(pub):
-        errs.append(f"OBS_PUBLIC_URL={pub}: http(s)://ホスト名か IP[:ポート] の形にしてください (末尾の / やパスは付けない)")
+        errs.append(f"OBS_PUBLIC_URL={pub}: http(s)://ホスト名または IP[:ポート] の形式にしてください (末尾の / やパスは不要)")
     elif values.get("OBS_BIND") == "0.0.0.0" and (not pub or re.match(r"https?://(127\.|localhost|\[::1\])", pub)):
         # the proxy answers only the loopback names, OBS_PUBLIC_URL's host and a concrete bind address (DNS rebinding)
-        errs.append("OBS_BIND=0.0.0.0 で OBS_PUBLIC_URL が空か 127.0.0.1 のままです: LAN からは 421 で開けません — "
-                    "OBS_PUBLIC_URL にこのホストの LAN 名 / IP を設定してください (例 http://192.168.100.10:8080)")
+        errs.append("OBS_BIND=0.0.0.0 で OBS_PUBLIC_URL が空欄または 127.0.0.1 のままです: LAN からのアクセスは 421 で失敗します — "
+                    "OBS_PUBLIC_URL に本ホストの LAN 名 / IP を設定してください (例 http://192.168.100.10:8080)")
     elif lan_bind(values) and (not pub or re.match(r"https?://(127\.|localhost)", pub)):
-        warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN から開くと通知のリンクがこの PC を指します。"
-                     "LAN から開くときの URL (例 http://192.168.100.10:8080) にしてください")
+        warns.append("OBS_PUBLIC_URL が 127.0.0.1 のままです。LAN からのアクセス時、通知内リンクの参照先が本 PC になります。"
+                     "LAN アクセス用の URL (例 http://192.168.100.10:8080) を設定してください")
     for key, default in (("OBS_PORT", "8080"), ("SYSLOG_PORT", "514")):
         v = values.get(key, default)
         if not (v.isdigit() and 0 < int(v) < 65536):
-            errs.append(f"{key}={v}: 1〜65535 のポート番号にしてください")
+            errs.append(f"{key}={v}: 1〜65535 のポート番号を指定してください")
     a_errs, a_warns = au.check(values)
     errs += a_errs
     warns += a_warns
     versions = auth_versions()
     if any(versions.get(a) == 3 for a in used_auths):
         if not values.get("SNMP_V3_USER"):
-            errs.append("SNMP_V3_USER が空です (SNMPv3 のユーザー名)")
+            errs.append("SNMP_V3_USER が空欄です (SNMPv3 のユーザー名)")
         for key in ("SNMP_V3_AUTH_PASS", "SNMP_V3_PRIV_PASS"):
             if len(values.get(key, "")) < 8:
-                errs.append(f"{key} は 8 文字以上にしてください (SNMPv3 の決まり)")
+                errs.append(f"{key} は 8 文字以上にしてください (SNMPv3 の仕様)")
         if values.get("SNMP_V3_AUTH_PROTO", "") not in AUTH_PROTOS:
-            errs.append(f"SNMP_V3_AUTH_PROTO は {' / '.join(AUTH_PROTOS)} のどれかにしてください")
+            errs.append(f"SNMP_V3_AUTH_PROTO は {' / '.join(AUTH_PROTOS)} のいずれかを指定してください")
         if values.get("SNMP_V3_PRIV_PROTO", "") not in PRIV_PROTOS:
-            errs.append(f"SNMP_V3_PRIV_PROTO は {' / '.join(PRIV_PROTOS)} のどれかにしてください")
+            errs.append(f"SNMP_V3_PRIV_PROTO は {' / '.join(PRIV_PROTOS)} のいずれかを指定してください")
     if any(versions.get(a) == 2 for a in used_auths):
         if not values.get("SNMP_COMMUNITY"):
-            errs.append("SNMP_COMMUNITY が空です (SNMPv2c のコミュニティ名)")
+            errs.append("SNMP_COMMUNITY が空欄です (SNMPv2c のコミュニティ名)")
         elif values["SNMP_COMMUNITY"] in ("public", "private"):
-            warns.append("SNMP_COMMUNITY が推測されやすい値です。SNMPv3 (yamaha_v3) を推奨します")
-        warns.append("SNMPv2c は暗号化されません。可能なら SNMPv3 (yamaha_v3) を使ってください")
+            warns.append("SNMP_COMMUNITY が推測容易な設定値です。SNMPv3 (yamaha_v3) を推奨します")
+        warns.append("SNMPv2c は非暗号化通信です。可能であれば SNMPv3 (yamaha_v3) を使用してください")
     errs += check_surge(values)
     return errs, warns
 
@@ -389,7 +389,7 @@ def validate(values, devices):
     if dev_errs:
         return dev_errs + errs, warns, None
     if not errs:  # an auth added to snmp/auths.yml by hand: its ${...} variables must be set too
-        errs = [f"snmp_auth {a} の資格情報 (snmp/auths.yml が参照する変数) が .env で空です" for a in sorted(used - set(render_auths(values)))]
+        errs = [f"snmp_auth {a} の資格情報 (snmp/auths.yml の参照変数) が .env で空欄です" for a in sorted(used - set(render_auths(values)))]
     return errs, warns, device_rows(devices)
 
 
@@ -552,13 +552,13 @@ def check_surge(values):
         except ValueError:
             ok = False
         if not ok:
-            errs.append(f"SURGE_FACTOR={f}: 1.5〜100 の数にしてください (平常の何倍で急増とみなすか)")
+            errs.append(f"SURGE_FACTOR={f}: 1.5〜100 の数値を指定してください (急増と判定する平常値比の倍率)")
     k = values.get("SURGE_MIN_KBPS")
     if k and not (k.isdigit() and 0 < int(k) <= 10**7):
-        errs.append(f"SURGE_MIN_KBPS={k}: 1 以上の整数 (kbps) にしてください")
+        errs.append(f"SURGE_MIN_KBPS={k}: 1 以上の整数 (kbps) を指定してください")
     b = values.get("SURGE_BASELINE")
     if b and surge_settings({"SURGE_BASELINE": b})["baseline"] != b:
-        errs.append(f"SURGE_BASELINE={b}: 1h〜24h (または 1d) の長さにしてください (例 1h, 6h, 1d)")
+        errs.append(f"SURGE_BASELINE={b}: 1h〜24h (または 1d) の期間を指定してください (例 1h, 6h, 1d)")
     return errs
 
 
@@ -603,7 +603,7 @@ def load_receivers(path=None):
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:
-        raise Fail(f"通知先 {rel(path)} の YAML が読めません: {e}") from None
+        raise Fail(f"通知先 {rel(path)} の YAML 読込に失敗: {e}") from None
 
 
 def write_alerting(plan, values):
@@ -628,7 +628,7 @@ def reload_services():
         try:
             urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=HTTP_TIMEOUT)
         except urllib.error.HTTPError as e:  # e.g. Alertmanager refusing the new config: it keeps the old one
-            print(f"[NG] {url.split('/')[2]} が新しい設定を読み込めませんでした (HTTP {e.code}): {e.read(300).decode('utf-8', 'replace').strip()}")
+            print(f"[NG] {url.split('/')[2]} が新規設定の読込に失敗しました (HTTP {e.code}): {e.read(300).decode('utf-8', 'replace').strip()}")
         except OSError:  # not running (first `up`, or demo): it reads the files when it starts
             pass
 
@@ -641,7 +641,7 @@ def cmd_targets(args):
         if errs:
             return 2
         write_generated([], values, demo=True, plan=DEMO_PLAN)
-        print(f"デモ用の scrape 対象を書きました: {', '.join(demo_names())} (demo-gen 経由)")
+        print(f"デモ用の scrape 対象を出力しました: {', '.join(demo_names())} (demo-gen 経由)")
     else:
         errs, warns, rows = validate(values, load_inventory())
         n_errs, n_warns, plan = notify_plan(False, values)
@@ -649,10 +649,10 @@ def cmd_targets(args):
         if errs or n_errs:
             return 2
         write_generated(rows, values, demo=False, plan=plan)
-        print(f"scrape 対象 {len(rows)} 台を書きました ({rel(inventory_path())}): "
+        print(f"scrape 対象 {len(rows)} 台を出力しました ({rel(inventory_path())}): "
               + ", ".join(f"{d['name']}={d['address']}" for d in rows))
     plan = DEMO_PLAN if args.demo else plan
-    print("通知先: " + (", ".join(f"{n} ({t}: {s})" for n, t, s, _ in notify_summary(plan)) or "なし (どこにも通知しません)"))
+    print("通知先: " + (", ".join(f"{n} ({t}: {s})" for n, t, s, _ in notify_summary(plan)) or "なし (外部通知なし)"))
     reload_services()
     return 0
 
@@ -682,8 +682,8 @@ def cmd_setup_check(args):
     if (GEN / "mode").exists():
         print(f"profile の設定: {mode()}")
         return 0
-    print("[NG] profile の設定がありません。profile を指定していない (docker compose --profile demo up -d か、"
-          ".env に COMPOSE_PROFILES=prod (tools init が書きます)) か、設定の生成に失敗しました "
+    print("[NG] profile の設定が存在しません。profile が未指定 (docker compose --profile demo up -d、または "
+          ".env に COMPOSE_PROFILES=prod (tools init が記述)) か、設定の生成に失敗しています "
           "(理由: docker compose logs demo-setup prod-setup)", file=sys.stderr)
     return 1
 
@@ -742,7 +742,7 @@ def probe(url):
             socket.create_connection((host, int(port)), HTTP_TIMEOUT).close()
             return True, "接続可"
         except OSError as e:
-            return False, f"接続できません ({type(e).__name__})"
+            return False, f"接続不可 ({type(e).__name__})"
     try:
         status, _ = http_get(url)
         return status < 400, f"HTTP {status}"
@@ -799,17 +799,17 @@ def snmp_probe(d, m):
         msg = e.read().decode("utf-8", "replace")
         return False, "—", 0, snmp_error(msg) or f"HTTP {e.code}"
     except OSError as e:
-        return False, "—", 0, f"exporter に接続できません ({type(e).__name__})"
+        return False, "—", 0, f"exporter に接続不可 ({type(e).__name__})"
     up = re.search(r"^sysUpTime (\S+)$", body, re.M)
     hc = len(re.findall(r"^ifHCInOctets\{", body, re.M))
     if not up or not hc:
-        return False, "—", hc, snmp_error(body) or "sysUpTime / ifHCInOctets が取れません"
+        return False, "—", hc, snmp_error(body) or "sysUpTime / ifHCInOctets の取得不可"
     days = float(up.group(1)) / 100 / 86400
     wan = d.get("wan_interface")
     if wan:
         names = sorted(set(re.findall(r'^ifHCInOctets\{[^}]*ifName="([^"]*)"', body, re.M)))
         if wan not in names:
-            return False, f"{days:.1f} 日", hc, f"WAN の ifName {wan} がありません (ある ifName: {', '.join(names) or 'なし'})"
+            return False, f"{days:.1f} 日", hc, f"WAN の ifName {wan} が存在しません (存在する ifName: {', '.join(names) or 'なし'})"
         return True, f"{days:.1f} 日", hc, f"OK (WAN {wan})"
     return True, f"{days:.1f} 日", hc, "OK"
 
@@ -819,7 +819,7 @@ def snmp_error(text):
     if not m:
         return ""
     hint = {"timeout": "応答なし (IP・ポート・SNMP 有効化・ACL を確認)", "authentic": "認証エラー (ユーザー名・パスワード・方式を確認)",
-            "unknown user": "SNMPv3 ユーザーが機器にありません", "decrypt": "暗号化エラー (priv パスワード・方式を確認)"}
+            "unknown user": "SNMPv3 ユーザーが機器に未登録", "decrypt": "暗号化エラー (priv パスワード・方式を確認)"}
     for k, v in hint.items():
         if k in m.group(1).lower():
             return v
@@ -831,7 +831,7 @@ def wait_syslog(rows, seconds):
     t0 = time.time_ns() - 2 * 10**9
     seen = {d["name"]: None for d in rows}
     deadline = time.monotonic() + seconds
-    print(f"syslog の受信を最大 {seconds} 秒待ちます ({', '.join(seen)}) ...", flush=True)
+    print(f"syslog の受信を最大 {seconds} 秒待機します ({', '.join(seen)}) ...", flush=True)
     while time.monotonic() < deadline and None in seen.values():
         for name in [n for n, v in seen.items() if v is None]:
             try:
@@ -847,7 +847,7 @@ def wait_syslog(rows, seconds):
 def cmd_check(args):
     m = mode()
     rc = 0
-    print(f"モード: {m}  (生成済みの scrape 対象から判定。demo / prod)\n")
+    print(f"モード: {m}  (生成完了の scrape 対象から判定。demo / prod)\n")
     if m == "prod":
         errs, warns, rows = validate(env_map(), safe_inventory())
     else:
@@ -856,7 +856,7 @@ def cmd_check(args):
     print("■ 設定の検証")
     report(errs, warns)
     if not errs:
-        print("[OK] .env と機器台帳に問題はありません" if m == "prod" else "[OK] .env に問題はありません")
+        print("[OK] .env と機器台帳に問題なし" if m == "prod" else "[OK] .env に問題なし")
     rc |= bool(errs)
     print("\n■ サービスの health")
     srows = []
@@ -875,14 +875,14 @@ def cmd_check(args):
         up = {r["metric"].get("instance"): r["value"][1] for r in prom_query('up{job="snmp"}')}
         up_err = None
     except (OSError, ValueError, KeyError) as e:
-        up, up_err = {}, f"Prometheus に問い合わせできません ({type(e).__name__})"
+        up, up_err = {}, f"Prometheus への照会不可 ({type(e).__name__})"
     drows = []
     for d in rows:
         ok, uptime, hc, detail = snmp_probe(d, m)
         state = up.get(d["name"])
         if up_err or state != "1":  # Prometheus is what the screens use: its target must exist and be up too
             ok = False
-            why = up_err or ("Prometheus の scrape 対象にありません (tools targets を確認)" if state is None else "Prometheus の scrape が失敗中 (up=0)")
+            why = up_err or ("Prometheus の scrape 対象外です (tools targets を確認)" if state is None else "Prometheus の scrape が失敗中 (up=0)")
             detail = why if detail.startswith("OK") else f"{detail} / {why}"
         rc |= not ok
         drows.append((d["name"], d["address"], "OK" if ok else "NG", uptime, hc, state or "—", detail))
@@ -894,9 +894,9 @@ def cmd_check(args):
         lrows = []
         for name, line in seen.items():
             rc |= line is None
-            lrows.append((name, "OK" if line else "NG", (line or "届きませんでした (機器の syslog host 設定・SYSLOG_BIND/PORT・FW を確認)")[:70]))
-        table(("機器", "syslog", "最初に届いた行 / 対処"), lrows)
-    print("\n結果:", "すべて OK" if not rc else "NG があります (上の表を確認してください)")
+            lrows.append((name, "OK" if line else "NG", (line or "未着 (機器の syslog host 設定・SYSLOG_BIND/PORT・FW を確認)")[:70]))
+        table(("機器", "syslog", "最初の受信行 / 対処"), lrows)
+    print("\n結果:", "全項目 OK" if not rc else "NG 項目あり (上記の表を確認してください)")
     return 1 if rc else 0
 
 
@@ -908,11 +908,11 @@ def check_users():
     try:
         users = au.load_users(AUTHELIA_USERS)
     except (au.AuthError, OSError, yaml.YAMLError) as e:
-        print(f"[NG] 利用者のファイルを読めません: {e}")
+        print(f"[NG] 利用者ファイルの読込不可: {e}")
         return True
     usable = [n for n, u in users.items() if not u.get("disabled") and au.role_of(u) != "-"]
     if not usable:
-        print("[NG] 利用者がいません。docker compose run --rm tools user add <名前> --role admin で作ってください")
+        print("[NG] 利用者が未登録です。docker compose run --rm tools user add <名称> --role admin で作成してください")
         return True
     print(f"[OK] {len(usable)} 人 (" + ", ".join(f"{n}={au.role_of(users[n])}" for n in usable) + ")")
     return False
@@ -920,27 +920,27 @@ def check_users():
 
 def check_capture(m):
     """Packet capture (prod with OBS_CAPTURE=1) and the GeoIP databases. -> 1 on a problem."""
-    print("\n■ パケット取込とフロー (flowd) / GeoIP")
+    print("\n■ パケットキャプチャとフロー (flowd) / GeoIP")
     rc = 0
     src = flow_source(m == "demo")
     if src is None:
-        print("キャプチャは無効です (OBS_CAPTURE=0。有効にするには docs/capture.md)")
+        print("キャプチャは無効です (OBS_CAPTURE=0。有効化の方法は docs/capture.md)")
     elif src == "capture":
         st = cap.capture_status(CAPTURE_VOL)
         if st["state"] == "running":
             print(f"[OK] キャプチャ中: {st.get('iface')} / フィルタ {st.get('filter') or '(なし)'} / snaplen {st.get('snaplen')} / "
                   f"リング {st.get('ring_files')} 本 {st.get('ring_bytes', 0) / 1e6:.0f} MB (上限 {st.get('ring_limit_bytes', 0) / 1e6:.0f} MB) / "
-                  f"受信 {st.get('received')} / NIC の受信ドロップ {st.get('nic_rx_dropped')} / dumpcap の欠落 (終了したセッション分) {st.get('dumpcap_dropped')}")
+                  f"受信 {st.get('received')} / NIC の受信ドロップ {st.get('nic_rx_dropped')} / dumpcap の欠落 (終了セッション分) {st.get('dumpcap_dropped')}")
             if st.get("nic_rx_dropped") or st.get("dumpcap_dropped"):
-                print("[注意] パケットの取りこぼしがあります (NIC の受信ドロップ / dumpcap の欠落)。CAPTURE_BPF で絞るか CAPTURE_SNAPLEN を下げてください")
+                print("[注意] パケット欠落が発生しています (NIC の受信ドロップ / dumpcap の欠落)。CAPTURE_BPF による対象限定、または CAPTURE_SNAPLEN の縮小を実施してください")
             print(RAW_NOTE)
         else:
             rc = 1
-            why = st.get("error") or ("status.json がありません (capture サービスが動いていない: docker compose --profile capture up -d)" if st["state"] == "none"
-                                      else f"{st['age_s']} 秒更新がありません")
-            print(f"[NG] キャプチャが動いていません: {why}")
+            why = st.get("error") or ("status.json が存在しません (capture サービス停止中: docker compose --profile capture up -d)" if st["state"] == "none"
+                                      else f"{st['age_s']} 秒間更新なし")
+            print(f"[NG] キャプチャ停止中: {why}")
     else:
-        print(f"デモ: フローは {'合成 pcap (demo/demo-home.pcap) を flowd-demo が繰り返し再生' if src == 'pcap-replay' else 'demo-gen の合成値'}")
+        print(f"デモ: フローは {'合成 pcap (demo/demo-home.pcap) を flowd-demo が反復再生' if src == 'pcap-replay' else 'demo-gen の合成値'}")
     demo = subprocess.run([sys.executable, str(WORK / "demo/make_demo_pcap.py"), "--check"], capture_output=True, text=True)
     print(f"[{'OK' if demo.returncode == 0 else 'NG'}] デモ pcap: {(demo.stdout or demo.stderr).strip()[:120]}")
     rc |= demo.returncode != 0
@@ -948,7 +948,7 @@ def check_capture(m):
     table(("GeoIP", "版 (月)", "MiB", "経過日数", "状態"), [(a, b, c, "—" if d is None else d, e) for a, b, c, d, e in rows])
     print(f"  ({cap.ATTRIBUTION})")
     if src == "capture" and any(r[3] is None or r[3] > cap.GEOIP_STALE_DAYS for r in rows):
-        print("[注意] GeoIP がないか古いと、通信先の国・都市は Unknown / 古い推定になります (docker compose run --rm tools geoip update)")
+        print("[注意] GeoIP が不在または旧版の場合、通信先の国・都市は Unknown / 旧推定値になります (docker compose run --rm tools geoip update)")
     return rc
 
 
@@ -960,28 +960,28 @@ def check_notify(m):
     except Fail as e:
         errs, warns, plan = [str(e)], [], None
     if m == "demo":
-        print("デモ: 通知はデモ用の受信先 (demo-sink) に記録するだけで、外部へは送りません")
+        print("デモ: 通知はデモ用受信先 (demo-sink) への記録のみで、外部送信なし")
     report(errs, warns)
     rc = int(bool(errs))
     try:
         same, when = alertmanager_current()
-        print(f"[OK] Alertmanager は生成された設定で動いています (読み込み {when})" if same else
-              "[NG] Alertmanager が生成済みの設定を読み込んでいません (docker compose run --rm tools targets で再生成・再読込。"
-              "直らなければ docker compose logs alertmanager)")
+        print(f"[OK] Alertmanager は生成済設定で稼働中 (読込 {when})" if same else
+              "[NG] Alertmanager が生成済設定を未読込 (docker compose run --rm tools targets で再生成・再読込。"
+              "解消しない場合は docker compose logs alertmanager)")
     except (OSError, ValueError, KeyError, AttributeError, yaml.YAMLError) as e:
         same = False
-        print(f"[NG] Alertmanager の設定を確認できません ({type(e).__name__})")
+        print(f"[NG] Alertmanager の設定を確認不可 ({type(e).__name__})")
     rc |= not same
     try:
         am = json.loads(http_get("http://prometheus:9090/api/v1/alertmanagers")[1])["data"]["activeAlertmanagers"]
-        print("[OK] Prometheus はアラートを Alertmanager に送っています" if am else "[NG] Prometheus に Alertmanager の送り先がありません")
+        print("[OK] Prometheus はアラートを Alertmanager へ送信中" if am else "[NG] Prometheus に Alertmanager の送信先が未設定")
         rc |= not am
     except (OSError, ValueError, KeyError) as e:
-        print(f"[NG] Prometheus に問い合わせできません ({type(e).__name__})")
+        print(f"[NG] Prometheus への照会不可 ({type(e).__name__})")
         rc = 1
     if plan and plan["receivers"]:
-        table(("通知先", "種別", "重大度", "宛先"), notify_summary(plan))
-        print("  (実際に届くかは docker compose run --rm tools notify-test で確認)")
+        table(("通知先", "種別", "重大度", "送信先"), notify_summary(plan))
+        print("  (実際の到達可否は docker compose run --rm tools notify-test で確認)")
     return rc
 
 
@@ -1013,23 +1013,23 @@ def cmd_notify_test(args):
     try:
         am = yaml.safe_load((GEN / "alertmanager/alertmanager.yml").read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
-        raise Fail("通知の設定が生成されていません。docker compose up -d の後に実行してください") from None
+        raise Fail("通知の設定が未生成です。docker compose up -d の実行後に実行してください") from None
     names = [r["name"] for r in am.get("receivers", []) if r["name"] != "none"]
     if args.receiver and args.receiver not in names:
-        raise Fail(f"通知先 {args.receiver} はありません (ある通知先: {', '.join(names) or 'なし'})")
+        raise Fail(f"通知先 {args.receiver} は存在しません (既存の通知先: {', '.join(names) or 'なし'})")
     names = [args.receiver] if args.receiver else names
     if not names:
-        raise Fail(f"通知先がありません。{rel(receivers_path())} を作って (例 config.example/alerting/receivers.example.yaml) "
+        raise Fail(f"通知先が存在しません。{rel(receivers_path())} を作成し (例 config.example/alerting/receivers.example.yaml) "
                    "docker compose run --rm tools targets を実行してください")
     run, now = f"{int(time.time())}-{os.getpid()}", time.time()
     alert = lambda n, end: {"labels": {"alertname": TEST_ALERT, "severity": "info", "instance": "notify-test", "obs_test": run, "obs_test_receiver": n},
-                            "annotations": {"summary": "notification test (tools notify-test)", "summary_ja": "通知のテストです (tools notify-test)。対応は不要です",
+                            "annotations": {"summary": "notification test (tools notify-test)", "summary_ja": "通知テストです (tools notify-test)。対応は不要です",
                                             "value": "—"}, "startsAt": iso_utc(now), "endsAt": iso_utc(end)}
     try:
         post_alerts([alert(n, now + 300) for n in names])
     except OSError as e:
-        raise Fail(f"Alertmanager にテストのアラートを送れません ({type(e).__name__})。docker compose up -d の後に実行してください") from None
-    print(f"テスト通知を {len(names)} 件の通知先に送りました (run {run})。結果を最大 {args.timeout} 秒待ちます ...", flush=True)
+        raise Fail(f"Alertmanager へのテストアラート送信に失敗 ({type(e).__name__})。docker compose up -d の実行後に実行してください") from None
+    print(f"テスト通知を {len(names)} 件の通知先へ送信しました (run {run})。結果を最大 {args.timeout} 秒待機します ...", flush=True)
     got, deadline = {}, time.monotonic() + args.timeout
     while time.monotonic() < deadline and len(got) < len(names):
         time.sleep(2)
@@ -1037,13 +1037,13 @@ def cmd_notify_test(args):
             for rec in json.loads(http_get(f"{RELAY}/results?test={run}")[1]):
                 got[rec["receiver"]] = rec  # the last attempt (Alertmanager retries a failed one)
         except (OSError, ValueError) as e:
-            print(f"notify-relay に問い合わせできません ({type(e).__name__})")
+            print(f"notify-relay への照会不可 ({type(e).__name__})")
     try:
         post_alerts([alert(n, time.time()) for n in names])  # resolve the test (the relay does not send its resolution)
     except OSError:
         pass
     rows = [(n, got[n]["type"], "OK" if got[n]["result"] == "ok" else "NG", got[n]["detail"]) if n in got
-            else (n, "—", "NG", "届きませんでした (docker compose logs alertmanager notify-relay を確認)") for n in names]
+            else (n, "—", "NG", "未着 (docker compose logs alertmanager notify-relay を確認)") for n in names]
     table(("通知先", "種別", "結果", "応答"), rows)
     bad = sum(r[2] != "OK" for r in rows)
     print(f"\n{len(rows) - bad}/{len(rows)} OK")
@@ -1079,19 +1079,19 @@ def render_env(values):
 
 
 def render_inventory(rows):
-    head = ("# 機器台帳 (tools init が生成。手で編集してよい。変更後は `docker compose run --rm tools targets`)\n"
+    head = ("# 機器台帳 (tools init が生成。手動編集も可。変更後は `docker compose run --rm tools targets`)\n"
             f"#   name: 表示名 (Prometheus の instance / Loki の host)   kind: {' | '.join(kinds())} (drivers/ のドライバ)\n"
-            "#   address: 管理 IP か DNS 名 (SNMP の宛先。syslog の送信元の照合にも使う)\n"
-            "#   snmp_auth: snmp/auths.yml の auth 名 (yamaha_v3 / yamaha_v2c)   syslog: syslog を送ってくるか\n"
-            "#   wan_interface: (任意、1 台だけ) WAN 側の ifName (例 lan2)。WAN 表示とアラート WanHighUtilization に使う\n"
-            "# 秘密値 (SNMP のパスワード等) はここに書かず .env に置く。\n")
+            "#   address: 管理 IP または DNS 名 (SNMP の送信先。syslog 送信元の照合にも使用)\n"
+            "#   snmp_auth: snmp/auths.yml の auth 名 (yamaha_v3 / yamaha_v2c)   syslog: syslog 送信の有無\n"
+            "#   wan_interface: (任意、1 台のみ) WAN 側の ifName (例 lan2)。WAN 表示とアラート WanHighUtilization に使用\n"
+            "# 秘密値 (SNMP のパスワード等) は本ファイルに記述せず .env に配置。\n")
     return head + yaml.safe_dump({"devices": rows}, sort_keys=False, allow_unicode=True)
 
 
 def parse_device(spec):
     parts = [p.strip() for p in spec.split(",")]
     if len(parts) not in (3, 4):
-        raise Fail(f"--device '{spec}': 名前,種別,アドレス[,auth] の形にしてください (例 rtx1300,rtx,192.168.100.1)")
+        raise Fail(f"--device '{spec}': 名称,種別,アドレス[,auth] の形式にしてください (例 rtx1300,rtx,192.168.100.1)")
     return {"name": parts[0], "kind": parts[1], "address": parts[2],
             "snmp_auth": parts[3] if len(parts) == 4 else "yamaha_v3", "syslog": True}
 
@@ -1105,31 +1105,31 @@ def apply_wan(devices, spec):
         if d["name"] == name:
             d["wan_interface"] = ifname
             return
-    raise Fail(f"--wan {spec}: 機器 {name} が --device にありません")
+    raise Fail(f"--wan {spec}: 機器 {name} が --device に未指定")
 
 
 def ask(prompt, default="", secret=False):
-    shown = f" [{default}]" if default and not secret else (" [設定済み]" if default else "")
+    shown = f" [{default}]" if default and not secret else (" [設定完了]" if default else "")
     v = (getpass.getpass if secret else input)(f"{prompt}{shown}: ").strip()
     return v or default
 
 
 def interactive(values, devices):
-    print("対話モード: Enter で [ ] 内の既定値を使います。パスワードは表示されません。\n")
-    values["OBS_BIND"] = ask("画面を公開するアドレス (127.0.0.1 はこの PC のみ。LAN 公開は LAN 側 IP か 0.0.0.0、ログイン必須)", values["OBS_BIND"])
+    print("対話モード: Enter 押下で [ ] 内の既定値を採用。パスワードは非表示です。\n")
+    values["OBS_BIND"] = ask("画面の公開アドレス (127.0.0.1 は本 PC のみ。LAN 公開は LAN 側 IP または 0.0.0.0、ログイン必須)", values["OBS_BIND"])
     values["OBS_PORT"] = ask("画面のポート", values["OBS_PORT"])
-    values["SYSLOG_BIND"] = ask("syslog を受けるアドレス (機器から送るなら LAN 側 IP か 0.0.0.0)", values["SYSLOG_BIND"])
+    values["SYSLOG_BIND"] = ask("syslog の受信アドレス (機器からの受信時は LAN 側 IP または 0.0.0.0)", values["SYSLOG_BIND"])
     values["SYSLOG_PORT"] = ask("syslog のポート (UDP/TCP)", values["SYSLOG_PORT"])
-    values["SNMP_V3_USER"] = ask("SNMPv3 ユーザー名 (機器側に設定したもの)", values["SNMP_V3_USER"])
+    values["SNMP_V3_USER"] = ask("SNMPv3 ユーザー名 (機器側の設定値)", values["SNMP_V3_USER"])
     values["SNMP_V3_AUTH_PROTO"] = ask(f"SNMPv3 認証方式 ({'/'.join(AUTH_PROTOS)})", values["SNMP_V3_AUTH_PROTO"])
     values["SNMP_V3_AUTH_PASS"] = ask("SNMPv3 認証パスワード (8 文字以上)", values["SNMP_V3_AUTH_PASS"], secret=True)
     values["SNMP_V3_PRIV_PROTO"] = ask(f"SNMPv3 暗号方式 ({'/'.join(PRIV_PROTOS)})", values["SNMP_V3_PRIV_PROTO"])
     values["SNMP_V3_PRIV_PASS"] = ask("SNMPv3 暗号パスワード (8 文字以上)", values["SNMP_V3_PRIV_PASS"], secret=True)
-    values["SNMP_COMMUNITY"] = ask("SNMPv2c コミュニティ (使わないなら空のまま)", values["SNMP_COMMUNITY"], secret=True)
+    values["SNMP_COMMUNITY"] = ask("SNMPv2c コミュニティ (不使用時は空欄)", values["SNMP_COMMUNITY"], secret=True)
     if devices:
-        print(f"機器 {len(devices)} 台は引数で指定済みです")
+        print(f"機器 {len(devices)} 台は引数で指定完了")
         return
-    print("\n機器を登録します (名前を空にすると終了)")
+    print("\n機器の登録 (名称が空欄の時点で終了)")
     while True:
         name = ask("  機器名 (例 rtx1300)")
         if not name:
@@ -1139,7 +1139,7 @@ def interactive(values, devices):
         auth = ask("  SNMP 認証 (yamaha_v3 / yamaha_v2c)", "yamaha_v3")
         dev = {"name": name, "kind": kind, "address": addr, "snmp_auth": auth, "syslog": True}
         if driver(kind).get("wan") and not any("wan_interface" in x for x in devices):
-            wan = ask("  WAN 側インターフェースの ifName (例 lan2。WAN 表示とアラートに使う。空ならなし)")
+            wan = ask("  WAN 側インターフェースの ifName (例 lan2。WAN 表示とアラートに使用。空欄時はなし)")
             if wan:
                 dev["wan_interface"] = wan
         devices.append(dev)
@@ -1147,25 +1147,25 @@ def interactive(values, devices):
 
 def ask_receiver(rtype, values):
     """Questions for one receiver: its non-secret part (-> receivers.yaml) and secrets (-> values, i.e. .env)."""
-    r = {"name": ask("  名前 (英小文字・数字・- _)", rtype), "type": rtype}
+    r = {"name": ask("  名称 (英小文字・数字・- _)", rtype), "type": rtype}
     if rtype == "email":
-        r["to"] = [x.strip() for x in ask("  宛先メールアドレス (複数はカンマ区切り)").split(",") if x.strip()]
+        r["to"] = [x.strip() for x in ask("  送信先メールアドレス (複数指定はカンマ区切り)").split(",") if x.strip()]
         values["SMTP_HOST"] = ask("  SMTP サーバー (例 smtp.example.com)", values.get("SMTP_HOST", ""))
         values["SMTP_TLS"] = ask("  暗号化 (starttls / tls / none)", values.get("SMTP_TLS") or "starttls")
         values["SMTP_PORT"] = ask("  SMTP ポート", values.get("SMTP_PORT") or SMTP_PORTS.get(values["SMTP_TLS"], "587"))
         values["SMTP_FROM"] = ask("  送信元メールアドレス", values.get("SMTP_FROM", ""))
-        values["SMTP_USER"] = ask("  SMTP ユーザー名 (認証なしなら空)", values.get("SMTP_USER", ""))
+        values["SMTP_USER"] = ask("  SMTP ユーザー名 (認証なしの場合は空欄)", values.get("SMTP_USER", ""))
         if values["SMTP_USER"]:
             values["SMTP_PASSWORD"] = ask("  SMTP パスワード", values.get("SMTP_PASSWORD", ""), secret=True)
     elif rtype == "line":
         values["LINE_CHANNEL_ACCESS_TOKEN"] = ask("  LINE Messaging API のチャネルアクセストークン (長期)", values.get("LINE_CHANNEL_ACCESS_TOKEN", ""), secret=True)
-        r["to"] = ask("  送り先のユーザー ID / グループ ID (U… / C…、LINE Developers で確認)")
+        r["to"] = ask("  送信先のユーザー ID / グループ ID (U… / C…、LINE Developers で確認)")
     else:
         key = URL_SECRETS[rtype]
-        what = {"slack": "Slack の Incoming Webhook URL", "discord": "Discord の Webhook URL", "webhook": "送り先の URL"}[rtype]
+        what = {"slack": "Slack の Incoming Webhook URL", "discord": "Discord の Webhook URL", "webhook": "送信先の URL"}[rtype]
         values[key] = ask(f"  {what}", values.get(key, ""), secret=True)
         if rtype == "webhook":
-            values["WEBHOOK_BEARER_TOKEN"] = ask("  Authorization: Bearer に付けるトークン (不要なら空)", values.get("WEBHOOK_BEARER_TOKEN", ""), secret=True)
+            values["WEBHOOK_BEARER_TOKEN"] = ask("  Authorization: Bearer の付与トークン (不要時は空欄)", values.get("WEBHOOK_BEARER_TOKEN", ""), secret=True)
     return r
 
 
@@ -1173,18 +1173,18 @@ def interactive_receivers(values):
     """init: optionally scaffold alerting/receivers.yaml (critical / warning to every receiver, info to none)."""
     path = receivers_path()
     if path.exists():
-        print(f"\n通知先: 既存の {rel(path)} を使います (変更は手で編集し、tools targets)")
+        print(f"\n通知先: 既存の {rel(path)} を使用します (変更時は手動編集後に tools targets)")
         return None
     if ask("\nアラートの通知先 (メール / Slack / Discord / LINE / Webhook) を設定しますか? (y/N)", "n").lower() != "y":
-        print(f"通知先なし (アラートは画面にだけ出ます)。後から: config.example/alerting/receivers.example.yaml を {rel(path)} にコピーして編集")
+        print(f"通知先なし (アラートは画面表示のみ)。事後設定: config.example/alerting/receivers.example.yaml を {rel(path)} へコピーして編集")
         return None
     receivers = []
     while True:
-        rtype = ask(f"  通知先の種類 ({' / '.join(RECEIVER_TYPES)}、空で終了)")
+        rtype = ask(f"  通知先の種類 ({' / '.join(RECEIVER_TYPES)}、空欄で終了)")
         if not rtype:
             break
         if rtype not in RECEIVER_TYPES or any(r["type"] == rtype for r in receivers):
-            print("  使えない種類か、追加済みの種類です (秘密値は種類ごとに 1 組。メールの宛先は 1 件に複数書けます)")
+            print("  使用不可または追加完了の種類です (秘密値は種類単位で 1 組。メールは 1 件に複数の送信先を記述可能)")
             continue
         receivers.append(ask_receiver(rtype, values))
     if not receivers:
@@ -1199,8 +1199,8 @@ def cmd_init(args):
     inv = inventory_path()
     exists = [p for p in (ENV_FILE, inv) if p.exists()]
     if exists and not args.force:
-        raise Fail("既にあります: " + ", ".join(rel(p) for p in exists)
-                   + "。作り直すなら --force (元のファイルは .bak に残します)")
+        raise Fail("既存ファイルあり: " + ", ".join(rel(p) for p in exists)
+                   + "。再作成時は --force (元ファイルは .bak に保存)")
     values = {"COMPOSE_PROFILES": "prod", **pinned_settings(), "OBS_BIND": args.bind, "OBS_PORT": args.port, "SYSLOG_BIND": args.syslog_bind,
               "SYSLOG_PORT": args.syslog_port,
               "SNMP_V3_USER": args.snmp_user or env("SNMP_V3_USER"), "SNMP_V3_AUTH_PROTO": args.snmp_auth_proto,
@@ -1215,22 +1215,22 @@ def cmd_init(args):
     receivers = None
     if not args.yes:
         if not sys.stdin.isatty():
-            raise Fail("対話できません (TTY なし)。`docker compose run --rm tools init` で実行するか、--yes と引数で指定してください")
+            raise Fail("対話不可 (TTY なし)。`docker compose run --rm tools init` で実行するか、--yes と引数で指定してください")
         interactive(values, devices)
         receivers = interactive_receivers(values)
     values["OBS_PUBLIC_URL"] = public_url(values["OBS_BIND"], values["OBS_PORT"], values["OBS_PUBLIC_URL"], au.required(values)) or ""
     if not values["OBS_PUBLIC_URL"] and not args.yes:
-        values["OBS_PUBLIC_URL"] = ask("LAN から画面を開くときの URL (例 https://192.168.100.10:8080。ログイン・通知のリンクに使う)").rstrip("/")
+        values["OBS_PUBLIC_URL"] = ask("LAN からの画面アクセス用 URL (例 https://192.168.100.10:8080。ログイン・通知のリンクに使用)").rstrip("/")
     errs, warns, rows = validate(values, devices)
     if receivers is not None:
         n_errs, n_warns, _ = check_receivers(receivers, values, rel(receivers_path()))
         errs, warns = errs + n_errs, warns + n_warns
     if not values["OBS_PUBLIC_URL"] and not any("421" in e for e in errs):  # (check_env already says it for 0.0.0.0)
-        errs.append("OBS_BIND=0.0.0.0 のときは --public-url で LAN から開く URL を指定してください (例 https://192.168.100.10:8080)")
+        errs.append("OBS_BIND=0.0.0.0 の場合は --public-url で LAN アクセス用 URL を指定してください (例 https://192.168.100.10:8080)")
     print("\n■ 設定の検証")
     report(errs, warns)
     if errs:
-        print("\n書き込みませんでした。上の NG を直してもう一度実行してください")
+        print("\n書込を中止しました。上記 NG の修正後に再実行してください")
         return 2
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for p in exists:
@@ -1238,18 +1238,18 @@ def cmd_init(args):
     write_atomic(ENV_FILE, render_env(env_file_values(values, read_env_file(ENV_FILE))), mode=0o600)
     write_atomic(inv, render_inventory(rows))
     fix_owner(ENV_FILE, inv, inv.parent)
-    print(f"[OK] 書きました: .env (秘密値はここだけ、権限 600), {rel(inv)} ({len(rows)} 台)"
+    print(f"[OK] 出力完了: .env (秘密値は本ファイルのみ、権限 600), {rel(inv)} ({len(rows)} 台)"
           + (f" — 設定ディレクトリ {env('OBS_CONFIG_DIR')}" if env("OBS_CONFIG_DIR") else
-             " — リポジトリ内 (従来の配置、git 管理外)。外に置くなら OBS_CONFIG_DIR (docs/configuration.md)")
-          + (f"。{', '.join(sorted(SECRETS_FROM_FILES))} は *_FILE から (.env には書きません)" if SECRETS_FROM_FILES else ""))
+             " — リポジトリ内 (従来の配置、git 管理外)。外部配置には OBS_CONFIG_DIR (docs/configuration.md)")
+          + (f"。{', '.join(sorted(SECRETS_FROM_FILES))} は *_FILE から取得 (.env には非記述)" if SECRETS_FROM_FILES else ""))
     if receivers is not None:
         write_atomic(receivers_path(), render_receivers(receivers))
         fix_owner(receivers_path())
-        print(f"[OK] 書きました: {rel(receivers_path())} (通知先 {len(receivers['receivers'])} 件)。起動後に docker compose run --rm tools notify-test")
+        print(f"[OK] 出力完了: {rel(receivers_path())} (通知先 {len(receivers['receivers'])} 件)。起動後に docker compose run --rm tools notify-test")
     if au.required(values):
-        print("[OK] ログインの秘密値 (OBS_AUTH_*) を .env に作りました。画面はログイン必須 (HTTPS) です。\n"
-              "次: 利用者を作る: docker compose run --rm tools user add <名前> --role admin   (operator / viewer も)")
-    print(f"次: docker compose up -d   (COMPOSE_PROFILES={values['COMPOSE_PROFILES']} を .env に書いたので profile 指定は不要)\n"
+        print("[OK] ログインの秘密値 (OBS_AUTH_*) を .env に生成しました。画面はログイン必須 (HTTPS) です。\n"
+              "次: 利用者の作成: docker compose run --rm tools user add <名称> --role admin   (operator / viewer も可)")
+    print(f"次: docker compose up -d   (COMPOSE_PROFILES={values['COMPOSE_PROFILES']} を .env に記述完了のため profile 指定は不要)\n"
           "    docker compose run --rm tools check   (SNMP 疎通・syslog 受信・health の確認)")
     return 0
 
@@ -1297,20 +1297,20 @@ def cmd_migrate_config(args):
     target = env("OBS_CONFIG_DIR")
     if not target:
         if not ENV_FILE.exists():
-            raise Fail("リポジトリ内に .env がありません (移すものがありません)。新しく作るなら tools init")
+            raise Fail("リポジトリ内に .env が存在しません (移行対象なし)。新規作成は tools init")
         added = pin_env(ENV_FILE, pinned_settings())
         fix_owner(ENV_FILE)
-        print(f"[OK] .env に {', '.join(added)} を固定しました (今のボリュームをそのまま使います)" if added
-              else "[OK] .env にプロジェクト名は固定済みです (変えません)")
-        print("設定をリポジトリの外へ移すには: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config")
+        print(f"[OK] .env に {', '.join(added)} を固定しました (現行ボリュームを継続使用)" if added
+              else "[OK] .env のプロジェクト名は固定完了 (変更なし)")
+        print("設定のリポジトリ外への移行方法: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config")
         return 0
     legacy = read_env_file(WORK / ".env")
     plan = migration_plan(legacy, WORK, CONFIG)
     if not plan:
-        raise Fail("リポジトリ内に移す設定 (.env・台帳・通知先・backups) がありません")
+        raise Fail("リポジトリ内に移行対象の設定 (.env・台帳・通知先・backups) なし")
     clash = [d for _, d in plan if d.exists()]
     if clash and not args.force:
-        raise Fail("移す先に既にあります: " + ", ".join(rel(d) for d in clash) + "。上書きするなら --force (元は .bak に残します)")
+        raise Fail("移行先に既存ファイルあり: " + ", ".join(rel(d) for d in clash) + "。上書き時は --force (元ファイルは .bak に保存)")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for src, dst in plan:
         if dst.exists():
@@ -1324,10 +1324,10 @@ def cmd_migrate_config(args):
                        "OBS_CONFIG_DIR": target})
     fix_owner(ENV_FILE)
     old = [str(s.relative_to(WORK)) for s, _ in plan]
-    print(f"[OK] {len(plan)} 件を {target} に写しました: {', '.join(rel(d) for _, d in plan)}")
-    print(f"     .env に COMPOSE_PROJECT_NAME={read_env_file(ENV_FILE)['COMPOSE_PROJECT_NAME']} (今のボリュームのまま) と OBS_CONFIG_DIR を固定")
-    print("次: export OBS_CONFIG_DIR=" + target + " して ./geofront up -d (または docker compose --env-file " + target + "/.env ...)、"
-          "./geofront run --rm tools check で確認してから、リポジトリ内の旧ファイルを消してください: " + " ".join(old))
+    print(f"[OK] {len(plan)} 件を {target} に複製しました: {', '.join(rel(d) for _, d in plan)}")
+    print(f"     .env に COMPOSE_PROJECT_NAME={read_env_file(ENV_FILE)['COMPOSE_PROJECT_NAME']} (現行ボリュームを継続) と OBS_CONFIG_DIR を固定")
+    print("次: export OBS_CONFIG_DIR=" + target + " の実行後に ./geofront up -d (または docker compose --env-file " + target + "/.env ...)、"
+          "./geofront run --rm tools check で確認後、リポジトリ内の旧ファイルを削除してください: " + " ".join(old))
     return 0
 
 
@@ -1336,14 +1336,14 @@ def doctor_config_rows():
     if env("OBS_CONFIG_DIR"):
         rows.append(("設定の場所", dr.OK, f"OBS_CONFIG_DIR ({env('OBS_CONFIG_DIR')})", ""))
         if (WORK / ".env").exists():
-            rows.append(("旧配置の .env", dr.WARN, "リポジトリ内にも .env があります (使われません)", "移行を確かめてからリポジトリの .env を消す"))
+            rows.append(("旧配置の .env", dr.WARN, "リポジトリ内にも .env が存在します (不使用)", "移行の確認後にリポジトリの .env を削除"))
     else:
         rows.append(("設定の場所", dr.WARN, "リポジトリ内 (従来の配置。git 管理外)",
-                     "外へ: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config (docs/configuration.md)"))
+                     "外部配置: OBS_CONFIG_DIR=<dir> ./geofront run --rm tools migrate-config (docs/configuration.md)"))
     leak = env("OBS_DOCTOR_LEAK")  # scripts/doctor.sh runs scripts/leak-scan.sh on the host (git is not in this image)
     if leak:
-        rows.append(("コミットしてはいけないデータ", dr.OK if leak == "OK" else dr.WARN, leak,
-                     "" if leak == "OK" or leak.startswith("省略") else "scripts/leak-scan.sh で場所を確認 (.gitignore / config の外出し)"))
+        rows.append(("コミット禁止データ", dr.OK if leak == "OK" else dr.WARN, leak,
+                     "" if leak == "OK" or leak.startswith("省略") else "scripts/leak-scan.sh で位置を確認 (.gitignore / config の外部配置)"))
     return rows
 
 
@@ -1417,13 +1417,13 @@ def doctor_host_rows(values, file_env):
 
 def doctor_env_rows(values, file_env):
     if not ENV_FILE.exists():
-        return [(".env", dr.NG, "ありません", "docker compose run --rm tools init (デモだけなら不要: --profile demo)")]
+        return [(".env", dr.NG, "不在", "docker compose run --rm tools init (デモのみの場合は不要: --profile demo)")]
     rows = []
     bits = ENV_FILE.stat().st_mode & 0o777
-    rows.append((".env の権限", dr.WARN if bits & 0o077 else dr.OK, oct(bits), "chmod 600 .env (秘密値が入っています)" if bits & 0o077 else ""))
+    rows.append((".env の権限", dr.WARN if bits & 0o077 else dr.OK, oct(bits), "chmod 600 .env (秘密値を格納)" if bits & 0o077 else ""))
     profiles = profiles_of(file_env)
     if not profiles & {"prod", "demo"}:
-        rows.append(("COMPOSE_PROFILES", dr.NG, f"{','.join(sorted(profiles)) or '空'} (prod か demo が必要)", ".env に COMPOSE_PROFILES=prod (tools init が書きます)"))
+        rows.append(("COMPOSE_PROFILES", dr.NG, f"{','.join(sorted(profiles)) or '空欄'} (prod または demo が必要)", ".env に COMPOSE_PROFILES=prod (tools init が記述)"))
         return rows
     rows.append(("COMPOSE_PROFILES", dr.OK, ",".join(sorted(profiles)), ""))
     if "prod" in profiles:
@@ -1435,7 +1435,7 @@ def doctor_env_rows(values, file_env):
         errs, warns = check_env(values)
     rows += [(".env / 台帳", dr.NG, e, "") for e in errs] + [(".env / 台帳", dr.WARN, w, "") for w in warns]
     if not errs and not warns:
-        rows.append((".env / 台帳", dr.OK, "必須値と形式に問題はありません", ""))
+        rows.append((".env / 台帳", dr.OK, "必須値と形式に問題なし", ""))
     return rows
 
 
@@ -1450,9 +1450,9 @@ def doctor_access_rows(values):
             admins = sum(au.role_of(users[n]) == "admin" for n in usable)
             rows.append(("ログインの利用者", dr.OK, f"{len(usable)} 人 (admin {admins} 人)", ""))
         else:
-            rows.append(("ログインの利用者", dr.NG, "0 人 (ログイン必須なので画面は開きません)", "docker compose run --rm tools user add <名前> --role admin"))
+            rows.append(("ログインの利用者", dr.NG, "0 人 (ログイン必須のため画面表示不可)", "docker compose run --rm tools user add <名称> --role admin"))
     except (au.AuthError, OSError, yaml.YAMLError) as e:
-        rows.append(("ログインの利用者", dr.NG, f"利用者のファイルを読めません: {e}", ""))
+        rows.append(("ログインの利用者", dr.NG, f"利用者ファイルの読込不可: {e}", ""))
     pki = CADDY_VOL / "caddy"
     root = dr.decode_cert(pki / "pki/authorities/local/root.crt")
     leaves = [c for c in map(dr.decode_cert, sorted((pki / "certificates").glob("*/*/*.crt"))) if c]
@@ -1465,11 +1465,11 @@ def cmd_doctor(args):
     values = {**file_env, **env_map()}
     rows = (doctor_host_rows(values, file_env) + doctor_config_rows() + doctor_env_rows(values, file_env) + doctor_access_rows(values)
 )
-    print("■ 導入前の自己診断 (機器には接続しません)\n")
-    table(("項目", "状態", "詳細", "直し方"), rows)
+    print("■ 導入前の自己診断 (機器への接続なし)\n")
+    table(("項目", "状態", "詳細", "対処方法"), rows)
     ng = sum(r[1] == dr.NG for r in rows)
     print(f"\n結果: NG {ng} / WARN {sum(r[1] == dr.WARN for r in rows)} / OK {sum(r[1] == dr.OK for r in rows)}"
-          + ("  — NG を直してから docker compose up -d" if ng else "  — 起動できます (起動後: docker compose run --rm tools check)"))
+          + ("  — NG の修正後に docker compose up -d" if ng else "  — 起動可能です (起動後: docker compose run --rm tools check)"))
     return 1 if ng else 0
 
 
@@ -1483,7 +1483,7 @@ def snapshot_prometheus():
     except urllib.error.HTTPError as e:
         raise Fail(f"Prometheus のスナップショットに失敗しました (HTTP {e.code}。admin API が無効?)") from None
     except OSError:
-        raise Fail("Prometheus に接続できません。起動してから backup してください (docker compose up -d)") from None
+        raise Fail("Prometheus に接続不可。起動後に backup を実行してください (docker compose up -d)") from None
     return VOL / "prometheus/snapshots" / name
 
 
@@ -1547,7 +1547,7 @@ def cmd_backup(args):
                 "inventory": rel(inv) if inv.exists() else None, "receivers": rel(receivers_path()) if receivers_path().exists() else None}
     snap = snapshot_prometheus()
     if args.include_captures:
-        print("[注意] キャプチャのリングとアップロードした pcap を含めます (通信内容そのもの。取り扱い注意)")
+        print("[注意] キャプチャのリングとアップロード済 pcap を同梱します (通信内容そのもの。取扱注意)")
     umask = os.umask(0o077)  # the archive (and the copies in tmp) are owner-only from the first byte
     staged = []
     try:
@@ -1584,7 +1584,7 @@ def cmd_backup(args):
     fix_owner(path)
     size = path.stat().st_size / 2**20
     print(f"[OK] {rel(path)} ({size:.1f} MiB): {', '.join(manifest['parts'])}"
-          + (", 機器台帳" if manifest["inventory"] else "") + (", 通知先" if manifest["receivers"] else "") + (", .env (秘密値を含む。取り扱い注意)" if manifest["include_env"] else ", .env は含めていません"))
+          + (", 機器台帳" if manifest["inventory"] else "") + (", 通知先" if manifest["receivers"] else "") + (", .env (秘密値を包含。取扱注意)" if manifest["include_env"] else ", .env は対象外"))
     return 0
 
 
@@ -1642,7 +1642,7 @@ def fix_capture_volumes():
         if CAPTURE_VOL.is_dir():
             reader_modes(CAPTURE_VOL)
     except OSError as e:
-        print(f"[注意] キャプチャ / アップロードのボリュームの所有者・権限を直せませんでした: {e}", file=sys.stderr)
+        print(f"[注意] キャプチャ / アップロードのボリュームの所有者・権限の修正に失敗: {e}", file=sys.stderr)
 
 
 def clear_dir(p):
@@ -1660,10 +1660,10 @@ def check_manifest(manifest, members, with_config):
         files = [m for m in members if m.isfile() and m.name.startswith(part + "/")]
         want = (manifest.get("contents") or {}).get(part)
         if not files:
-            raise Fail(f"アーカイブの {part} が空です。途中で切れたバックアップかもしれません (何も消していません)")
+            raise Fail(f"アーカイブの {part} が空です。途中で中断したバックアップの可能性があります (削除処理は未実施)")
         if want is not None and (len(files), sum(m.size for m in files)) != (want.get("files"), want.get("bytes")):
-            raise Fail(f"アーカイブの {part} が manifest と合いません ({len(files)} ファイル / {sum(m.size for m in files)} バイト、"
-                       f"記録は {want.get('files')} / {want.get('bytes')})。途中で切れたか壊れています (何も消していません)")
+            raise Fail(f"アーカイブの {part} が manifest と不一致 ({len(files)} ファイル / {sum(m.size for m in files)} バイト、"
+                       f"記録は {want.get('files')} / {want.get('bytes')})。途中中断または破損の状態です (削除処理は未実施)")
     out = []
     for key, what, dirs in (("inventory", "機器台帳", ("inventory", "testbed")), ("receivers", "通知先", ("alerting", "testbed"))):
         given = manifest.get(key)
@@ -1679,35 +1679,35 @@ def check_manifest(manifest, members, with_config):
         out.append((".env", ENV_FILE))
     for name, _ in out:
         if "config/" + name not in names:
-            raise Fail(f"アーカイブに config/{name} がありません")
+            raise Fail(f"アーカイブに config/{name} が存在しません")
     return out if with_config else []
 
 
 def cmd_restore(args):
     path = (CONFIG / args.archive) if not Path(args.archive).is_absolute() else Path(args.archive)
     if not path.exists():
-        raise Fail(f"アーカイブがありません: {args.archive}")
+        raise Fail(f"アーカイブが存在しません: {args.archive}")
     busy = running_services()
     if busy:
-        raise Fail(f"{', '.join(busy)} が動いています。先に止めてください: docker compose stop prometheus loki alertmanager authelia proxy")
+        raise Fail(f"{', '.join(busy)} が稼働中です。事前に停止してください: docker compose stop prometheus loki alertmanager authelia proxy")
     with tarfile.open(path, "r:gz") as tar:
         members = tar.getmembers()
         try:
             manifest = json.load(tar.extractfile("manifest.json"))
         except KeyError:
-            raise Fail("manifest.json がありません。tools backup で作ったアーカイブではありません") from None
+            raise Fail("manifest.json が存在しません。tools backup で作成したアーカイブではありません") from None
         config = check_manifest(manifest, members, args.with_config)
         if {"capture", "uploads"} & set(manifest["parts"]):  # their writers / readers must be stopped too
             using = [n for n, port in (("mask-api", 8000), ("flowd", 9100), ("flowd-demo", 9100)) if probe(f"tcp://{n}:{port}")[0]]
             if cap.capture_status(CAPTURE_VOL)["state"] == "running":
                 using.append("capture")
             if using:
-                raise Fail(f"キャプチャ / アップロードを戻すには {', '.join(using)} も止めてください: "
-                           "docker compose stop capture flowd flowd-demo mask-api (何も消していません)")
+                raise Fail(f"キャプチャ / アップロードの復元には {', '.join(using)} の停止も必要です: "
+                           "docker compose stop capture flowd flowd-demo mask-api (削除処理は未実施)")
         if not args.yes:
             if not sys.stdin.isatty():
-                raise Fail("確認できません (TTY なし)。--yes を付けてください")
-            if input(f"{', '.join(manifest['parts'])} の現在のデータを消して {path.name} の内容に置き換えます。続けますか? [y/N]: ").lower() != "y":
+                raise Fail("確認不可 (TTY なし)。--yes を指定してください")
+            if input(f"{', '.join(manifest['parts'])} の現在のデータを削除し、{path.name} の内容に置換します。継続しますか? [y/N]: ").lower() != "y":
                 print("中止しました")
                 return 1
         for comp in manifest["parts"]:
@@ -1718,7 +1718,7 @@ def cmd_restore(args):
             chown_tree(dest, uid, gid)
             if comp in ("capture", "uploads"):
                 reader_modes(dest)
-            print(f"[OK] {comp} を戻しました")
+            print(f"[OK] {comp} を復元しました")
         if args.with_config:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             for name, dst in config:
@@ -1730,8 +1730,8 @@ def cmd_restore(args):
                 with tar.extractfile("config/" + name) as f:
                     write_atomic(dst, f.read().decode("utf-8"), mode=0o600 if name == ".env" else 0o644)
                 fix_owner(dst, dst.parent)  # a directory created here (inventory/ on a new host) too, not root's
-                print(f"[OK] {name} を戻しました (元のファイルは .bak-{stamp})")
-    print("次: docker compose up -d   (台帳・通知先を戻したなら docker compose run --rm tools targets も)")
+                print(f"[OK] {name} を復元しました (元ファイルは .bak-{stamp})")
+    print("次: docker compose up -d   (台帳・通知先の復元時は docker compose run --rm tools targets も実行)")
     return 0
 
 
@@ -1760,21 +1760,21 @@ def cmd_user(args):
                     current[k.strip()] = v.strip().strip("'")
         new = au.missing_secrets(current)
         if not new:
-            print("[OK] ログインの秘密値は .env に揃っています (変えません)")
+            print("[OK] ログインの秘密値は .env に設定完了 (変更なし)")
             return 0
         append_env(new)
-        print(f"[OK] .env に書きました: {', '.join(new)} (権限 600。値は表示しません)。反映: docker compose up -d")
+        print(f"[OK] .env に出力完了: {', '.join(new)} (権限 600。設定値は非表示)。反映: docker compose up -d")
         return 0
     users = au.load_users(AUTHELIA_USERS)
     if args.action == "list":
         if not users:
-            print("利用者はいません (docker compose run --rm tools user add <名前> --role admin)")
+            print("利用者は未登録です (docker compose run --rm tools user add <名称> --role admin)")
             return 0
         table(("利用者", "表示名", "役割", "状態"), [(n, u.get("displayname", ""), au.role_of(u), "無効" if u.get("disabled") else "有効")
                                                 for n, u in sorted(users.items())])
         return 0
     if not args.name:
-        raise Fail(f"tools user {args.action} <名前> のように利用者名を指定してください")
+        raise Fail(f"tools user {args.action} <名称> の形式で利用者名を指定してください")
     if args.action == "add":
         users = au.add(users, args.name, args.role or "viewer", au.read_password(env("OBS_USER_PASSWORD"), args.name), args.display, args.email)
     elif args.action == "passwd":
@@ -1787,7 +1787,7 @@ def cmd_user(args):
         users = au.remove(users, args.name)
     au.save_users(AUTHELIA_USERS, users)
     print(f"[OK] {args.action} {args.name}" + (f" (役割 {au.role_of(users[args.name])})" if args.name in users else "")
-          + "。Authelia は変更をすぐ読み込みます (削除・役割の変更は次の操作から効きます)")
+          + "。Authelia は変更を即時読込します (削除・役割の変更は次回操作から有効)")
     return 0
 
 
@@ -1795,7 +1795,7 @@ def cmd_user(args):
 
 CAPTURE_VOL = VOL / "capture"
 # the operator's own console shows interface / filter / errors raw (enx<MAC> names, BPF addresses); the screens never do
-RAW_NOTE = "[注意] インターフェース名・フィルタ・エラーは生の値です (MAC / IP を含むことがあります。共有するときは伏せてください。画面では伏せ字)"
+RAW_NOTE = "[注意] インターフェース名・フィルタ・エラーは生の値です (MAC / IP を包含する可能性あり。共有時はマスクしてください。画面ではマスク表示)"
 UPLOADS_VOL = VOL / "uploads"
 GEOIP_VOL = VOL / "geoip"
 
@@ -1804,14 +1804,14 @@ def cmd_capture_setup(args):
     """capture profile, at `up`: the profile and .env must agree (OBS_CAPTURE=1 makes the setup step scrape flowd and
     tell the screens that flows are configured), and an interface must be named."""
     if not capture_on():
-        print("[NG] capture profile が有効ですが .env に OBS_CAPTURE=1 がありません。両方を設定してください "
+        print("[NG] capture profile は有効ですが .env に OBS_CAPTURE=1 が未設定です。双方を設定してください "
               "(COMPOSE_PROFILES=prod,capture と OBS_CAPTURE=1、CAPTURE_IFACE=<LAN 側のインターフェース>)", file=sys.stderr)
         return 1
     if mode() != "prod":
-        print("[NG] capture profile は prod と一緒に使います (COMPOSE_PROFILES=prod,capture)", file=sys.stderr)
+        print("[NG] capture profile は prod と併用します (COMPOSE_PROFILES=prod,capture)", file=sys.stderr)
         return 1
     if not env("CAPTURE_IFACE"):
-        print("[NG] CAPTURE_IFACE (キャプチャするインターフェース名) を .env に設定してください", file=sys.stderr)
+        print("[NG] CAPTURE_IFACE (キャプチャ対象のインターフェース名) を .env に設定してください", file=sys.stderr)
         return 1
     print(f"キャプチャ: {env('CAPTURE_IFACE')} (フィルタ {env('CAPTURE_BPF') or 'なし'})。flowd を scrape します")
     return 0
@@ -1832,10 +1832,10 @@ def cmd_capture(args):
         if st["state"] != "none":
             table(("項目", "値"), [("インターフェース", st.get("iface") or "—"), ("BPF フィルタ", st.get("filter") or "(なし)"),
                                   ("snaplen", st.get("snaplen") or "—"), ("リング", f"{len(ring)} 本 / {sum(f[1] for f in ring) / 1e6:.1f} MB (上限 {(st.get('ring_limit_bytes') or 0) / 1e6:.0f} MB)"),
-                                  ("受信", st.get("received", "—")), ("NIC の受信ドロップ (取込開始から)", st.get("nic_rx_dropped", "—")),
-                                  ("dumpcap の欠落 (終了したセッションの合計)", st.get("dumpcap_dropped", "—")), ("エラー", st.get("error") or "なし")])
+                                  ("受信", st.get("received", "—")), ("NIC の受信ドロップ (キャプチャ開始以降)", st.get("nic_rx_dropped", "—")),
+                                  ("dumpcap の欠落 (終了セッションの合計)", st.get("dumpcap_dropped", "—")), ("エラー", st.get("error") or "なし")])
             print(RAW_NOTE)
-        print(f"アップロード: {len(ups)} 件 / {sum(f[1] for f in ups) / 2**20:.1f} MiB (上限 {up_max / 2**20:.0f} MiB、{up_keep_h:g} 時間で削除)")
+        print(f"アップロード: {len(ups)} 件 / {sum(f[1] for f in ups) / 2**20:.1f} MiB (上限 {up_max / 2**20:.0f} MiB、{up_keep_h:g} 時間経過で削除)")
         return 0 if st["state"] != "stopped" or not capture_on() else 1
     if args.action == "list":
         rows = [("ring", n + (" (記録中)" if n == current else ""), f"{b / 1e6:.1f}", time.strftime("%m-%d %H:%M:%S", time.localtime(t))) for n, b, t in ring]
@@ -1856,7 +1856,7 @@ def cmd_geoip(args):
     if args.action == "update":
         print(f"DB-IP Lite (City + ASN) を取得します ({cap.ATTRIBUTION}) ...", flush=True)
         ok, _ = cap.geoip_update(GEOIP_VOL, force=args.force)
-        print("flowd は 1 分以内に新しい版を読み込みます" if ok else "一部取得できませんでした (ネットワーク / 月初めはまだ公開前のことがあります)")
+        print("flowd は 1 分以内に新版を読込します" if ok else "一部の取得に失敗しました (ネットワーク障害、または月初の未公開期間の可能性)")
         return 0 if ok else 1
     rows = cap.geoip_rows(GEOIP_VOL)
     table(("GeoIP", "版 (月)", "MiB", "経過日数", "状態"), [(a, b, c, "—" if d is None else d, e) for a, b, c, d, e in rows])
@@ -1917,7 +1917,7 @@ def cmd_test_syslog(args):
     for tag, (f, proto) in want.items():
         exp_line = expected_line(f)
         if tag not in got:
-            rows.append((f["id"], f["form"], proto, "NG", "Loki に届いていません"))
+            rows.append((f["id"], f["form"], proto, "NG", "Loki に未着"))
             rc = 1
             continue
         stream, line = got[tag]
@@ -1928,7 +1928,7 @@ def cmd_test_syslog(args):
             diffs.append(f"line={line!r} (期待 {exp_line!r})")
         leaked = set(stream) & {"src_addr", "src_name", "hdr_host", "inv_host"}  # pipeline-internal labels
         if leaked:  # (Loki itself adds service_name / detected_level; those are not ours)
-            diffs.append(f"内部ラベルが残っています {sorted(leaked)}")
+            diffs.append(f"内部ラベルが残存 {sorted(leaked)}")
         rc |= bool(diffs)
         rows.append((f["id"], f["form"], proto, "NG" if diffs else "OK", "; ".join(diffs) or exp_line[:48]))
     table(("fixture", "形式", "経路", "結果", "詳細"), rows)
@@ -2003,7 +2003,7 @@ def selftest():
     terrs = check_devices([{**dev[0], "parent": "wlx413"}, {**dev[1], "parent": "rtx1300"}], {"yamaha_v3"})
     assert any("ループ" in e for e in terrs), terrs
     terrs = check_devices([{**dev[0], "parent": "rtx1300", "parent_if": "ge0.1"}, {**dev[1], "parent_if": "lan1"}], {"yamaha_v3"})
-    assert any("別の機器" in e for e in terrs) and any("ifName" in e for e in terrs) and any("一緒に" in e for e in terrs), terrs
+    assert any("他機器" in e for e in terrs) and any("ifName" in e for e in terrs) and any("併記" in e for e in terrs), terrs
     # P5 surges: thresholds from .env into the recording rules; invalid values refused by check_env
     s = surge_settings({"SURGE_FACTOR": "4", "SURGE_MIN_KBPS": "50", "SURGE_BASELINE": "1d"})
     assert s == {"factor": 4.0, "min_kbps": 50, "baseline": "1d"} and surge_settings({"SURGE_BASELINE": "30m"})["baseline"] == "1h"
@@ -2040,7 +2040,7 @@ def selftest():
         assert Path(tmp, "ring").stat().st_mode & 0o777 == 0o755 and Path(tmp, "ring", "a.pcapng").stat().st_mode & 0o777 == 0o644
     assert check_env({**good, "SLACK_WEBHOOK_URL": "https://x/'"})[0]  # quoting rules cover the notification secrets too
     werrs = check_devices([{**dev[0], "wan_interface": "ge0.1"}, {**dev[1], "wan_interface": "lan1"}], {"yamaha_v3"})
-    assert any("ifName" in e for e in werrs) and any("1 台だけ" in e for e in werrs), werrs
+    assert any("ifName" in e for e in werrs) and any("1 台のみ" in e for e in werrs), werrs
     assert ui_config([], demo=True)["devices"][2] == {"name": "wlx222", "kind": "wlx", "wireless": True} and ui_config([], demo=True)["flows_configured"]
     e = render_env({"OBS_BIND": "0.0.0.0", "SNMP_V3_AUTH_PASS": "pa$$ word", "COMPOSE_PROFILES": "prod", "NEW_KEY": "1"})
     assert "OBS_BIND=0.0.0.0\n" in e and "SNMP_V3_AUTH_PASS='pa$$ word'\n" in e and "COMPOSE_PROFILES=prod\n" in e and e.endswith("NEW_KEY=1\n")
@@ -2158,60 +2158,60 @@ def selftest():
 def parser():
     p = argparse.ArgumentParser(prog="tools", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd")
-    i = sub.add_parser("init", help=".env と機器台帳を作る (対話 / --yes で引数のみ)")
-    i.add_argument("--yes", action="store_true", help="対話せず引数・環境変数と既定値で作る")
-    i.add_argument("--force", action="store_true", help="既存の .env / 台帳を作り直す (.bak に退避)")
-    i.add_argument("--device", action="append", default=[], metavar="名前,種別,アドレス[,auth]", help="機器 (複数回可)")
+    i = sub.add_parser("init", help=".env と機器台帳の作成 (対話 / --yes で引数のみ)")
+    i.add_argument("--yes", action="store_true", help="対話なしで引数・環境変数と既定値から作成")
+    i.add_argument("--force", action="store_true", help="既存の .env / 台帳の再作成 (.bak に退避)")
+    i.add_argument("--device", action="append", default=[], metavar="名称,種別,アドレス[,auth]", help="機器 (複数回可)")
     i.add_argument("--bind", default="127.0.0.1", help="画面の公開アドレス (既定 127.0.0.1)")
     i.add_argument("--port", default="8080")
-    i.add_argument("--public-url", default="", help="LAN から開く URL (既定: --bind と --port から。0.0.0.0 のときは必須)")
-    i.add_argument("--syslog-bind", default="127.0.0.1", help="syslog 受信アドレス (機器から受けるなら LAN 側 IP)")
+    i.add_argument("--public-url", default="", help="LAN アクセス用 URL (既定: --bind と --port から生成。0.0.0.0 の場合は必須)")
+    i.add_argument("--syslog-bind", default="127.0.0.1", help="syslog 受信アドレス (機器からの受信時は LAN 側 IP)")
     i.add_argument("--syslog-port", default="514")
     i.add_argument("--snmp-user", default="")
     i.add_argument("--snmp-auth-proto", default="SHA", choices=AUTH_PROTOS)
     i.add_argument("--snmp-priv-proto", default="AES", choices=PRIV_PROTOS)
     i.add_argument("--wan", default="", metavar="機器名:ifName", help="WAN 側インターフェース (例 rtx1300:lan2)")
     i.add_argument("--auth", action="store_true", help="127.0.0.1 公開でもログインを必須にする (OBS_AUTH=1。LAN 公開では常に必須)")
-    i.epilog = "SNMP のパスワードは引数にせず -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... (または対話) で渡します"
+    i.epilog = "SNMP のパスワードは引数でなく -e SNMP_V3_AUTH_PASS=... -e SNMP_V3_PRIV_PASS=... (または対話) で指定します"
     c = sub.add_parser("check", help="検証・SNMP 疎通・syslog 受信・health")
-    c.add_argument("--syslog-wait", type=int, default=60, metavar="秒", help="syslog の受信を待つ秒数 (0 で省略、既定 60)")
-    t = sub.add_parser("targets", help="台帳から scrape 対象などを生成")
-    t.add_argument("--demo", action="store_true", help="デモ用 (demo-gen) の対象を書く")
-    b = sub.add_parser("backup", help="設定とデータを 1 つのアーカイブに")
-    b.add_argument("--include-env", action="store_true", help=".env (秘密値) も含める")
+    c.add_argument("--syslog-wait", type=int, default=60, metavar="秒", help="syslog の受信待機秒数 (0 で省略、既定 60)")
+    t = sub.add_parser("targets", help="台帳から scrape 対象等を生成")
+    t.add_argument("--demo", action="store_true", help="デモ用 (demo-gen) の対象を出力")
+    b = sub.add_parser("backup", help="設定とデータを単一アーカイブに集約")
+    b.add_argument("--include-env", action="store_true", help=".env (秘密値) も同梱")
     b.add_argument("--out", default="backups", help="出力先 (設定ディレクトリ OBS_CONFIG_DIR からの相対、既定 backups)")
-    b.add_argument("--include-captures", action="store_true", help="キャプチャのリングとアップロードした pcap も含める (既定は含めない)")
-    r = sub.add_parser("restore", help="アーカイブを戻す (prometheus / loki / alertmanager / authelia / proxy、キャプチャを含むなら capture / flowd / mask-api も停止しておく)")
+    b.add_argument("--include-captures", action="store_true", help="キャプチャのリングとアップロード済 pcap も同梱 (既定は対象外)")
+    r = sub.add_parser("restore", help="アーカイブの復元 (prometheus / loki / alertmanager / authelia / proxy、キャプチャ同梱時は capture / flowd / mask-api も事前停止)")
     r.add_argument("archive")
-    r.add_argument("--with-config", action="store_true", help="機器台帳・通知先 (と含まれていれば .env) も戻す")
-    r.add_argument("--yes", action="store_true", help="確認せずに実行")
-    sub.add_parser("setup-check", help="(起動時に自動) profile の設定が済んでいるか")
-    n = sub.add_parser("notify-test", help="各通知先にテスト通知 (Alertmanager 経由) を送り、応答を表で出す")
-    n.add_argument("--receiver", default="", metavar="名前", help="この通知先だけ (既定: すべて)")
-    n.add_argument("--timeout", type=int, default=40, metavar="秒", help="結果を待つ秒数 (既定 40)")
+    r.add_argument("--with-config", action="store_true", help="機器台帳・通知先 (同梱時は .env も) を復元")
+    r.add_argument("--yes", action="store_true", help="確認なしで実行")
+    sub.add_parser("setup-check", help="(起動時に自動) profile の設定完了の確認")
+    n = sub.add_parser("notify-test", help="各通知先へテスト通知 (Alertmanager 経由) を送信し、応答を表形式で出力")
+    n.add_argument("--receiver", default="", metavar="名称", help="指定通知先のみ (既定: 全件)")
+    n.add_argument("--timeout", type=int, default=40, metavar="秒", help="結果の待機秒数 (既定 40)")
     s = sub.add_parser("test-syslog", help="syslog 解析の回帰テスト (fixtures → Alloy → Loki)")
     s.add_argument("--host", default="alloy")
     s.add_argument("--port", type=int, default=514)
     s.add_argument("--timeout", type=int, default=30)
-    cp = sub.add_parser("capture", help="パケット取込: status / list / prune (保存期間・合計容量を超えたものを削除)")
+    cp = sub.add_parser("capture", help="パケットキャプチャ: status / list / prune (保存期間・合計容量の超過分を削除)")
     cp.add_argument("action", choices=("status", "list", "prune"))
-    cp.add_argument("--keep-hours", type=float, default=None, metavar="時間", help="prune: この時間より古いものを削除 (既定 CAPTURE_KEEP_HOURS / PCAP_KEEP_HOURS)")
-    cp.add_argument("--dry-run", action="store_true", help="prune: 削除せずに対象だけ表示")
+    cp.add_argument("--keep-hours", type=float, default=None, metavar="時間", help="prune: 指定時間を超過したファイルを削除 (既定 CAPTURE_KEEP_HOURS / PCAP_KEEP_HOURS)")
+    cp.add_argument("--dry-run", action="store_true", help="prune: 削除なしで対象のみ表示")
     gp = sub.add_parser("geoip", help="GeoIP (DB-IP Lite City + ASN, CC BY 4.0): update / status")
     gp.add_argument("action", choices=("update", "status"))
-    gp.add_argument("--force", action="store_true", help="update: 最新でも取り直す")
+    gp.add_argument("--force", action="store_true", help="update: 最新版でも再取得")
     sub.add_parser("capture-setup", help="(capture profile の起動時に自動) .env と profile の整合確認")
     u = sub.add_parser("user", help="ログインの利用者 (Authelia): add / passwd / role / remove / list、秘密値: secrets")
     u.add_argument("action", choices=("add", "passwd", "role", "remove", "list", "secrets"))
     u.add_argument("name", nargs="?", default="")
     u.add_argument("--role", choices=au.ROLES, default=None, help="add (既定 viewer) / role: viewer・operator・admin")
     u.add_argument("--display", default="", help="add: 表示名 (既定は利用者名)")
-    u.add_argument("--email", default="", help="add: メールアドレス (TOTP の登録に必要。送信はしない。既定は <名前>@users.obs.invalid)")
-    u.epilog = "パスワードは対話で 2 回入力 (TTY なしなら -e OBS_USER_PASSWORD=...)。保存は argon2id のハッシュだけです"
-    mc = sub.add_parser("migrate-config", help="従来の配置 (リポジトリ内) の設定を OBS_CONFIG_DIR へ写す (なければプロジェクト名を .env に固定)")
-    mc.add_argument("--force", action="store_true", help="移す先にあるファイルを上書き (元は .bak に残す)")
-    sub.add_parser("doctor", help="導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。ホストの項目は scripts/doctor.sh から)")
-    sub.add_parser("help", help="この説明")
+    u.add_argument("--email", default="", help="add: メールアドレス (TOTP の登録に必要。送信なし。既定は <名称>@users.obs.invalid)")
+    u.epilog = "パスワードは対話で 2 回入力 (TTY なしの場合は -e OBS_USER_PASSWORD=...)。保存対象は argon2id のハッシュのみです"
+    mc = sub.add_parser("migrate-config", help="従来の配置 (リポジトリ内) の設定を OBS_CONFIG_DIR へ複製 (移行対象なしの場合はプロジェクト名を .env に固定)")
+    mc.add_argument("--force", action="store_true", help="移行先の既存ファイルを上書き (元ファイルは .bak に保存)")
+    sub.add_parser("doctor", help="導入前の自己診断 (Docker・CPU・メモリ・ディスク・時刻・ポート・.env・利用者・証明書。ホストの項目は scripts/doctor.sh 経由)")
+    sub.add_parser("help", help="本ヘルプ")
     return p
 
 
