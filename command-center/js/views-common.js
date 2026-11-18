@@ -502,7 +502,7 @@ export function dataView(id, cols, initial, card, keyOf) {
   const grid = el('div', 'cards');
   // cards-mode sort controls (the table sorts from its header)
   const sortBar = el('div', 'dv-sort');
-  const sl = el('label', 'fld-inline', '並び替え ');
+  const sl = el('label', 'fld-inline', 'ソート ');
   const sel = el('select');
   for (const c of cols) { const o = el('option', '', c.label); o.value = c.key; sel.append(o); }
   sel.addEventListener('change', () => { st.key = sel.value; st.desc = !!cols.find((c) => c.key === st.key)?.num; render(); });

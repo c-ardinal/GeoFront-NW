@@ -8,7 +8,7 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "{{ $labels.instance }} SNMP scrape failing"
-          summary_ja: "{{ $labels.instance }} から SNMP の応答がありません (収集に失敗)"
+          summary_ja: "{{ $labels.instance }} の SNMP 応答なし (収集失敗)"
           value: "up = {{ $value }}"
 
       # WanHighUtilization is generated per profile from the WAN interface (demo: rtx1300 lan2; prod: the inventory's
@@ -20,7 +20,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "{{ $labels.instance }} {{ $labels.ifName }} interface errors increasing"
-          summary_ja: "{{ $labels.instance }} {{ $labels.ifName }} のエラーが増えています (2 分で {{ $value | printf \"%.0f\" }} 件)"
+          summary_ja: "{{ $labels.instance }} {{ $labels.ifName }} のエラーが増加中です (2 分間で {{ $value | printf \"%.0f\" }} 件)"
           value: "{{ $value | printf \"%.0f\" }} 件 / 2 分"
 
       # ---- packet capture / flows (P3). flowd reports the capture service's status.json; no capture profile = no series
@@ -34,7 +34,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "packet capture stopped or not writing ({{ $labels.instance }})"
-          summary_ja: "パケット取込が止まっているか、15 分間パケットを書いていません (tools capture status で理由を確認)"
+          summary_ja: "パケットキャプチャが停止中、または 15 分間パケット書込なし (原因は tools capture status で確認)"
           value: "{{ $value | printf \"%.0f\" }}"
 
       # live: the capture interface's kernel rx_dropped (the only live drop counter dumpcap's ring offers)
@@ -44,7 +44,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "capture interface dropping packets ({{ $value | printf \"%.0f\" }} in 5 min, NIC rx_dropped)"
-          summary_ja: "キャプチャするインターフェースで受信ドロップが出ています (5 分で {{ $value | printf \"%.0f\" }} 件、NIC の rx_dropped)。CAPTURE_BPF で絞るか、負荷を確認してください"
+          summary_ja: "キャプチャ対象インターフェースで受信ドロップが発生中です (5 分間で {{ $value | printf \"%.0f\" }} 件、NIC の rx_dropped)。CAPTURE_BPF による対象限定、または負荷を確認してください"
           value: "{{ $value | printf \"%.0f\" }} 件 / 5 分"
 
       # dumpcap's own / pcap buffer drops: reported when a dumpcap session ends (restart, crash)
@@ -53,7 +53,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "dumpcap reported {{ $value | printf \"%.0f\" }} dropped packets (ended capture sessions, last hour)"
-          summary_ja: "dumpcap が取りこぼしを報告しました (終了したセッション分、1 時間で {{ $value | printf \"%.0f\" }} 件)"
+          summary_ja: "dumpcap がパケット欠落を報告しました (終了セッション分、1 時間で {{ $value | printf \"%.0f\" }} 件)"
           value: "{{ $value | printf \"%.0f\" }} 件 / 1 時間"
 
       - alert: FlowFilesSkipped
@@ -61,7 +61,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "flowd skipped {{ $value | printf \"%.0f\" }} capture files ({{ $labels.result }}) in the last hour"
-          summary_ja: "フロー集計が取り込めなかったリングファイルがあります (1 時間で {{ $value | printf \"%.0f\" }} 件、{{ $labels.result }})。そのぶん通信先の量が少なく出ます"
+          summary_ja: "フロー集計で処理不能なリングファイルがあります (1 時間で {{ $value | printf \"%.0f\" }} 件、{{ $labels.result }})。該当分、通信先の通信量が過少表示になります"
           value: "{{ $value | printf \"%.0f\" }} 件"
 
       - alert: GeoIPStale
@@ -81,7 +81,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "flow source down ({{ $labels.instance }})"
-          summary_ja: "通信先データ (フロー) の取得元 {{ $labels.instance }} が止まっています。地球儀・通信先は UNKNOWN 表示になります"
+          summary_ja: "通信先データ (フロー) の取得元 {{ $labels.instance }} が停止中です。地球儀・通信先は UNKNOWN 表示です"
           value: "{{ $value | printf \"%.0f\" }}"
 
       - alert: DeviceRebooted

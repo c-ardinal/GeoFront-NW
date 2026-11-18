@@ -22,7 +22,7 @@ export function initUi(h) {
   updateMode();
 }
 
-// PLAYBACK outranks the others: it has its own way back (the playback bar's "LIVE に戻る"), Esc / BACK TO LIVE only close
+// PLAYBACK outranks the others: it has its own way back (the playback bar's "LIVE へ復帰"), Esc / BACK TO LIVE only close
 // views there, and the idle auto-return (INVESTIGATE only) never ends a playback
 export const mode = () => (isPlayback() ? 'PLAYBACK' : st.modal || st.stack.length || st.selection || st.touched ? 'INVESTIGATE' : 'WALLBOARD');
 export const refreshMode = () => updateMode();

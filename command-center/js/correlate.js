@@ -60,7 +60,7 @@ export function correlateView(anchor) {
     st.key = key;
     st.toKey = toKey;
     const my = ++st.seq;
-    s.status.textContent = '集めています…';
+    s.status.textContent = '収集中…';
     try {
       const r = await fetchWithTimeout(`/correlate/events?${q}`, {}, 30000);
       const j = await r.json().catch(() => null);
@@ -82,7 +82,7 @@ export function correlateView(anchor) {
     t.title = `${jstFull.format(new Date(i.t * 1000))} JST`;
     head.append(t, el('span', 'cr-dt', dtText(i.dt)), badge(kk, kt), el('span', `cr-rel ${rc}`, rt));
     const title = el('div', `cr-title ${i.kind === 'syslog' ? 'mono' : ''}`, maskText(String(i.title)));
-    const why = el('div', 'cr-why', `関連: ${(i.why || []).join(' · ')}${i.before ? ' · 窓の開始時点で既に続いていた' : ''}`);
+    const why = el('div', 'cr-why', `関連: ${(i.why || []).join(' · ')}${i.before ? ' · 時間範囲の開始時点で継続中' : ''}`);
     const acts = el('div', 'cr-acts');
     // focus keys: a refreshed answer gives keyboard focus back to the same button of the same event
     const btn = (text, fn, label) => { const b = el('button', 'link-btn', text); b.type = 'button'; b.setAttribute('aria-label', label); b.dataset.fkey = `${text}|${i.kind}|${i.t}|${i.title}`; b.addEventListener('click', fn); acts.append(b); };
@@ -97,18 +97,18 @@ export function correlateView(anchor) {
     const cur = now();
     putIn(s.sum, tiles([
       { label: '基準時刻 (JST)', value: jstFull.format(new Date(st.at)) },
-      { label: '窓', value: `${jstClock.format(new Date(w.from * 1000))}–${jstClock.format(new Date(st.at + st.half * 1000))}` },
-      { label: '再生位置', value: jstClock.format(new Date(cur)), kind: 'warn', status: '窓の開始より前' },
+      { label: '時間範囲', value: `${jstClock.format(new Date(w.from * 1000))}–${jstClock.format(new Date(st.at + st.half * 1000))}` },
+      { label: '再生位置', value: jstClock.format(new Date(cur)), kind: 'warn', status: '時間範囲の開始以前' },
     ]));
-    const msg = el('p', 'na', `再生位置 (${jstClock.format(new Date(cur))}) はこの窓の開始より前です。再生位置より後の出来事は表示しません。`);
-    const b = el('button', 'link-btn ops-btn', '再生位置を基準に開き直す');
+    const msg = el('p', 'na', `再生位置 (${jstClock.format(new Date(cur))}) は本時間範囲の開始以前です。再生位置以降の事象は非表示です。`);
+    const b = el('button', 'link-btn ops-btn', '再生位置基準で再表示');
     b.type = 'button';
     b.lang = 'ja';
     b.dataset.fkey = 'reanchor';
     b.addEventListener('click', () => { st.at = now(); st.key = ''; st.data = null; if (lastCtx) view.update(lastCtx).catch(() => {}); });
     putIn(s.list.body, msg, b);
     s.partial.textContent = '';
-    s.status.textContent = '窓の外';
+    s.status.textContent = '時間範囲外';
   }
   function render(nav, force = false) {
     if (!s) return;
@@ -129,22 +129,22 @@ export function correlateView(anchor) {
     const n = (k) => shown.filter((i) => i.score === k).length;
     putIn(s.sum, tiles([
       { label: '基準時刻 (JST)', value: jstFull.format(new Date(d.window.at * 1000)) },
-      { label: '窓', value: `${jstClock.format(new Date(win.from * 1000))}–${jstClock.format(new Date(win.to * 1000))}`, sub: d.capped ? (isPlayback() ? '再生位置より後は含めません' : '現在より後はまだありません') : undefined },
+      { label: '時間範囲', value: `${jstClock.format(new Date(win.from * 1000))}–${jstClock.format(new Date(win.to * 1000))}`, sub: d.capped ? (isPlayback() ? '再生位置以降は対象外' : '現在以降は未発生') : undefined },
       { label: '関連 高', value: n(3), d: 0, kind: n(3) ? 'warn' : 'none' },
       { label: '関連 中', value: n(2), d: 0 },
       { label: '同時期', value: n(0), d: 0 },
     ]));
-    const list = items.length ? items.map((i) => itemRow(i, nav, win)) : [el('p', 'na', 'この窓に該当する出来事はありません')];
+    const list = items.length ? items.map((i) => itemRow(i, nav, win)) : [el('p', 'na', '本時間範囲に該当事象なし')];
     if (d.truncated) list.push(el('p', 'v-meta-line', `上限 ${d.items.length} 件まで表示 (全 ${d.total} 件)`));
     putIn(s.list.body, ...list);
     s.rules.replaceChildren(...d.rules.map((r) => el('li', '', r)));
-    s.partial.textContent = d.partial.length ? `一部の取得に失敗 (その分は欠けています): ${d.partial.map(maskText).join(' / ')}` : '';
+    s.partial.textContent = d.partial.length ? `一部の取得に失敗 (該当分は欠落): ${d.partial.map(maskText).join(' / ')}` : '';
     s.status.textContent = `${d.total} 件`;
   }
   const view = {
     title: `原因候補 · ${anchor.label}`, src: 'both',
     mount(body) {
-      const notice = el('p', 'cr-notice', '相関の候補です。時間が近い・同じ機器などの簡単な規則で並べたもので、原因と断定するものではありません。');
+      const notice = el('p', 'cr-notice', '相関候補です。時刻の近接・機器の同一性など簡易規則による整列で、原因の断定ではありません。');
       notice.setAttribute('role', 'note');
       const ctl = el('div', 'filters cr-ctl');
       const fl = el('label', 'fld', '基準時刻 (JST)');
@@ -154,18 +154,18 @@ export function correlateView(anchor) {
       input.addEventListener('change', () => { const v = fromInput(input.value); if (Number.isFinite(v)) { st.at = Math.min(v, now()); refresh(); } });
       fl.append(input);
       const refresh = () => { st.key = ''; if (lastCtx) view.update(lastCtx).catch(() => {}); };
-      ctl.append(fl, rangeSelect(HALVES, st.half, (v) => { st.half = v; refresh(); }, '時間窓'),
-        rangeSelect([['関連度順', 'rel'], ['時刻順', 'time']], st.sort, (v) => { st.sort = v; if (lastCtx) render(lastCtx.nav); }, '並べ順'));
+      ctl.append(fl, rangeSelect(HALVES, st.half, (v) => { st.half = v; refresh(); }, '時間範囲'),
+        rangeSelect([['関連度順', 'rel'], ['時刻順', 'time']], st.sort, (v) => { st.sort = v; if (lastCtx) render(lastCtx.nav); }, '整列順'));
       const status = el('span', 'cr-status');
       status.setAttribute('role', 'status');
       ctl.append(status);
       const rulesBox = el('details', 'cr-rules');
-      rulesBox.append(el('summary', '', '並べ方の規則'), el('ul'));
-      const list = section('同じ時間窓の出来事', '時刻 JST · Δ = 基準時刻からの差 · IP/MAC masked');
+      rulesBox.append(el('summary', '', '整列の規則'), el('ul'));
+      const list = section('同一時間範囲の事象', '時刻 JST · Δ = 基準時刻との差分 · IP/MAC masked');
       const partial = el('p', 'v-meta-line cr-partial');
       partial.setAttribute('role', 'status');
-      const ev = section('この窓の証跡', 'evidence zip · masked · read-only');
-      const evBtn = el('button', 'link-btn ops-btn', '窓全体の証跡を出力');
+      const ev = section('本時間範囲の証跡', 'evidence zip · masked · read-only');
+      const evBtn = el('button', 'link-btn ops-btn', '時間範囲全体の証跡を出力');
       evBtn.type = 'button';
       evBtn.lang = 'ja';
       const evStatus = el('p', 'ops-note ops-status');
@@ -178,7 +178,7 @@ export function correlateView(anchor) {
       const snapL = el('label', 'fld chk');
       const snap = el('input');
       snap.type = 'checkbox';
-      snapL.title = '画面のスナップショット (PNG) を含める: このブラウザで今の画面 (伏せ字済み) を画像にします。項目ごとの「証跡」にも使います';
+      snapL.title = '画面スナップショット (PNG) の同梱: 本ブラウザで現在の画面 (マスク処理済) を画像化。各項目の「証跡」にも適用';
       snapL.append(snap, document.createTextNode(' 画面の画像'));
       snapshotGate(snap, snapL);
       const evRow = el('div', 'filters ops');
@@ -194,7 +194,7 @@ export function correlateView(anchor) {
       render(ctx.nav); // first clip what is shown to the current cursor, before (and whatever comes of) the fetch
       try { await load(false); } catch (e) {
         render(ctx.nav, true);
-        s.status.textContent = `取得できません: ${maskText(String(e.message || e))}`;
+        s.status.textContent = `取得不可: ${maskText(String(e.message || e))}`;
         throw e;
       }
       render(ctx.nav);
@@ -227,7 +227,7 @@ export const SURGE = { factor: 3, min_kbps: 200, baseline: '1h' };
 export function setSurgeConfig(c) {
   if (c && typeof c === 'object') for (const k of Object.keys(SURGE)) if (c[k] !== undefined) SURGE[k] = c[k];
 }
-export const surgeRule = () => `直近 5 分の通信量が ${SURGE.min_kbps} kbps 以上で、平常 (${SURGE.baseline} の中央値、5 分前まで) の ${SURGE.factor} 倍を超えた端末 × 通信先 (国 / ASN)`;
+export const surgeRule = () => `直近 5 分の通信量が ${SURGE.min_kbps} kbps 以上、かつ平常値 (${SURGE.baseline} の中央値、5 分前時点まで) の ${SURGE.factor} 倍超過の端末 × 通信先 (国 / ASN)`;
 // Prometheus results -> [{ host, cc, asn, ratio, bps, base }]
 export function surgeRows(ratio, bps, base) {
   const key = (m) => `${m.src_host}|${m.dst_country}|${m.asn}`;
@@ -247,17 +247,17 @@ export function surgeModal() {
   return {
     title: '急増 (端末 × 通信先)', src: 'prom',
     mount(body) {
-      s = { sum: el('div'), rule: el('p', 'v-p'), list: listSection('急増中', '行を選ぶと、その前後の原因候補を開きます', dv) };
+      s = { sum: el('div'), rule: el('p', 'v-p'), list: listSection('急増中', '行の選択で、当該時刻前後の原因候補を表示', dv) };
       body.append(s.sum, s.rule, s.list.wrap);
     },
     async update(ctx) {
       const sn = ctx.snap;
       const rows = (sn.surges || []).map((r) => ({ ...r, mbps: has(r.bps) ? r.bps / 1e6 : undefined, baseMbps: has(r.base) ? r.base / 1e6 : undefined }));
       putIn(s.sum, tiles([
-        { label: '急増中', value: sn.flowsOk ? rows.length : undefined, d: 0, kind: !sn.flowsOk ? 'unknown' : rows.length ? 'warn' : 'ok', status: !sn.flowsOk ? 'flow data unknown' : rows.length ? '下の一覧' : 'なし' },
-        { label: '判定', value: `×${SURGE.factor}`, sub: `≥ ${SURGE.min_kbps} kbps · 平常 = ${SURGE.baseline} の中央値` },
+        { label: '急増中', value: sn.flowsOk ? rows.length : undefined, d: 0, kind: !sn.flowsOk ? 'unknown' : rows.length ? 'warn' : 'ok', status: !sn.flowsOk ? 'flow data unknown' : rows.length ? '下記一覧' : 'なし' },
+        { label: '判定', value: `×${SURGE.factor}`, sub: `≥ ${SURGE.min_kbps} kbps · 平常値 = ${SURGE.baseline} の中央値` },
       ]));
-      s.rule.textContent = `判定: ${surgeRule()}。閾値は .env の SURGE_FACTOR / SURGE_MIN_KBPS / SURGE_BASELINE です。急増は「いつもより多い」ことだけを示し、問題があるとは限りません。`;
+      s.rule.textContent = `判定: ${surgeRule()}。閾値は .env の SURGE_FACTOR / SURGE_MIN_KBPS / SURGE_BASELINE です。急増は「平常時比の増加」の表示のみで、障害の存在を意味しません。`;
       dv.update(rows, (r) => ctx.nav.correlate({ at: now(), label: `急増 ${r.host} → ${r.cc}`, ctx: { host: r.host, cc: r.cc, asn: r.asn } }));
     },
   };

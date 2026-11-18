@@ -298,8 +298,8 @@ export function renderWlan(snap, seen, nav) {
 
 export const sevKind = (s) => ({ critical: ['crit', 'CRIT'], warning: ['warn', 'WARN'] }[s] || ['info', (s || 'INFO').toUpperCase().slice(0, 4)]);
 
-// notify(alert) -> its notification state (alerting.js notifyState): a fixed-width slot per row (通知済 / 抑止中 /
-// 確認済 / 未通知 / ...), the next repeat time in the large-screen detail line
+// notify(alert) -> its notification state (alerting.js notifyState): a fixed-width slot per row (通知完了 / 抑止中 /
+// 確認完了 / 未通知 / ...), the next repeat time in the large-screen detail line
 export function renderAlerts(alerts, nav, notify) {
   const firing = alerts.filter((a) => a.state === 'firing');
   const rows = firing.map((a) => {

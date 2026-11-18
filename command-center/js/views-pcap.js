@@ -3,7 +3,7 @@
 // aa:bb:cc:xx:xx:xx with an opaque ~token, hex bytes of addresses as "xx"); tokens are only used to build filters.
 // Layout: toolbar (file, upload, display filter, status) -> tabs -> packets (virtual list | detail tree + hex) or
 // statistics (protocols, conversations, endpoints, I/O, names). Opened from GLOBAL TRAFFIC and the destination /
-// source drawers ("この通信のパケット"), which pass a filter and a time window.
+// source drawers ("本通信のパケット"), which pass a filter and a time window.
 import { el, sortTable, lineChart, chartColors, legend, jstFull, jstClock, fmtBytes, has } from './util.js';
 import { promQuery } from './api.js';
 import { lv } from './views-common.js';
@@ -36,7 +36,7 @@ function addrFilter(tokens) {
   for (const x of t) by.set(addrField(x), [...(by.get(addrField(x)) || []), x]);
   return [...by].map(([f, xs]) => (xs.length === 1 ? `${f} == ${xs[0]}` : `${f} in {${xs.join(', ')}}`)).join(' || ');
 }
-// address fields the server's filter allowlist accepts (the tree offers "絞り込む" only for these)
+// address fields the server's filter allowlist accepts (the tree offers "フィルタ" only for these)
 const FILTERABLE = new Set(['ip.addr', 'ip.src', 'ip.dst', 'ipv6.addr', 'ipv6.src', 'ipv6.dst', 'eth.addr', 'eth.src', 'eth.dst',
   'arp.src.proto_ipv4', 'arp.dst.proto_ipv4', 'arp.src.hw_mac', 'arp.dst.hw_mac', 'dns.a', 'dns.aaaa']);
 // opts: { dest: {cc, city, ip}, flows } | { src: host } | {}
@@ -44,18 +44,18 @@ export async function drillFilter(opts) {
   if (opts.dest) {
     const d = opts.dest;
     if (d.ip) {
-      return tokenOf(d.ip) ? { filter: addrFilter([tokenOf(d.ip)]), what: `宛先 ${show(d.ip)}` }
-        : { filter: '', what: `宛先 ${show(d.ip)}`, note: 'この宛先 (IPv6 は /64 で伏せた値) では絞り込めないため、フィルタなしで開きます' };
+      return tokenOf(d.ip) ? { filter: addrFilter([tokenOf(d.ip)]), what: `送信先 ${show(d.ip)}` }
+        : { filter: '', what: `送信先 ${show(d.ip)}`, note: '本送信先 (IPv6 は /64 でマスクした値) ではフィルタ不可のため、フィルタなしで表示します' };
     }
     const ips = [...(opts.flows || [])].filter((f) => f.cc === d.cc && (!d.city || f.city === d.city)).sort((a, b) => b.bps - a.bps).map((f) => tokenOf(f.ip));
     const n = new Set(ips.filter(Boolean)).size;
-    return { filter: addrFilter(ips), what: `宛先 ${d.city ? `${d.city}, ${d.cc}` : d.cc} (${Math.min(n, 15)}${n > 15 ? ` / ${n}` : ''} アドレス)` };
+    return { filter: addrFilter(ips), what: `送信先 ${d.city ? `${d.city}, ${d.cc}` : d.cc} (${Math.min(n, 15)}${n > 15 ? ` / ${n}` : ''} アドレス)` };
   }
   if (opts.src) {
     if (tokenOf(opts.src)) return { filter: addrFilter([opts.src]), what: `送信元 ${show(opts.src)}` };
     const res = await promQuery(`obs_flow_host_info{src_host=${lv(opts.src)}}`).catch(() => []);
     const toks = res.map((r) => tokenOf(r.metric.ip));
-    return { filter: addrFilter(toks), what: `送信元 ${opts.src}`, note: toks.length ? '' : 'このホストのアドレスが分からないため、フィルタなしで開きます' };
+    return { filter: addrFilter(toks), what: `送信元 ${opts.src}`, note: toks.length ? '' : '本ホストのアドレス不明のため、フィルタなしで表示します' };
   }
   return { filter: '', what: '' };
 }
@@ -97,8 +97,8 @@ export function analysisView(init = {}) {
   function handoffFile(files) {
     const f = [...files.ring, ...files.upload, ...files.demo].find((x) => x.id === st.file);
     const ring = f && files.ring.includes(f);
-    ui.handoff.textContent = `引き継ぎ: ${init.what || 'フィルタなし'} · ${spanText()} ${ring ? `のリングファイル: ${fileLabel(f)}`
-      : `のリングファイルはありません · 開いたファイル: ${f ? `${f.kind === 'upload' ? 'アップロード' : 'デモ'} ${fileLabel(f)}` : 'なし'}`}${init.note ? ` · ${init.note}` : ''}`;
+    ui.handoff.textContent = `連携元: ${init.what || 'フィルタなし'} · ${spanText()} ${ring ? `のリングファイル: ${fileLabel(f)}`
+      : `のリングファイルなし · 表示中のファイル: ${f ? `${f.kind === 'upload' ? 'アップロード' : 'デモ'} ${fileLabel(f)}` : 'なし'}`}${init.note ? ` · ${init.note}` : ''}`;
     ui.handoff.classList.toggle('pa-warn', !ring);
   }
 
@@ -124,7 +124,7 @@ export function analysisView(init = {}) {
     const c = files.capture || {};
     ui.capture.textContent = c.state === 'running'
       ? `キャプチャ中: ${c.iface} · NIC の受信ドロップ ${has(c.nic_rx_dropped) ? c.nic_rx_dropped : '—'} · dumpcap の欠落 ${has(c.dumpcap_dropped) ? c.dumpcap_dropped : '—'} · リング ${has(c.ring_bytes) ? fmtBytes(c.ring_bytes) : '—'}`
-      : c.state === 'stopped' ? `キャプチャ停止中${c.error ? `: ${c.error}` : ''}` : 'キャプチャ: 無効 (アップロード・デモの pcap を解析できます)';
+      : c.state === 'stopped' ? `キャプチャ停止中${c.error ? `: ${c.error}` : ''}` : 'キャプチャ: 無効 (アップロード・デモの pcap は解析可能)';
     ui.capture.classList.toggle('pa-warn', c.state === 'stopped');
     ui.del.hidden = !st.file.startsWith('upload:');
   }
@@ -152,9 +152,9 @@ export function analysisView(init = {}) {
     st.stats = null;
     ui.spacer.replaceChildren();
     ui.spacer.style.height = '0px';
-    ui.tree.replaceChildren(el('p', 'na', 'パケットを選ぶと詳細と 16 進表示が出ます'));
+    ui.tree.replaceChildren(el('p', 'na', 'パケット選択で詳細と 16 進ダンプを表示'));
     ui.hex.replaceChildren();
-    if (!st.file || !st.file.includes(':')) { setStatus('—'); setMsg('解析できるファイルがありません。pcap をアップロードしてください'); return; }
+    if (!st.file || !st.file.includes(':')) { setStatus('—'); setMsg('解析可能なファイルなし。pcap をアップロードしてください'); return; }
     setStatus('解析中…');
     setMsg('');
     const my = st.seq;
@@ -162,8 +162,8 @@ export function analysisView(init = {}) {
       const r = await page(0);
       if (!r || my !== st.seq) return;
       setStatus(`${r.total.toLocaleString()} packets${has(r.elapsed_ms) ? ` · tshark ${(r.elapsed_ms / 1000).toFixed(1)} s` : ''}`);
-      if (!r.total) setMsg(st.filter ? 'フィルタに一致するパケットはありません' : 'パケットがありません');
-      if (r.truncated) setMsg(`先頭 ${r.total.toLocaleString()} パケットまで表示しています (上限)。フィルタで絞ってください`, 'warn');
+      if (!r.total) setMsg(st.filter ? 'フィルタに一致するパケットなし' : 'パケットなし');
+      if (r.truncated) setMsg(`先頭 ${r.total.toLocaleString()} パケットまで表示中 (上限)。フィルタで対象を限定してください`, 'warn');
       ui.spacer.style.height = `${r.total * rowH}px`;
       ui.list.scrollTop = 0;
       paint();
@@ -265,7 +265,7 @@ export function analysisView(init = {}) {
       head.addEventListener('focus', () => mark(rec, false));
       if (!n.c) head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') pick(e); });
       if (n.v && TOKEN.test(n.v) && FILTERABLE.has(n.n)) { // an address: offer it as a filter (by its token)
-        const b = el('button', 'link-btn pt-f', '絞り込む');
+        const b = el('button', 'link-btn pt-f', 'フィルタ');
         b.type = 'button';
         b.title = `${n.n} == ${show(n.v)}`;
         b.setAttribute('aria-label', `filter on ${n.n} == ${show(n.v)}`);
@@ -332,7 +332,7 @@ export function analysisView(init = {}) {
     for (let p = 0; p * PAGE < n; p++) rows.push(...((await page(p))?.rows || []));
     download('pcap-packets.csv', [['no', 'time (JST)', 'source', 'destination', 'protocol', 'length', 'info'],
       ...rows.slice(0, n).map(([no, t, a, b, pr, len, info]) => [no, jstFull.format(new Date(t * 1000)), show(a), show(b), pr, len, info])]);
-    if (st.total > n) setMsg(`CSV は先頭 ${n.toLocaleString()} パケットです (全 ${st.total.toLocaleString()})`, 'warn');
+    if (st.total > n) setMsg(`CSV の対象は先頭 ${n.toLocaleString()} パケットです (全 ${st.total.toLocaleString()})`, 'warn');
   }
   function addFilter(expr) {
     const cur = ui.input.value.trim();
@@ -453,10 +453,10 @@ export function analysisView(init = {}) {
       body.append(el('p', 'pa-note', `キャプチャ時刻 ${jstFull.format(new Date(s.t0 * 1000))} – ${jstFull.format(new Date(s.t1 * 1000))} JST · ${s.packets.toLocaleString()} packets / ${fmtBytes(s.bytes)}`));
     } else {
       body = el('div', 'pa-names');
-      for (const [k, title, field] of [['dns', 'DNS 問い合わせ名', 'dns.qry.name'], ['sni', 'TLS SNI', 'tls.handshake.extensions_server_name'], ['http', 'HTTP Host', 'http.host']]) {
+      for (const [k, title, field] of [['dns', 'DNS クエリ名', 'dns.qry.name'], ['sni', 'TLS SNI', 'tls.handshake.extensions_server_name'], ['http', 'HTTP Host', 'http.host']]) {
         const rows = (s.names[k] || []).map(([name, n]) => ({ key: name, name, n }));
         body.append(tableBlock(title, [{ key: 'name', label: 'name (masked)' }, { key: 'n', label: 'packets', num: true }], rows,
-          (r) => (/[\d:]/.test(r.name) ? setMsg(`${r.name}: 数字や : を含む名前はフィルタにできません (伏せ字の部分を試せてしまうため)`, 'warn') : addFilter(`${field} == "${r.name}"`)), `names-${k}`));
+          (r) => (/[\d:]/.test(r.name) ? setMsg(`${r.name}: 数字・「:」を含む名称はフィルタ指定不可 (マスク部分の推測防止のため)`, 'warn') : addFilter(`${field} == "${r.name}"`)), `names-${k}`));
       }
     }
     ui.stats.replaceChildren(body);
@@ -479,21 +479,21 @@ export function analysisView(init = {}) {
     setMsg(`アップロード中: ${file.name} (${fmtBytes(file.size)})…`);
     try {
       const r = await api('upload', { name: file.name }, { method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream', 'X-Obs-Csrf': '1' } });
-      setMsg(`アップロードしました${r.removed?.length ? ` (容量上限のため古いもの ${r.removed.length} 件を削除)` : ''}`);
+      setMsg(`アップロード完了${r.removed?.length ? ` (容量上限のため旧ファイル ${r.removed.length} 件を削除)` : ''}`);
       await loadFiles(r.id);
       run();
     } catch (e) {
-      setMsg(`アップロードできません: ${e.message}`, 'err');
+      setMsg(`アップロード不可: ${e.message}`, 'err');
     }
   }
   async function delUpload() {
     const name = st.file.replace(/^upload:/, '');
     try {
       await api(`upload/${encodeURIComponent(name)}`, null, { method: 'DELETE', headers: { 'X-Obs-Csrf': '1' } });
-      setMsg('削除しました');
+      setMsg('削除完了');
       await loadFiles();
       run();
-    } catch (e) { setMsg(`削除できません: ${e.message}`, 'err'); }
+    } catch (e) { setMsg(`削除不可: ${e.message}`, 'err'); }
   }
 
   return {
@@ -546,7 +546,7 @@ export function analysisView(init = {}) {
       ui.msg.setAttribute('role', 'alert');
       ui.ctx = el('div', 'pa-ctx');
       ui.capture = el('span', 'pa-cap');
-      ui.handoff = el('span', 'pa-handoff', init.what || init.since ? `引き継ぎ: ${init.what || 'フィルタなし'}${init.since ? ` · ${spanText()} のリングファイル` : ''}${init.note ? ` · ${init.note}` : ''}` : '');
+      ui.handoff = el('span', 'pa-handoff', init.what || init.since ? `連携元: ${init.what || 'フィルタなし'}${init.since ? ` · ${spanText()} のリングファイル` : ''}${init.note ? ` · ${init.note}` : ''}` : '');
       ui.ctx.append(ui.handoff, ui.capture);
       ui.tabs = el('div', 'pa-tabs');
       ui.tabs.setAttribute('role', 'tablist');
@@ -589,7 +589,7 @@ export function analysisView(init = {}) {
       ui.packets.append(lw, det);
       ui.stats = el('div', 'pa-stats');
       ui.stats.hidden = true;
-      ui.foot = el('p', 'pa-foot', `IP/MAC は伏せ字です (一覧・詳細・16 進・統計・CSV のすべて)。伏せ字を外す操作は認証の導入までできません。暗号化された中身は解読しません。 · ${ATTRIB}`);
+      ui.foot = el('p', 'pa-foot', `IP/MAC はマスク表示です (一覧・詳細・16 進・統計・CSV の全体)。マスク解除の操作は認証機能の導入まで提供しません。暗号化された内容は解読しません。 · ${ATTRIB}`);
       root.append(bar, ui.msg, ui.ctx, ui.tabs, ui.packets, ui.stats, ui.foot);
       body.append(root);
       rowH = parseFloat(getComputedStyle(ui.list).getPropertyValue('--pa-row')) || 24;
@@ -599,7 +599,7 @@ export function analysisView(init = {}) {
         const m = res.map((r) => `${r.metric.db} ${r.metric.month || '?'}`).join(', ');
         if (m) ui.foot.textContent += ` (DB-IP Lite ${m})`;
       }).catch(() => {});
-      loadFiles(init.file).then(run).catch((e) => { setStatus('—'); setMsg(`ファイル一覧を取得できません: ${e.message}`, 'err'); });
+      loadFiles(init.file).then(run).catch((e) => { setStatus('—'); setMsg(`ファイル一覧の取得不可: ${e.message}`, 'err'); });
       setTimeout(() => ui.input.focus(), 0);
     },
     update() {},

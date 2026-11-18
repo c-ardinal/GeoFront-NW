@@ -1,4 +1,4 @@
-// Alert notifications on the screens: per firing alert its notification state (通知済 / 抑止中 / 確認済 ...) and the next
+// Alert notifications on the screens: per firing alert its notification state (通知完了 / 抑止中 / 確認完了 ...) and the next
 // repeat; ACK / silence controls (alert drawer); the silence list with create / extend / expire (alerts modal).
 // Sources: Alertmanager's alerts and silences (masked, mask-api /am/), notify-relay's records (Loki {job="notify"}),
 // and /am/ops (are writes allowed: only while the screens are on 127.0.0.1, until an authentication layer exists).
@@ -16,7 +16,7 @@ const MAX_S = 7 * 86400 - 120; // mask-api accepts at most 7 days; a little unde
 export const DURATIONS = [['1 h', 3600], ['4 h', 4 * 3600], ['24 h', 86400], ['7 d', MAX_S]];
 
 export const AM = { ok: null, err: '', silences: [], byKey: new Map(), last: new Map(), logOk: false, logAt: 0, forceLog: false, logTruncated: false,
-  ops: { writable: false, reason: '操作の可否を確認中…' } };
+  ops: { writable: false, reason: '操作可否を確認中…' } };
 let changed = () => Promise.resolve();
 export const setOnChange = (fn) => { changed = fn; };
 
@@ -69,7 +69,7 @@ export async function pollAlerting() {
       AM.logTruncated = log.value.entries.length >= LOG_LIMIT; // older records exist but were not loaded
     } else AM.last = new Map(); // never stale "sent"
   }
-  AM.ops = ops.status === 'fulfilled' && ops.value ? ops.value : { writable: false, reason: '操作の可否を確認できません (mask-api に接続できない)' };
+  AM.ops = ops.status === 'fulfilled' && ops.value ? ops.value : { writable: false, reason: '操作可否の確認不能 (mask-api 接続不可)' };
 }
 
 // badge class per state (status is always text too, never colour alone)
@@ -92,7 +92,7 @@ export function notifyState(a, now = Date.now()) {
   const s = sil.find(isAck) || sil[0];
   if (s) { // muted: the last notification is still shown, there is no next one
     const ack = isAck(s);
-    return { kind: ack ? 'acked' : 'silenced', label: ack ? '確認済' : '抑止中', silence: s, until: Date.parse(s.endsAt), ...sent,
+    return { kind: ack ? 'acked' : 'silenced', label: ack ? '確認完了' : '抑止中', silence: s, until: Date.parse(s.endsAt), ...sent,
       text: `${ack ? 'acknowledged' : 'silenced'} · no notifications${ack ? ' until resolved' : ' until the end'}` };
   }
   // without the notification records (Loki failing) nothing is known about delivery: never "sent", "next" or "waiting"
@@ -102,11 +102,11 @@ export function notifyState(a, now = Date.now()) {
   const due = results.filter((r) => r.result === 'ok' && routed.includes(r.receiver) && has(r.repeat_s)).map((r) => (r.t + r.repeat_s) * 1000);
   const next = due.length ? Math.min(...due) : undefined;
   if (results.length) {
-    // 通知済 only when every receiver it is routed to now has a success for this activation
+    // 通知完了 only when every receiver it is routed to now has a success for this activation
     const missing = routed.filter((n) => !results.some((r) => r.receiver === n));
     const kind = failed.length ? 'failed' : missing.length ? 'partial' : 'sent';
     const head = { failed: `${failed.length} of ${results.length} receivers failed`, partial: `no record yet from ${missing.join(', ')}`, sent: 'sent' }[kind];
-    return { kind, label: { failed: '通知失敗', partial: '一部未確認', sent: '通知済' }[kind], next, missing, ...sent,
+    return { kind, label: { failed: '通知失敗', partial: '一部未確認', sent: '通知完了' }[kind], next, missing, ...sent,
       text: `${head}: ${summary}${routed.length ? '' : ' · not routed any more (no repeat)'}` };
   }
   if (AM.logTruncated) return { kind: 'unknown', label: '履歴上限', text: `older notification records not loaded (newest ${LOG_LIMIT} only)` };
@@ -166,7 +166,7 @@ export function alertOpsSection() {
   const form = el('div', 'filters ops');
   const ack = button('確認 (ACK)', 'Acknowledge: stop repeat notifications of this alert until it resolves');
   const dur = select('抑止の期間', DURATIONS, 3600);
-  const scope = select('対象', [['この警報', 'alert'], ['この機器のすべて', 'device'], ['この警報名のすべて', 'name']], 'alert');
+  const scope = select('対象', [['本警報', 'alert'], ['本機器の全警報', 'device'], ['同一警報名の全件', 'name']], 'alert');
   const mute = button('抑止する', 'Silence for the chosen period');
   const unmute = button('抑止を解除', 'Expire the silence / ACK');
   form.append(ack, dur.wrap, scope.wrap, mute, unmute);
@@ -181,7 +181,7 @@ export function alertOpsSection() {
   const all = [ack, mute, unmute, dur.sel, scope.sel];
   let cur = null;
   ack.addEventListener('click', () => act(status, all, () => createSilence({ matchers: alertMatchers(cur.labels, 'alert'),
-    endsAt: iso(Date.now() + ACK_HOURS * 3600e3), comment: 'ACK: repeats stopped until resolved' }), '確認済みにしました (解消まで再通知しません)'));
+    endsAt: iso(Date.now() + ACK_HOURS * 3600e3), comment: 'ACK: repeats stopped until resolved' }), '確認完了に設定 (解消時まで再通知停止)'));
   mute.addEventListener('click', () => act(status, all, () => createSilence({ matchers: alertMatchers(cur.labels, scope.sel.value),
     endsAt: iso(Date.now() + Number(dur.sel.value) * 1000), comment: 'silenced from the command-center' }), '抑止しました'));
   unmute.addEventListener('click', () => act(status, all, () => expireSilence(cur.st.silence.id), '解除しました'));
@@ -206,11 +206,11 @@ export function alertOpsSection() {
       unmute.hidden = !st.silence;
       unmute.disabled = !w || !ours(st.silence);
       scope.sel.querySelector('option[value="device"]').disabled = !a.labels.instance;
-      note.textContent = pb ? '履歴再生中は操作できません (LIVE に戻ってから操作してください)'
-        : !AM.ok ? 'Alertmanager に接続できないため操作できません'
-        : !firing ? '発報中ではないため操作できません (解消済み)'
-          : !AM.ops.writable ? `操作できません: ${AM.ops.reason}`
-            : st.silence && !ours(st.silence) ? 'この抑止は command-center 以外で作られたため、ここでは解除できません' : '';
+      note.textContent = pb ? '履歴再生中は操作不可 (LIVE 復帰後に操作してください)'
+        : !AM.ok ? 'Alertmanager 接続不可のため操作不可'
+        : !firing ? '発報中ではないため操作不可 (解消完了)'
+          : !AM.ops.writable ? `操作不可: ${AM.ops.reason}`
+            : st.silence && !ours(st.silence) ? '本抑止は command-center 以外での作成のため、本画面では解除不可' : '';
       note.hidden = !note.textContent;
       msgWrap.hidden = !st.message;
       if (st.message && msg.textContent !== st.message) msg.textContent = maskText(String(st.message));
@@ -222,8 +222,8 @@ export function alertOpsSection() {
 export function silenceSection({ devices, alertNames }) {
   const s = section('Silences & ACK', '抑止・確認の一覧 · Alertmanager');
   const form = el('form', 'filters ops');
-  const dev = select('機器', [['すべて', ''], ...devices().map((d) => [d, d])], '');
-  const name = select('警報名', [['すべて', '']], '');
+  const dev = select('機器', [['全機器', ''], ...devices().map((d) => [d, d])], '');
+  const name = select('警報名', [['全警報名', '']], '');
   const dur = select('期間', DURATIONS, 3600);
   const cl = el('label', 'fld', 'コメント');
   const comment = el('input');
@@ -246,7 +246,7 @@ export function silenceSection({ devices, alertNames }) {
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     const ms = [...(name.sel.value ? [M('alertname', name.sel.value)] : []), ...(dev.sel.value ? [M('instance', dev.sel.value)] : [])];
-    if (!ms.length) { status.textContent = '機器か警報名のどちらかを選んでください (すべてを抑止することはできません)'; return; }
+    if (!ms.length) { status.textContent = '機器または警報名を選択してください (全件抑止は不可)'; return; }
     act(status, controls, () => createSilence({ matchers: ms, endsAt: iso(Date.now() + Number(dur.sel.value) * 1000),
       comment: comment.value.trim() || 'silenced from the command-center' }), '抑止を作成しました');
   });
@@ -256,12 +256,12 @@ export function silenceSection({ devices, alertNames }) {
       const pb = isPlayback();
       const w = AM.ops.writable && AM.ok && !pb;
       for (const c of controls) c.disabled = !w;
-      note.textContent = pb ? '履歴再生中: 下は現在の抑止・確認の一覧です (操作は LIVE で)' : !AM.ok ? 'Alertmanager に接続できません: 一覧と操作は使えません' : !w ? `操作できません: ${AM.ops.reason}` : '';
+      note.textContent = pb ? '履歴再生中: 下記は現在の抑止・確認の一覧です (操作は LIVE で実施)' : !AM.ok ? 'Alertmanager 接続不可: 一覧表示と操作は利用不可' : !w ? `操作不可: ${AM.ops.reason}` : '';
       note.hidden = !note.textContent;
       const now = Date.now();
       const shown = AM.silences.filter((x) => ['active', 'pending'].includes(x.status?.state)).sort((a, b) => Date.parse(a.endsAt) - Date.parse(b.endsAt));
       const rows = shown.map((x) => silenceRow(x, now, w, status));
-      if (!rows.length) rows.push(el('p', 'na', AM.ok ? '抑止・確認はありません' : '—'));
+      if (!rows.length) rows.push(el('p', 'na', AM.ok ? '抑止・確認なし' : '—'));
       putIn(list, ...rows);
     },
   };

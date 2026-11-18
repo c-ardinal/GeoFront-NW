@@ -10,9 +10,9 @@ import { section, linkBtn } from './views-common.js';
 const SVGNS = 'http://www.w3.org/2000/svg';
 const MIN_SPAN_S = 300;
 export const PRESETS = [['1h', 3600], ['6h', 6 * 3600], ['24h', 86400], ['7d', 7 * 86400], ['30d', 30 * 86400]];
-const GROUPS = [['接続口', /^if_/], ['機器', /^(dev_|wlan_)/], ['外部回線', /^wan_/], ['通信先', /^flow_/], ['パケット取込', /^capture_/]];
-const SCOPE_LABEL = { instance: '機器', ifName: 'IF', dst_country: '国 (2 文字)', asn: 'ASN', src_host: 'LAN の端末' };
-const ALL = { instance: 'すべての機器', ifName: '合計 (全 IF)', dst_country: 'すべて', asn: 'すべて', src_host: 'すべて' };
+const GROUPS = [['接続口', /^if_/], ['機器', /^(dev_|wlan_)/], ['外部回線', /^wan_/], ['通信先', /^flow_/], ['パケットキャプチャ', /^capture_/]];
+const SCOPE_LABEL = { instance: '機器', ifName: 'IF', dst_country: '国 (2 文字)', asn: 'ASN', src_host: 'LAN 端末' };
+const ALL = { instance: '全機器', ifName: '合計 (全 IF)', dst_country: '全件', asn: '全件', src_host: '全件' };
 const PALETTE = ['var(--tr-1)', 'var(--tr-2)', 'var(--tr-3)', 'var(--tr-4)', 'var(--tr-5)', 'var(--tr-6)', 'var(--tr-7)', 'var(--tr-8)', 'var(--tr-9)'];
 
 let familiesP = null; // the allow-list, asked once per page
@@ -69,9 +69,9 @@ export function rangeControl(state, { presets = PRESETS, maxS = Infinity, onChan
   why.setAttribute('role', 'status');
   apply.addEventListener('click', () => {
     const from = fromInput(fi.value), to = Math.min(fromInput(ti.value), now());
-    const bad = !Number.isFinite(from) || !Number.isFinite(to) ? '開始と終了を入れてください'
-      : to - from < MIN_SPAN_S * 1000 ? '期間は 5 分以上にしてください'
-        : to - from > lim() * 1000 ? `期間は ${spanText(lim())}までです` : '';
+    const bad = !Number.isFinite(from) || !Number.isFinite(to) ? '開始と終了を入力してください'
+      : to - from < MIN_SPAN_S * 1000 ? '期間は 5 分以上に設定してください'
+        : to - from > lim() * 1000 ? `期間の上限は ${spanText(lim())}です` : '';
     why.textContent = bad;
     if (bad) return;
     Object.assign(state, { preset: 'custom', from, to });
@@ -189,7 +189,7 @@ export function trendView(init = {}) {
   async function load(force) {
     if (!fam()) return;
     const missing = fam().required.filter((k) => !st.scope[k]);
-    if (missing.length) { show(null, `${missing.map((k) => SCOPE_LABEL[k]).join('・')}を選んでください`); return; }
+    if (missing.length) { show(null, `${missing.map((k) => SCOPE_LABEL[k]).join('・')}を選択してください`); return; }
     const { p, span, t1 } = params();
     // a preset window moves with time (live: the clock, PLAYBACK: the cursor): it is asked again once it has moved by a
     // step, not on every poll; its end is never rounded back (the newest values stay in it)
@@ -198,7 +198,7 @@ export function trendView(init = {}) {
     const key = new URLSearchParams(moving ? { ...rest, span } : p).toString();
     if (!force && key === st.key && st.data && !(moving && Math.abs(t1 - st.lastTo) >= step(span))) return;
     const my = ++st.seq;
-    s.status.textContent = '読み込み中…';
+    s.status.textContent = '読込中…';
     try {
       const d = await getJson(`/trend/series?${new URLSearchParams(p)}`);
       if (my !== st.seq) return;
@@ -208,8 +208,8 @@ export function trendView(init = {}) {
       show(d, '');
     } catch (e) {
       if (my !== st.seq) return;
-      if (st.key !== key) { st.data = null; show(null, `読み込めません: ${e.message}`); } // never another window's lines as this one's
-      else s.status.textContent = `更新できません (前の値を表示中): ${e.message}`;
+      if (st.key !== key) { st.data = null; show(null, `読込不可: ${e.message}`); } // never another window's lines as this one's
+      else s.status.textContent = `更新不可 (前回値を表示中): ${e.message}`;
       throw e;
     }
   }
@@ -224,7 +224,7 @@ export function trendView(init = {}) {
     const sw = el('i', 'tr-sw');
     sw.style.background = PALETTE[i % PALETTE.length];
     b.append(sw, el('span', 'tr-lg-n', ser.label), el('span', 'tr-lg-v', fmtVal(last, st.data.unit)), el('span', 'tr-lg-v', `最大 ${fmtVal(vals.length ? Math.max(...vals) : undefined, st.data.unit)}`));
-    b.setAttribute('aria-label', `${ser.label}: 最新 ${fmtVal(last, st.data.unit)}、最大 ${fmtVal(vals.length ? Math.max(...vals) : undefined, st.data.unit)}。${on ? '表示中、押すと隠す' : '非表示、押すと表示'}`);
+    b.setAttribute('aria-label', `${ser.label}: 最新 ${fmtVal(last, st.data.unit)}、最大 ${fmtVal(vals.length ? Math.max(...vals) : undefined, st.data.unit)}。${on ? '表示中、クリックで非表示' : '非表示、クリックで表示'}`);
     b.addEventListener('click', () => { if (st.hidden.has(ser.key)) st.hidden.delete(ser.key); else st.hidden.add(ser.key); render(); });
     return b;
   }
@@ -253,18 +253,18 @@ export function trendView(init = {}) {
     s.box.classList.toggle('tr-nodata', !any);
     if (!any) {
       chart = null;
-      s.box.replaceChildren(el('div', 'tr-dash', '—'), el('p', 'tr-nd', 'この期間に値がありません (0 ではありません。取得していない指標か、機器・取得元が止まっていた期間です)'));
+      s.box.replaceChildren(el('div', 'tr-dash', '—'), el('p', 'tr-nd', '本期間の数値なし (0 値ではありません。未取得の指標、または機器・取得元の停止期間です)'));
     } else chart = drawChart(s.box, { ...d, step: d.step }, vis, {});
     s.legend.replaceChildren(...d.series.map(legendRow));
     const pts = Math.max(0, ...d.series.map((x) => x.points.length));
-    s.note.textContent = `${spanText(d.to - d.from)} · 刻み ${d.step} 秒 · 1 系列 ${pts} 点 (600 点まで)${d.stacked ? ' · 積み上げ' : ''}${d.folded ? ' · 上位 8 件と「その他」' : ''} · 線の途切れは値なし (0 ではない)`;
+    s.note.textContent = `${spanText(d.to - d.from)} · 間隔 ${d.step} 秒 · 1 系列 ${pts} 点 (600 点まで)${d.stacked ? ' · 積み上げ' : ''}${d.folded ? ' · 上位 8 件と「その他」' : ''} · 線の途切れは数値なし (0 値ではない)`;
     s.box.setAttribute('aria-label', `${d.title}、${jstFull.format(new Date(d.from * 1000))} から ${jstFull.format(new Date(d.to * 1000))}。`
-      + (any ? d.series.map((x) => { const v = x.points.map((p) => p[1]); return `${x.label}: 最新 ${fmtVal(v[v.length - 1], d.unit)}、最大 ${fmtVal(v.length ? Math.max(...v) : undefined, d.unit)}`; }).join('。') : '値なし'));
+      + (any ? d.series.map((x) => { const v = x.points.map((p) => p[1]); return `${x.label}: 最新 ${fmtVal(v[v.length - 1], d.unit)}、最大 ${fmtVal(v.length ? Math.max(...v) : undefined, d.unit)}`; }).join('。') : '数値なし'));
     s.unzoom.disabled = !st.zoom.length;
     readout();
   }
   function show(d, msg) {
-    s.status.textContent = msg || (isPlayback() ? '再生位置までの値' : '');
+    s.status.textContent = msg || (isPlayback() ? '再生位置までの数値' : '');
     if (!d) {
       chart = null;
       s.box.classList.add('tr-nodata');
@@ -277,7 +277,7 @@ export function trendView(init = {}) {
     render();
   }
 
-  // zoom: a stack of windows inside the current one ("拡大を戻す" pops); never shorter than the server's 5 min
+  // zoom: a stack of windows inside the current one ("拡大解除" pops); never shorter than the server's 5 min
   function zoomTo(t0, t1) {
     const cur = windowOf(st);
     let a = t0 * 1000, b = t1 * 1000;
@@ -381,7 +381,7 @@ export function trendView(init = {}) {
       s.scope = el('div', 'tr-scope');
       bar.append(fl, s.scope);
       const range = rangeControl(st, { maxS: 31 * 86400, onChange: () => { st.zoom = []; load(true).catch(() => {}); } });
-      s.unzoom = linkBtn('拡大を戻す', () => { st.zoom.pop(); st.readT = null; render(); load().catch(() => {}); });
+      s.unzoom = linkBtn('拡大解除', () => { st.zoom.pop(); st.readT = null; render(); load().catch(() => {}); });
       s.unzoom.disabled = true;
       const zin = linkBtn('中央を拡大', () => { const w = windowOf(st); const q = (w.to - w.from) / 4; zoomTo((w.from + q) / 1000, (w.to - q) / 1000); });
       const acts = el('div', 'tr-acts');
@@ -400,7 +400,7 @@ export function trendView(init = {}) {
       s.legend.setAttribute('role', 'group');
       s.legend.setAttribute('aria-label', '系列の表示 / 非表示');
       s.note = el('p', 'tr-note');
-      const help = el('p', 'tr-help', 'グラフをドラッグすると、その区間に拡大します。グラフを選んで ← → で値を読めます (Shift で 10 刻み)。凡例を押すと、その系列を隠します。');
+      const help = el('p', 'tr-help', 'グラフのドラッグで当該区間を拡大表示。グラフ選択後に ← → で数値を表示 (Shift で 10 単位移動)。凡例のクリックで当該系列を非表示。');
       sec.body.append(acts, s.status, s.box, s.read, s.legend, s.note, help);
       body.append(bar, range.wrap, sec.wrap);
       wireDrag();
@@ -417,7 +417,7 @@ export function trendView(init = {}) {
         }));
         scopeControls(ctxRef);
         load(true).catch(() => {});
-      }).catch((e) => show(null, `指標の一覧を読めません: ${e.message}`));
+      }).catch((e) => show(null, `指標一覧の読込不可: ${e.message}`));
     },
     async update(ctx) {
       const first = !ctxRef;

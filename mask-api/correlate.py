@@ -39,15 +39,15 @@ SLOTS = threading.BoundedSemaphore(2)  # two windows at a time; more -> 429
 
 # (score, reason): shown on the screen as the ordering rules
 RULES = [
-    (3, "同じ IF", "同じ機器の同じインターフェース (急増は WAN の IF を通る通信として WAN の IF と同じとみなす)"),
-    (3, "同じ通信先", "同じ通信先 (ASN、無ければ国)"),
-    (2, "同じ機器", "同じ機器 (instance / syslog の host)"),
-    (2, "同じ端末", "同じ送信元の端末 (src_host)"),
-    (0, "同時期", "上のどれにも当たらない: 時間が近いだけ"),
+    (3, "同一 IF", "同一機器の同一インターフェース (急増は WAN の IF 経由の通信として WAN の IF と同一扱い)"),
+    (3, "同一通信先", "同一通信先 (ASN、ASN 不明時は国)"),
+    (2, "同一機器", "同一機器 (instance / syslog の host)"),
+    (2, "同一端末", "同一送信元の端末 (src_host)"),
+    (0, "同時期", "上記のいずれにも非該当: 時刻の近接のみ"),
 ]
 RULE_TEXT = [f"関連度 {s}: {name} — {desc}" for s, name, desc in RULES] + [
-    "並べ順: 関連度の高い順、同じ関連度の中は時刻の早い順 (画面で時刻順にも切り替えられます)",
-    "相関の候補であり、原因と断定するものではありません"]
+    "整列順: 関連度の降順、同一関連度内は時刻の昇順 (画面上で時刻順への切替も可能)",
+    "相関候補であり、原因の断定ではありません"]
 
 
 class Refused(ValueError):
@@ -90,15 +90,15 @@ def relate(item, ctx):
     wan = (ctx.get("wan_instance"), ctx.get("wan_ifName")) if ctx.get("wan_instance") and ctx.get("wan_ifName") else None
     here = (ctx.get("instance"), ctx.get("ifName")) if ctx.get("instance") and ctx.get("ifName") else None
     if here and (inst, ifn) == here:
-        why.append((3, "同じ IF"))
+        why.append((3, "同一 IF"))
     elif wan and (item["kind"] == "surge" and here == wan or ctx.get("host") and (inst, ifn) == wan):
-        why.append((3, "同じ IF (WAN 経由)"))
+        why.append((3, "同一 IF (WAN 経由)"))
     if (ctx.get("asn") and item.get("asn") == ctx["asn"]) or (not ctx.get("asn") and ctx.get("cc") and item.get("cc") == ctx["cc"]):
-        why.append((3, "同じ通信先"))
+        why.append((3, "同一通信先"))
     if ctx.get("instance") and inst == ctx["instance"] and not (here and (inst, ifn) == here):
-        why.append((2, "同じ機器"))
+        why.append((2, "同一機器"))
     if ctx.get("host") and item.get("host") == ctx["host"]:
-        why.append((2, "同じ端末"))
+        why.append((2, "同一端末"))
     if not why:
         return 0, ["同時期"]
     return max(s for s, _ in why), [r for _, r in why]
@@ -120,7 +120,7 @@ def series_events(kind, result, t0, t1, step):
             name = " ".join(x for x in (labels.get("alertname"), labels.get("instance"), labels.get("ifName")) if x)
             for a, b, before, ongoing in spans(vals, step, t0, t1):
                 ev = {**base, "kind": "alert", "labels": labels, "severity": labels.get("severity", ""), "alertname": labels.get("alertname", "")}
-                out.append({**ev, "t": a, "state": "firing", "before": before, "title": f"{name} 発火" + (" (窓の開始前から)" if before else "")})
+                out.append({**ev, "t": a, "state": "firing", "before": before, "title": f"{name} 発火" + (" (時間範囲の開始前から継続)" if before else "")})
                 if not ongoing:
                     out.append({**ev, "t": b + step, "state": "resolved", "title": f"{name} 解消"})
         elif kind in ("device", "ifstate"):
@@ -140,7 +140,7 @@ def series_events(kind, result, t0, t1, step):
                 who = {k: m[k] for k in ("src_host", "dst_country", "asn") if m.get(k)}
                 out.append({"kind": "surge", "t": a, "before": before, "ongoing": ongoing, "host": who.get("src_host", ""),
                             "cc": who.get("dst_country", ""), "asn": who.get("asn", ""),
-                            "title": f"急増 {who.get('src_host', '?')} → {who.get('dst_country', '?')} {who.get('asn', '')} (平常の最大 {peak:.1f} 倍)".replace("  ", " ")})
+                            "title": f"急増 {who.get('src_host', '?')} → {who.get('dst_country', '?')} {who.get('asn', '')} (平常値の最大 {peak:.1f} 倍)".replace("  ", " ")})
     return out
 
 
@@ -253,7 +253,7 @@ def answer(req, read_fn=read):
     items = order(events)
     return {"window": {"from": req["from"], "to": req["to"], "at": req["at"]}, "context": req["ctx"], "rules": RULE_TEXT,
             "items": items[:MAX_ITEMS], "total": len(items), "truncated": len(items) > MAX_ITEMS, "partial": sorted(set(partial)),
-            "notice": "相関の候補です (時間が近い・同じ機器などの規則で並べたもの)。原因と断定するものではありません。"}
+            "notice": "相関候補です (時刻の近接・機器の同一性などの規則による整列)。原因の断定ではありません。"}
 
 
 def js(status, obj):
@@ -271,7 +271,7 @@ def handle(method, raw_path):
     except (Refused, M.Rejected) as e:
         return js(400, {"status": "error", "errorType": "rejected", "error": str(e)})
     if not SLOTS.acquire(blocking=False):
-        return js(429, {"status": "error", "errorType": "busy", "error": "原因候補の問い合わせが混んでいます。少し待ってからもう一度"})
+        return js(429, {"status": "error", "errorType": "busy", "error": "原因候補の照会が混雑中です。しばらく待機後に再試行してください"})
     try:
         return js(200, {"status": "success", "data": answer(req)})
     finally:
@@ -294,11 +294,11 @@ def selftest():
     same_dev = {"kind": "syslog", "instance": "rtx1300", "t": 10, "title": "b"}
     surge = {"kind": "surge", "host": "pc-living", "cc": "US", "asn": "AS64502", "t": 40, "title": "c"}
     other = {"kind": "device", "instance": "wlx222", "t": 5, "title": "d"}
-    assert relate(same_if, ctx) == (3, ["同じ IF"]) and relate(same_dev, ctx) == (2, ["同じ機器"])
-    assert relate(surge, ctx) == (3, ["同じ IF (WAN 経由)"]) and relate(other, ctx) == (0, ["同時期"])
+    assert relate(same_if, ctx) == (3, ["同一 IF"]) and relate(same_dev, ctx) == (2, ["同一機器"])
+    assert relate(surge, ctx) == (3, ["同一 IF (WAN 経由)"]) and relate(other, ctx) == (0, ["同時期"])
     # a surge as the moment: the same destination / host rank first, the WAN interface counts as passed
     sctx = {"host": "pc-living", "cc": "US", "asn": "AS64502", "wan_instance": "rtx1300", "wan_ifName": "lan2"}
-    assert relate(surge, sctx) == (3, ["同じ通信先", "同じ端末"]) and relate(same_if, sctx) == (3, ["同じ IF (WAN 経由)"])
+    assert relate(surge, sctx) == (3, ["同一通信先", "同一端末"]) and relate(same_if, sctx) == (3, ["同一 IF (WAN 経由)"])
     assert relate({"kind": "surge", "host": "pc-x", "cc": "US", "asn": "AS1", "t": 0, "title": ""}, sctx) == (0, ["同時期"])  # same country, other ASN
     assert relate({"kind": "surge", "host": "pc-x", "cc": "US", "t": 0, "title": ""}, {"cc": "US"})[0] == 3  # no ASN in the context: country
     # ordering: score first, then time
@@ -336,12 +336,12 @@ def selftest():
     assert ("surge", None) in kinds and ("notify", "firing") in kinds and ("syslog", None) in kinds, kinds
     assert all(i["score"] == 2 for i in out["items"] if i.get("instance") == "wlx222") and out["items"][-1]["kind"] == "surge"  # unrelated last
     assert [i["t"] for i in out["items"] if i["score"] == 2] == sorted(i["t"] for i in out["items"] if i["score"] == 2)
-    assert any(p.startswith("syslog: loki slow") for p in out["partial"]) and "原因と断定" in out["notice"]
+    assert any(p.startswith("syslog: loki slow") for p in out["partial"]) and "原因の断定" in out["notice"]
     # P6: a notify record of an address-valued device carries mask-api's token (notify-relay, shared key): the same device
     tok, other = M.mask_value("192.0.2.10"), M.mask_value("192.0.2.11")
     line = M.mask_line({"job": "notify"}, json.dumps({"alertname": "DeviceDown", "instance": tok, "status": "firing", "receiver": "r", "result": "ok"}))
     ev = loki_events("notify", {"result": [{"stream": {"job": "notify"}, "values": [[str(int(t0 * 1e9)), line]]}]})[0]
-    assert ev["instance"] == tok and relate(ev, {"instance": tok}) == (2, ["同じ機器"]) and relate(ev, {"instance": other}) == (0, ["同時期"]), ev
+    assert ev["instance"] == tok and relate(ev, {"instance": tok}) == (2, ["同一機器"]) and relate(ev, {"instance": other}) == (0, ["同時期"]), ev
     # request checks
     good = f"at={now - 60}&from={now - 660}&to={now}"
     assert parse(good, now)["ctx"] == {}

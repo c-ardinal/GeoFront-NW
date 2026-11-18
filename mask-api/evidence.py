@@ -617,7 +617,7 @@ def snapshot_refused(headers):
     ok, reason = M.writable(headers)
     if not ok:
         return {"status": "error", "errorType": "forbidden",
-                "error": reason.replace("抑止・確認の操作", "スナップショット付きの証跡出力") + "。スナップショットなしで出力できます"}
+                "error": reason.replace("抑止・確認の操作", "スナップショット付きの証跡出力") + "。スナップショットなしでの出力は可能です"}
     if headers.get(M.CSRF_HEADER) != "1" or not M.same_origin(headers):
         return {"status": "error", "errorType": "csrf", "error": "cross-site or scripted request refused (same origin + X-Obs-Csrf required)"}
     return None
@@ -671,10 +671,10 @@ def handle(method, raw_path, headers, gone=None, read_body=None):
     if post and length is None:
         return js(400, {"status": "error", "errorType": "snapshot", "error": f"snapshot: 1 byte to {SNAPSHOT_MAX // 2**20} MiB (Content-Length)"})
     if not LOCK.acquire(blocking=False):
-        return js(429, {"status": "error", "errorType": "busy", "error": "別の証跡出力が実行中です。終わってからもう一度試してください"})
+        return js(429, {"status": "error", "errorType": "busy", "error": "別の証跡出力が実行中です。完了後に再試行してください"})
     try:
         if not allow(time.monotonic()):
-            return js(429, {"status": "error", "errorType": "rate", "error": "証跡出力の回数が多すぎます。1 分待ってください"})
+            return js(429, {"status": "error", "errorType": "rate", "error": "証跡出力の回数が過多です。1 分間待機してください"})
         snap = None
         if post:
             try:
